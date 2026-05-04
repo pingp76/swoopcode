@@ -120,8 +120,10 @@ export function createSubagentToolProvider(deps: {
   permissionManager: PermissionManager;
   /** Hook 运行器：子智能体继承父级 Hook，工具执行前后可观察 */
   hookRunner?: HookRunner;
+  /** Memory hint 摘要（可选），注入子智能体 system prompt，让它知道用户的长期偏好 */
+  memoryHint?: string | null;
 }): SubagentToolProvider {
-  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn, permissionManager, hookRunner } = deps;
+  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn, permissionManager, hookRunner, memoryHint } = deps;
 
   /**
    * executeSubagent — 执行子智能体任务
@@ -157,7 +159,11 @@ export function createSubagentToolProvider(deps: {
       //    子智能体的所有中间消息都只存在于这个 history 中
       //    设置 system prompt hint，帮助子智能体理解如何使用 skill
       const subHistory = createHistory();
-      subHistory.setSystemPrompt(SKILL_SYSTEM_PROMPT_HINT);
+      // 子智能体 system prompt 包含 Skill hint + Memory hint（如果有）
+      // 这样子智能体能了解用户的长期偏好和反馈约定
+      const subParts = [SKILL_SYSTEM_PROMPT_HINT];
+      if (memoryHint) subParts.push(memoryHint);
+      subHistory.setSystemPrompt(subParts.join("\n\n"));
 
       // 2. 获取过滤后的工具注册表
       //    只有 bash + files 四个工具，没有 run_subagent（防递归）和 run_todo_*（防干扰）

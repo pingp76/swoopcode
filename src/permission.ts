@@ -64,6 +64,7 @@ type ToolCategory =
   | "bash"
   | "file-read"
   | "file-write"
+  | "todo"
   | "memory"
   | "skill"
   | "subagent"
@@ -74,7 +75,8 @@ function categorizeTool(toolName: string): ToolCategory {
   if (toolName === "run_bash") return "bash";
   if (toolName === "run_read") return "file-read";
   if (toolName === "run_write" || toolName === "run_edit") return "file-write";
-  if (toolName.startsWith("run_todo_")) return "memory";
+  if (toolName.startsWith("run_todo_")) return "todo";
+  if (toolName.startsWith("run_memory_")) return "memory";
   if (toolName === "run_skill") return "skill";
   if (toolName === "run_subagent") return "subagent";
   return "unknown";
@@ -194,8 +196,21 @@ export function createPermissionManager(
 
       // ── 步骤 4：白名单（无需确认） ──
       if (category === "file-read") return { action: "allow" };
-      if (category === "memory") return { action: "allow" };
+      if (category === "todo") return { action: "allow" };
       if (category === "skill") return { action: "allow" };
+
+      // ── 步骤 4.5：memory 工具权限 ──
+      // run_memory_list/read 无需确认，run_memory_create/delete 所有模式都需确认
+      if (category === "memory") {
+        if (ctx.toolName === "run_memory_list" || ctx.toolName === "run_memory_read") {
+          return { action: "allow" };
+        }
+        // create 和 delete 在所有模式下都 ask（长期记忆影响未来会话）
+        return {
+          action: "ask",
+          message: `Allow memory ${ctx.toolName.replace("run_memory_", "")}: ${String(ctx.args["name"] ?? "")}`,
+        };
+      }
 
       // ── 步骤 5：模式权限检查 ──
 

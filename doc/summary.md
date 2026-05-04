@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + **Memory（长期记忆）**
 
 ## 源码结构
 
@@ -32,13 +32,16 @@ src/
 ├── skills.ts           # Skill 管理器：按需加载的 prompt 扩展（scan/invoke/remove）+ SkillToolProvider
 ├── permission.ts       # 权限管理器：三种模式（plan/auto/default）+ 黑白名单 + 路径边界 + ask 降级
 ├── hooks.ts            # Hook 系统：轻量进程内 Hook（SessionStart / PreToolUse / PostToolUse）+ HookRunner 工厂
+├── memory.ts           # Memory 管理器：跨会话长期记忆（scan/list/read/create/delete/buildPromptSection）
+├── system-prompt.ts    # System Prompt 组合器：动态组合 Skill hint + Memory hint
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
 ├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
 ├── message-block.test.ts # 消息块测试（24 个测试用例）
 ├── compressor.test.ts    # 压缩器测试（21 个测试用例）
-├── permission.test.ts   # 权限管理器测试（39 个测试用例）
+├── permission.test.ts   # 权限管理器测试（47 个测试用例）
 ├── hooks.test.ts        # Hook Runner 单元测试（11 个测试用例）
-├── agent.test.ts        # Agent Hook 集成测试（6 个测试用例）
+├── agent.test.ts        # Agent Hook 集成测试（7 个测试用例）
+├── memory.test.ts       # Memory 管理器测试（40 个测试用例）
 ├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
 ├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
 ├── normalize.test.ts   # 消息标准化测试
@@ -53,7 +56,9 @@ src/
     ├── files.test.ts   # 文件操作工具测试
     ├── subagent.ts     # 子智能体工具：run_subagent（独立上下文 + skill 支持 + 独立压缩器）
     ├── subagent.test.ts # 子智能体工具测试（13 个测试用例）
-    └── registry.ts     # 工具注册表（bash + files + todo + subagent + skill 工具）
+    ├── memory.ts       # Memory 工具提供者：run_memory_create/list/read/delete（4 个工具）
+    ├── memory.test.ts  # Memory 工具测试（2 个测试用例）
+    └── registry.ts     # 工具注册表（bash + files + todo + subagent + skill + memory 工具）
 skills/
 ├── code-review/
 │   └── SKILL.md        # 代码审查 skill（示例）
@@ -194,6 +199,20 @@ skills/
 - **子智能体继承**：子智能体共享父级 hookRunner 实例
 - **PreToolUse 在权限检查之后触发**：Hook 不负责安全逻辑，权限系统仍然是独立的安全门卫
 
+### Memory 长期记忆 (`memory.ts` + `tools/memory.ts` + `system-prompt.ts`)
+- **跨会话持久化**：每条 memory 是独立 Markdown 文件，存放在 `memory/` 目录（frontmatter + body）
+- **四种类型**：user（偏好）、feedback（纠正）、project（约定）、reference（外部资源）
+- **MemoryManager**：scan/list/read/create/findSimilar/delete/buildPromptSection/rebuildIndex
+- **4 个工具**：run_memory_create、run_memory_list、run_memory_read、run_memory_delete
+- **权限规则**：list/read 无需确认；create/delete 所有模式都需用户确认（长期记忆影响未来会话）
+- **自动索引**：MEMORY.md 由 create/delete 自动重建，不手写维护
+- **教学版去重**：run_memory_create 写入前调用 findSimilar；不同名但疑似重复时默认拒绝新建，提示复用旧 name、询问用户是否删除旧 memory，或在用户明确要求保留两条时使用 `allow_duplicate: true`
+- **System Prompt 注入**：通过 SystemPromptProvider 每轮动态组合 Skill hint + Memory hint
+- **忽略 memory**：用户说"忽略 memory"时，该轮不注入 Memory hint
+- **复用 parseFrontmatter**：直接复用 skills.ts 的 frontmatter 解析器
+- **REPL 命令**：`/memory list`（列出）、`/memory show <name>`（查看）、`/memory remove <name>`（删除）、`/memory reload`（重载）
+- **子智能体隔离**：子智能体不包含 memory 工具，不能直接操作长期记忆
+
 ### 终端封装 (`terminal.ts`)
 - **统一 readline 接口**：REPL 读取和权限确认共享同一个 `readline.Interface`
 - `question(prompt)`：用于 REPL 输入
@@ -236,6 +255,7 @@ skills/
 | `COMPRESS_DECAY_PREVIEW` | 衰减后保留 token 数 | `100` |
 | `COMPRESS_MAX_CONTEXT` | 全量压缩 token 阈值 | `80000` |
 | `COMPACT_KEEP_RECENT` | 全量压缩保留消息块数 | `4` |
+| `MEMORY_DIR` | Memory 文件目录（相对 agentRoot） | `memory` |
 
 ## 测试覆盖
 
@@ -251,9 +271,11 @@ skills/
 | `src/skills.test.ts` | 25 | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量 |
 | `src/message-block.test.ts` | 24 | 消息块分组、还原、_round 传递与清除、round-trip 一致性、token 估算 |
 | `src/compressor.test.ts` | 21 | 衰减压缩、即时压缩（含非压缩工具通过）、全量压缩、状态管理、cleanup |
-| `src/permission.test.ts` | 39 | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承 |
+| `src/permission.test.ts` | 47 | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory 工具权限 |
 | `src/hooks.test.ts` | 11 | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner |
-| `src/agent.test.ts` | 6 | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序 |
+| `src/agent.test.ts` | 7 | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序 |
+| `src/memory.test.ts` | 40 | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar |
+| `src/tools/memory.test.ts` | 2 | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复 |
 | `src/index.test.ts` | 1 | 占位 |
 
 ## 设计模式
@@ -269,6 +291,7 @@ skills/
 - **延迟注入**：Hook 的 exitCode 2 消息在所有 tool_result 写完后统一追加为 user 消息，避免破坏 tool_call/tool_result 配对
 - **权限继承**：子智能体共享父级 PermissionManager 实例，ask 决策因无回调降级为 deny
 - **终端共享**：REPL 和权限确认通过 Terminal 共享同一个 readline 实例，避免 stdin 冲突
+- **System Prompt 动态组合**：SystemPromptProvider 每轮 run() 时重新构建 system prompt，反映最新的 memory/skill 状态
 
 ## 重构经验
 
@@ -300,7 +323,6 @@ skills/
 （按需在后续 lesson 中实现，完成后更新此列表）
 
 - 流式输出（streaming response）
-- 多轮对话中的 system prompt 管理
 - 更丰富的工具集（grep、glob、web fetch 等）
 - Skill 脚本执行支持（dependencies 字段、base path 引用脚本）
 - 用户级 skill 目录（`~/.claude/skills/`）

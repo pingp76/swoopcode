@@ -17,6 +17,7 @@
 import type { Logger } from "./logger.js";
 import type { createSkillManager } from "./skills.js";
 import type { PermissionManager, PermissionMode } from "./permission.js";
+import type { MemoryManager } from "./memory.js";
 
 // ---------------------------------------------------------------------------
 // 类型定义
@@ -194,6 +195,90 @@ export function createModeCliCommand(
       permissionManager.setMode(subcommand as PermissionMode);
       logger.info("Mode switched to %s", subcommand);
       console.log(`Mode switched to ${subcommand}.`);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// /memory 命令
+// ---------------------------------------------------------------------------
+
+/**
+ * createMemoryCliCommand — 创建 /memory CLI 命令
+ *
+ * 直接操作 MemoryManager，不经过 LLM：
+ * - /memory list          显示所有 memory 摘要
+ * - /memory show <name>   显示单条 memory 完整内容
+ * - /memory remove <name> 删除一条 memory
+ * - /memory reload        重新扫描 memory/ 目录并重建索引
+ */
+export function createMemoryCliCommand(
+  manager: MemoryManager,
+  logger: Logger,
+): CliCommand {
+  return {
+    name: "memory",
+    handler(args: string[]): void {
+      const subcommand = args[0];
+
+      switch (subcommand) {
+        case "list": {
+          const metas = manager.list();
+          if (metas.length === 0) {
+            console.log("No memories stored.");
+          } else {
+            console.log("Memory:");
+            for (const m of metas) {
+              console.log(`  - ${m.name}: ${m.description} [${m.type}]`);
+            }
+          }
+          break;
+        }
+        case "show": {
+          const name = args[1];
+          if (!name) {
+            console.log("Usage: /memory show <name>");
+            break;
+          }
+          const entry = manager.read(name);
+          if (!entry) {
+            console.log(`Memory "${name}" not found.`);
+          } else {
+            console.log(`[${entry.meta.type}] ${entry.meta.name}`);
+            console.log(`Description: ${entry.meta.description}`);
+            console.log(`Created: ${entry.meta.createdAt}`);
+            console.log(`Updated: ${entry.meta.updatedAt}`);
+            console.log("---");
+            console.log(entry.body);
+          }
+          break;
+        }
+        case "remove": {
+          const name = args[1];
+          if (!name) {
+            console.log("Usage: /memory remove <name>");
+            break;
+          }
+          const removed = manager.delete(name);
+          if (removed) {
+            logger.info("Memory removed: %s", name);
+            console.log(`Memory "${name}" removed.`);
+          } else {
+            console.log(`Memory "${name}" not found.`);
+          }
+          break;
+        }
+        case "reload": {
+          manager.scan();
+          manager.rebuildIndex();
+          const count = manager.list().length;
+          logger.info("Memory reloaded: %d entries", count);
+          console.log(`Reloaded memory: ${count} entry(s).`);
+          break;
+        }
+        default:
+          console.log("Usage: /memory <list|show <name>|remove <name>|reload>");
+      }
     },
   };
 }

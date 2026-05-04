@@ -37,6 +37,7 @@ import type { TodoManager } from "./todo.js";
 import type { ContextCompressor } from "./compressor.js";
 import type { PermissionManager, AskUserFn } from "./permission.js";
 import type { HookRunner } from "./hooks.js";
+import type { SystemPromptProvider } from "./system-prompt.js";
 import { createNoopHookRunner } from "./hooks.js";
 import { normalizeMessages } from "./normalize.js";
 import {
@@ -87,6 +88,8 @@ export function createAgent(deps: {
   askUserFn?: AskUserFn;
   /** Hook 运行器（可选，不传时使用空操作 runner，不触发任何 Hook） */
   hookRunner?: HookRunner;
+  /** System prompt 提供者（可选，传入后每轮 run() 动态更新 system prompt） */
+  systemPromptProvider?: SystemPromptProvider;
 }): Agent {
   const {
     llm,
@@ -100,6 +103,7 @@ export function createAgent(deps: {
     permissionManager,
     askUserFn,
     hookRunner,
+    systemPromptProvider,
   } = deps;
 
   // 没有传入 hookRunner 时使用空操作实现，避免所有调用处都要做 if 判断
@@ -499,6 +503,13 @@ export function createAgent(deps: {
      */
     async run(query) {
       logger.info("User query: %s", query);
+
+      // 每轮动态更新 system prompt（如果有 provider）
+      // memory 文件可能在运行时新增/删除，下一轮就会反映在 system prompt 中
+      if (systemPromptProvider) {
+        const prompt = systemPromptProvider.build(query);
+        history.setSystemPrompt(prompt ?? "");
+      }
 
       // SessionStart Hook：在用户消息写入之前触发
       // 必须在 appendMessage 之前，否则 block 时 user 消息已经写入 history，

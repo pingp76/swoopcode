@@ -373,3 +373,61 @@ describe("subagent permission inheritance", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// memory 工具权限
+// ---------------------------------------------------------------------------
+
+describe("memory tools", () => {
+  it("allows run_memory_list in default mode", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    expect(pm.check(ctx("run_memory_list")).action).toBe("allow");
+  });
+
+  it("allows run_memory_read in default mode", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    expect(pm.check(ctx("run_memory_read", { name: "test" })).action).toBe("allow");
+  });
+
+  it("asks for run_memory_create in default mode", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    const decision = pm.check(ctx("run_memory_create", { name: "test" }));
+    expect(decision.action).toBe("ask");
+    if (decision.action === "ask") {
+      expect(decision.message).toContain("memory");
+    }
+  });
+
+  it("asks for run_memory_delete in default mode", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    const decision = pm.check(ctx("run_memory_delete", { name: "test" }));
+    expect(decision.action).toBe("ask");
+  });
+
+  it("asks for run_memory_create in auto mode", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    pm.setMode("auto");
+    const decision = pm.check(ctx("run_memory_create", { name: "test" }));
+    expect(decision.action).toBe("ask");
+  });
+
+  it("asks for run_memory_delete in auto mode", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    pm.setMode("auto");
+    const decision = pm.check(ctx("run_memory_delete", { name: "test" }));
+    expect(decision.action).toBe("ask");
+  });
+
+  it("asks for run_memory_create in plan mode", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    pm.setMode("plan");
+    const decision = pm.check(ctx("run_memory_create", { name: "test" }));
+    expect(decision.action).toBe("ask");
+  });
+
+  it("allows run_memory_list in plan mode", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    pm.setMode("plan");
+    expect(pm.check(ctx("run_memory_list")).action).toBe("allow");
+  });
+});

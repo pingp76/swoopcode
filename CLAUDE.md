@@ -1,105 +1,131 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is the project-level instruction file for coding agents working in this repository.
 
-## Project Overview
+## Project Identity
 
-A teaching-purpose coding agent built in TypeScript. The goal is to demonstrate how a coding agent (like Claude Code) works internally — with clear, well-documented code that prioritizes readability over production complexity.
+This is a teaching-purpose TypeScript coding agent. The goal is to demonstrate how a coding agent works internally with clear, well-documented code that prioritizes readability over production complexity.
 
-Design documents live in `doc/`.
+Design documents live in `doc/`. The current project state lives in `doc/summary.md`.
 
-**重要：** 这是一个系列递进的教学项目。每次编写新功能模块时，必须先读取 `doc/summary.md` 了解当前项目状态。每次完成代码后，按需更新 `doc/summary.md`。
-用户可能会指示先分析和优化设计文档，此时不要开始计划和编码。
-不要阅读“TODO.md”文件，因为这是未来添加的功能设想。
+## Required Startup Context
+
+Before working in this repository:
+
+1. Read `CLAUDE.md`.
+2. Read `doc/summary.md` to understand the current implemented state.
+3. If the task references a design document, read that document before changing code.
+
+Do not read `TODO.md`. It contains future feature ideas and should not influence current work.
+
+If the user asks to review, analyze, or optimize a design document, do not start coding unless the user explicitly asks for implementation.
+
+## External Documentation
+
+When implementing code that depends on external libraries, frameworks, SDKs, APIs, CLI tools, or cloud services, use Context7 to fetch current documentation before coding.
+
+Do not use Context7 for ordinary refactors, business logic debugging, code review, or general TypeScript concepts.
 
 ## Commands
 
 ```bash
-npm run build          # Compile TS → dist/
-npm run dev            # Run with tsx watch (hot reload)
-npm test               # Run tests once (vitest)
+npm run build          # Compile TS to dist/
+npm run dev            # Run with tsx watch
+npm test               # Run all tests once
 npm run test:watch     # Run tests in watch mode
-npm run test:coverage  # Run tests with coverage report
+npm run test:coverage  # Run tests with coverage
 npm run typecheck      # Type-check without emitting
-npm run lint           # Lint with eslint
+npm run lint           # Run eslint
 npm run format         # Format with prettier
-npm run format:check   # Check formatting without writing
+npm run format:check   # Check formatting
 ```
 
-Run a single test file: `npx vitest run src/path/to/file.test.ts`
+Run one test file:
 
-## TypeScript Configuration
+```bash
+npx vitest run src/path/to/file.test.ts
+```
 
-- **ESM only** (`"type": "module"` in package.json, `module: "NodeNext"`)
-- **Strict mode** enabled with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`
-- Import `.js` extensions in imports (NodeNext requirement): `import { foo } from "./foo.js"`
-- Path alias: `@/*` maps to `src/*`
-- Target: ES2022 / Node >= 20
+Run eslint on one file:
 
-## Architecture
+```bash
+npx eslint src/path/to/file.ts
+```
 
-Source code is in `src/`. Key modules (to be built):
+## TypeScript Rules
 
-- **Agent loop** (`agent.ts`) — orchestrates the think → act → observe cycle
-- **Tools** (`tools/`) — bash shell execution with dangerous command filtering
-- **LLM client** (`llm.ts`) — OpenAI SDK 封装，通过自定义 baseURL 接入 MiniMax API
-- **Message/history** (`history.ts`) — manages conversation context
-- **Config** (`config.ts`) — 从 .env 加载配置
-- **Logger** (`logger.ts`) — 可调级别的日志工具
+- ESM only: `"type": "module"` in `package.json`, `module: "NodeNext"`.
+- Use `.js` extensions in local imports: `import { foo } from "./foo.js"`.
+- Strict mode is enabled, including `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.
+- Path alias: `@/*` maps to `src/*`.
+- Target: ES2022 / Node.js >= 20.
+- Use named exports. Avoid default exports.
+- Use `interface` for object shapes and `type` for unions/intersections.
+- Prefer `async/await` over raw promise chains.
 
-## Conventions
+## Code Style
 
-- All source in `src/`, tests co-located as `*.test.ts`
-- Use named exports; avoid default exports
-- Use `interface` for object shapes, `type` for unions/intersections
-- Prefer `async/await` over raw promises
-- **所有生成或修改的代码必须包含详细的中文注释**，解释每段逻辑的目的和原理，便于学习理解
+- All source code lives in `src/`.
+- Tests are co-located as `*.test.ts`.
+- All generated or modified code must include detailed Chinese comments explaining the purpose and principle of each important block. This is a teaching project.
+- Keep changes surgical. Do not refactor unrelated code.
+- Match existing local style even if a different style would also work.
+- Do not introduce speculative abstractions or configurability.
 
-## Coding Guidelines (Karpathy)
+## Architecture Pointers
 
-Behavioral guidelines derived from [Andrej Karpathy's observations](https://x.com/karpathy/status/2015883857489522876) on LLM coding pitfalls. These bias toward caution over speed — for trivial tasks, use judgment.
+Use `doc/summary.md` as the source of truth for the current architecture and implemented modules. Do not duplicate the full module list here, because it changes after each lesson.
 
-### 1. Think Before Coding
+Stable architectural conventions:
 
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
+- `index.ts` is the composition root. Create shared instances there and pass them by dependency injection.
+- `agent.ts` owns the main think-act-observe loop.
+- Tools are registered through `tools/registry.ts`.
+- Tool names use the `run_` prefix and lowercase names.
+- State-bearing modules use `createXxx()` factory functions and keep internal state in closures.
+- Permission checks happen before tool execution.
+- Subagents must inherit shared dependencies intentionally, not recreate them by accident.
 
-- State assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them — don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+## Design-Doc Workflow
 
-### 2. Simplicity First
+When implementing from a design document:
 
-**Minimum code that solves the problem. Nothing speculative.**
+1. Extract every concrete requirement into a checklist before coding.
+2. Implement against that checklist.
+3. After coding, verify each item line by line against the design document.
+4. Update `doc/summary.md` when the implemented project state changes.
 
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
+Common failure mode: reading a design document once, then implementing from memory. Do not do that.
 
-Ask: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+## Validation Rules
 
-### 3. Surgical Changes
+Reader and writer rules must be symmetric:
 
-**Touch only what you must. Clean up only your own mess.**
+- If a parser rejects a format, the writer must reject or normalize that format before saving.
+- If a file name and file content share an identity field, one module must explicitly verify they match.
+- If a feature is wired into the main agent path, also check secondary paths: subagents, hooks, permissions, CLI commands, system prompt composition, and filtered tool registries.
 
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it — don't delete it.
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
+Shared instances must be literally shared:
 
-Every changed line should trace directly to the user's request.
+- Create shared dependencies once in `index.ts`.
+- Pass the same object to every consumer that should share state.
+- Do not call the same factory twice just because the arguments are identical.
 
-### 4. Goal-Driven Execution
+For functions with multiple return paths:
 
-**Define success criteria. Loop until verified.**
+- Walk every branch.
+- Check what state is left behind.
+- Ask what happens if the function is called again immediately.
 
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
+## Completion Gates
 
-For multi-step tasks, state a plan with verification at each step.
+For code changes, run the smallest useful verification first, then broaden:
+
+1. `npm run typecheck`
+2. Relevant `npx vitest run ...` test files
+3. `npm test` when the change touches shared behavior
+4. `npx eslint <changed-files>` or `npm run lint`
+
+Do not mark a changed file as done while it still has eslint errors introduced by the change.
+
+If repository-wide lint has pre-existing failures, report them separately and make clear whether the changed files are clean.

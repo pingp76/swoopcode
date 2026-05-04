@@ -35,10 +35,14 @@ import {
   createCliCommandRegistry,
   createSkillCliCommand,
   createModeCliCommand,
+  createMemoryCliCommand,
 } from "./cli-commands.js";
 import { createTerminal } from "./terminal.js";
 import { createPermissionManager } from "./permission.js";
 import { createHookRunner } from "./hooks.js";
+import { createMemoryManager } from "./memory.js";
+import { createMemoryToolProvider } from "./tools/memory.js";
+import { createSystemPromptProvider } from "./system-prompt.js";
 
 /**
  * main — 主函数
@@ -80,6 +84,19 @@ async function main() {
 
   // 9. 创建 skill 工具提供者
   const skillProvider = createSkillToolProvider(skillManager);
+
+  // 9.5. 创建 Memory 管理器并扫描 memory/ 目录
+  const memoryDir = resolve(process.cwd(), process.env["MEMORY_DIR"] ?? "memory");
+  const memoryManager = createMemoryManager({ memoryDir, logger });
+  if (existsSync(memoryDir)) {
+    memoryManager.scan();
+    logger.info("Loaded %d memories", memoryManager.list().length);
+  } else {
+    logger.info("No memory/ directory found, memory system initialized empty");
+  }
+
+  // 9.6. 创建 memory 工具提供者
+  const memoryProvider = createMemoryToolProvider(memoryManager);
 
   // 10. 创建 Hook Runner（注册三个教学演示 handler，仅打印日志不修改对话）
   //     父子 Agent 共享同一个实例，确保子智能体继承父级 Hook
@@ -138,11 +155,12 @@ async function main() {
     llm,
     logger,
     createFilteredRegistry: () =>
-      createToolRegistry(undefined, undefined, skillProvider),
+      createToolRegistry(undefined, undefined, skillProvider, memoryProvider),
     createAgentFn: createAgent,
     createCompressorFn: () => createContextCompressor(config.compression),
     permissionManager,
     hookRunner,
+    memoryHint: memoryManager.buildPromptSection(),
   });
 
   // 12. 创建工具注册表
@@ -150,17 +168,26 @@ async function main() {
     todoManager,
     subagentProvider,
     skillProvider,
+    memoryProvider,
   );
 
-  // 13. 设置 system prompt（有 skill 时才注入）
-  if (skillManager.listMeta().length > 0) {
-    history.setSystemPrompt(SKILL_SYSTEM_PROMPT_HINT);
+  // 13. 创建 System Prompt Provider（组合 Skill hint 和 Memory hint）
+  //     每轮 run() 时动态生成 system prompt，反映最新的 memory 状态
+  const systemPromptProvider = createSystemPromptProvider({
+    getSkillHint: () =>
+      skillManager.listMeta().length > 0 ? SKILL_SYSTEM_PROMPT_HINT : null,
+    getMemoryHint: () => memoryManager.buildPromptSection(),
+  });
+  // 设置初始 system prompt（后续每轮由 agent 动态更新）
+  const initialPrompt = systemPromptProvider.build("");
+  if (initialPrompt) {
+    history.setSystemPrompt(initialPrompt);
   }
 
   // 14. 创建上下文压缩器
   const compressor = createContextCompressor(config.compression);
 
-  // 15. 创建 Agent（注入权限管理器、确认回调和 Hook Runner）
+  // 15. 创建 Agent（注入权限管理器、确认回调、Hook Runner 和 System Prompt Provider）
   const agent = createAgent({
     llm,
     history,
@@ -172,12 +199,14 @@ async function main() {
     permissionManager,
     askUserFn: terminal.askUser.bind(terminal),
     hookRunner,
+    systemPromptProvider,
   });
 
-  // 15. 注册 CLI 命令
+  // 16. 注册 CLI 命令
   const commandRegistry = createCliCommandRegistry();
   commandRegistry.register(createSkillCliCommand(skillManager, logger));
   commandRegistry.register(createModeCliCommand(permissionManager, logger));
+  commandRegistry.register(createMemoryCliCommand(memoryManager, logger));
 
   // 16. 创建并启动 REPL
   const repl = createRepl({ agent, logger, commands: commandRegistry, terminal });
