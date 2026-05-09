@@ -76,6 +76,9 @@ export interface ToolRegistry {
  *
  * 使用 Map 存储已注册的工具，以工具名为 key，ToolEntry 为 value。
  * Map 查找是 O(1) 的，比遍历数组更高效。
+ *
+ * 【稳定性要求】同一个进程内，多次 getToolDefinitions() 返回相同顺序。
+ * 重复注册同名工具会抛错。CLI 命令不得在会话中途修改已注册工具定义。
  */
 export function createToolRegistry(
   todoProvider?: TodoToolProvider,
@@ -85,17 +88,25 @@ export function createToolRegistry(
 ): ToolRegistry {
   // 工具映射表：工具名 → 工具注册项
   const tools = new Map<string, ToolEntry>();
+  // 按注册顺序维护的数组，保证 getToolDefinitions() 输出顺序稳定
+  const orderedEntries: ToolEntry[] = [];
 
   /**
    * register — 注册一个工具
    *
    * 从工具定义中提取函数名作为 Map 的 key，
    * 将定义和执行函数一起存储。
+   *
+   * 同名工具重复注册会抛错，防止意外覆盖导致行为不一致。
    */
   function register(entry: ToolEntry): void {
     const name = entry.definition.function?.name;
     if (!name) throw new Error("Tool definition must have a function name");
+    if (tools.has(name)) {
+      throw new Error(`Tool "${name}" is already registered`);
+    }
     tools.set(name, entry);
+    orderedEntries.push(entry);
   }
 
   // 注册 bash 工具
@@ -165,8 +176,9 @@ export function createToolRegistry(
 
   return {
     // 返回所有工具的定义列表，用于传给 LLM API
+    // 使用 orderedEntries 保证顺序稳定，不因 Map 内部实现而变化
     getToolDefinitions() {
-      return [...tools.values()].map((t) => t.definition);
+      return orderedEntries.map((t) => t.definition);
     },
 
     // 根据工具名查找执行函数，找不到返回 undefined

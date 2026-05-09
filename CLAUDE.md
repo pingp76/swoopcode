@@ -16,7 +16,7 @@ Before working in this repository:
 2. Read `doc/summary.md` to understand the current implemented state.
 3. If the task references a design document, read that document before changing code.
 
-Do not read `TODO.md`. It contains future feature ideas and should not influence current work.
+Do not read `TODO.md`, `doc/todo.md`. It contains future feature ideas and should not influence current work.
 
 If the user asks to review, analyze, or optimize a design document, do not start coding unless the user explicitly asks for implementation.
 
@@ -96,6 +96,15 @@ When implementing from a design document:
 4. Update `doc/summary.md` when the implemented project state changes.
 
 Common failure mode: reading a design document once, then implementing from memory. Do not do that.
+
+## Cache-Friendly Design Constraints
+
+When adding new features, prioritize prompt cache prefix stability:
+
+- Do not modify system prompt mid-session.
+- Do not change tool definitions mid-session.
+- Express dynamic state changes via message reminders, not system prompt rewrites.
+- Fork-style requests (subagents, future compaction) should reuse the parent's stable prefix.
 
 ## Validation Rules
 

@@ -1,19 +1,18 @@
 /**
- * system-prompt.ts — System Prompt 组合器
+ * system-prompt.ts — System Prompt 组合器（Cache-Ready 版本）
  *
- * 职责：将多个 system prompt 片段（Skill hint、Memory hint 等）组合成最终的 system prompt。
+ * 职责：将 system prompt 分为三层管理，保证 prompt cache 前缀稳定：
+ * 1. Static — 进程启动后固定不变
+ * 2. Session Snapshot — 会话内固定，显式 refresh 才变化
+ * 3. Turn Reminder — 单轮动态，通过 user message 注入
  *
- * 为什么需要组合器？
- * - 之前 system prompt 只包含 Skill hint，直接在 index.ts 中通过 history.setSystemPrompt() 设置
- * - 新增 Memory 后，system prompt 需要同时包含 Skill hint 和 Memory hint
- * - Memory hint 可能需要按用户请求动态排除（用户说"忽略 memory"时）
- * - 组合器统一管理这些片段的拼接逻辑
- *
- * 设计模式：
- * - SystemPromptProvider 每轮调用 build(query) 时重新生成 system prompt
- * - 这样 memory 文件在运行时新增/删除后，下一轮就能反映变化
- * - 比启动时写死静态 system prompt 更灵活
+ * 核心原则：
+ * - 不要在每轮 run() 中重建 system prompt
+ * - 动态状态变化（如忽略 memory）通过 <system-reminder> 消息表达
+ * - Session Snapshot 只在启动或显式 /prompt refresh 时更新
  */
+
+import type { SessionReminder } from "./session-events.js";
 
 // ============================================================================
 // 类型定义
@@ -27,15 +26,30 @@ export interface SystemPromptParts {
   memoryHint?: string | null;
 }
 
-/** System Prompt 提供者接口 */
+/** System prompt 稳定快照 */
+export interface SystemPromptSnapshot {
+  /** 组合后的完整 system prompt */
+  systemPrompt: string | null;
+  /** 当前 snapshot 中的 skill hint（用于调试） */
+  skillHint: string | null;
+  /** 当前 snapshot 中的 memory hint（用于调试） */
+  memoryHint: string | null;
+}
+
+/** 本轮 prompt 上下文 */
+export interface TurnPromptContext {
+  /** 用户当前输入 */
+  query: string;
+}
+
+/** System Prompt 提供者接口（Cache-Ready） */
 export interface SystemPromptProvider {
-  /**
-   * 根据当前用户查询构建 system prompt
-   *
-   * @param query - 用户当前输入
-   * @returns 组合后的 system prompt，没有片段时返回 null
-   */
-  build(query: string): string | null;
+  /** 获取当前稳定快照（不会自动刷新） */
+  getSnapshot(): SystemPromptSnapshot;
+  /** 显式刷新快照，重新读取 Skill/Memory */
+  refreshSnapshot(): SystemPromptSnapshot;
+  /** 根据本轮 query 构建 turn reminders（不改变 system prompt） */
+  buildTurnReminders(ctx: TurnPromptContext): SessionReminder[];
 }
 
 // ============================================================================
@@ -63,31 +77,71 @@ export function buildSystemPrompt(parts: SystemPromptParts): string | null {
 // ============================================================================
 
 /**
- * createSystemPromptProvider — 创建 SystemPromptProvider 实例
+ * 匹配用户要求忽略 memory 的各种表达：
+ * "忽略 memory"、"不要使用 memory"、"本轮不要使用 memory"、
+ * "不使用 memory"、"ignore memory"、"don't use memory"、"do not use memory"
+ */
+const IGNORE_MEMORY_PATTERN =
+  /(?:忽略|不使用|不要使用|don'?t use|do not use|ignore)\s*memory/i;
+
+/**
+ * createSystemPromptProvider — 创建 Cache-Ready 的 SystemPromptProvider
  *
  * @param deps.getSkillHint - 返回当前 Skill hint 的函数
  * @param deps.getMemoryHint - 返回当前 Memory hint 的函数
  *
- * build(query) 会检测用户输入中是否包含"忽略 memory"的关键词，
- * 如果匹配则省略 memory hint，只保留其他片段。
+ * 内部行为：
+ * - 创建时立即生成一次 snapshot
+ * - getSnapshot() 返回缓存的快照，不重新读取
+ * - refreshSnapshot() 重新读取并更新缓存
+ * - buildTurnReminders() 检测忽略 memory 关键词，返回 reminder 列表
  */
 export function createSystemPromptProvider(deps: {
   getSkillHint: () => string | null;
   getMemoryHint: () => string | null;
 }): SystemPromptProvider {
-  // 匹配用户要求忽略 memory 的各种表达：
-  // "忽略 memory"、"不要使用 memory"、"本轮不要使用 memory"、
-  // "ignore memory"、"don't use memory"、"do not use memory"
-  const IGNORE_MEMORY_PATTERN = /(?:忽略|不使用|不要使用|don'?t use|do not use|ignore)\s*memory/i;
+  // 内部缓存当前快照
+  let cachedSnapshot: SystemPromptSnapshot;
+
+  /**
+   * buildCurrentSnapshot — 根据当前 Skill/Memory hint 构建快照
+   */
+  function buildCurrentSnapshot(): SystemPromptSnapshot {
+    const skillHint = deps.getSkillHint();
+    const memoryHint = deps.getMemoryHint();
+    return {
+      systemPrompt: buildSystemPrompt({ skillHint, memoryHint }),
+      skillHint,
+      memoryHint,
+    };
+  }
+
+  // 初始化：创建时立即生成一次快照
+  cachedSnapshot = buildCurrentSnapshot();
 
   return {
-    build(query: string): string | null {
+    getSnapshot(): SystemPromptSnapshot {
+      return cachedSnapshot;
+    },
+
+    refreshSnapshot(): SystemPromptSnapshot {
+      cachedSnapshot = buildCurrentSnapshot();
+      return cachedSnapshot;
+    },
+
+    buildTurnReminders(ctx: TurnPromptContext): SessionReminder[] {
+      const reminders: SessionReminder[] = [];
+
       // 检测用户是否要求本轮忽略 memory
-      const ignoreMemory = IGNORE_MEMORY_PATTERN.test(query);
-      return buildSystemPrompt({
-        skillHint: deps.getSkillHint(),
-        memoryHint: ignoreMemory ? null : deps.getMemoryHint(),
-      });
+      if (IGNORE_MEMORY_PATTERN.test(ctx.query)) {
+        reminders.push({
+          source: "memory",
+          message:
+            "For this turn, do not use long-term memory. Ignore the memory snapshot unless the user explicitly asks to inspect it.",
+        });
+      }
+
+      return reminders;
     },
   };
 }

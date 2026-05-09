@@ -3,14 +3,11 @@
  *
  * 职责：初始化所有组件并将它们连接在一起，然后启动 REPL。
  *
- * 什么是组装根？
- * - 组装根是依赖注入的"接线层"：它知道所有组件，负责创建它们并传递依赖
- * - 它不包含业务逻辑，只做"new A(new B(new C()))"这样的组装工作
- * - 这是依赖注入模式的最佳实践：所有依赖关系集中在一个地方管理
- *
  * 组件初始化顺序（每步只依赖前面已创建的组件，无循环依赖）：
- * config → logger → terminal → llm → history → skill → subagent → tools →
- * compressor → permissionManager → agent → commands → repl
+ * config → logger → terminal → llm → history → todoManager → skillManager →
+ * permissionManager → memoryManager → sessionEventBuffer → systemPromptProvider →
+ * tool providers → tool registry → subagent provider → compressor → agent →
+ * cli commands → repl
  */
 
 import { existsSync } from "node:fs";
@@ -43,6 +40,7 @@ import { createHookRunner } from "./hooks.js";
 import { createMemoryManager } from "./memory.js";
 import { createMemoryToolProvider } from "./tools/memory.js";
 import { createSystemPromptProvider } from "./system-prompt.js";
+import { createSessionEventBuffer } from "./session-events.js";
 
 /**
  * main — 主函数
@@ -85,7 +83,7 @@ async function main() {
   // 9. 创建 skill 工具提供者
   const skillProvider = createSkillToolProvider(skillManager);
 
-  // 9.5. 创建 Memory 管理器并扫描 memory/ 目录
+  // 10. 创建 Memory 管理器并扫描 memory/ 目录
   const memoryDir = resolve(process.cwd(), process.env["MEMORY_DIR"] ?? "memory");
   const memoryManager = createMemoryManager({ memoryDir, logger });
   if (existsSync(memoryDir)) {
@@ -95,10 +93,29 @@ async function main() {
     logger.info("No memory/ directory found, memory system initialized empty");
   }
 
-  // 9.6. 创建 memory 工具提供者
-  const memoryProvider = createMemoryToolProvider(memoryManager);
+  // 11. 创建会话事件缓冲区（用于收集 out-of-band 状态变化）
+  const sessionEventBuffer = createSessionEventBuffer();
 
-  // 10. 创建 Hook Runner（注册三个教学演示 handler，仅打印日志不修改对话）
+  // 12. 创建 System Prompt Provider（组合 Skill hint 和 Memory hint）
+  //     创建时立即生成一次稳定快照，会话内不再自动刷新
+  const systemPromptProvider = createSystemPromptProvider({
+    getSkillHint: () =>
+      skillManager.listMeta().length > 0 ? SKILL_SYSTEM_PROMPT_HINT : null,
+    getMemoryHint: () => memoryManager.buildPromptSection(),
+  });
+
+  // 13. 设置稳定的 system prompt（只设置一次，不再每轮更新）
+  const snapshot = systemPromptProvider.getSnapshot();
+  if (snapshot.systemPrompt) {
+    history.setSystemPrompt(snapshot.systemPrompt);
+  }
+
+  // 14. 创建 memory 工具提供者（接入 sessionEventBuffer）
+  const memoryProvider = createMemoryToolProvider(memoryManager, {
+    sessionEventBuffer,
+  });
+
+  // 15. 创建 Hook Runner（注册三个教学演示 handler，仅打印日志不修改对话）
   //     父子 Agent 共享同一个实例，确保子智能体继承父级 Hook
   const hookRunner = createHookRunner(
     {
@@ -148,9 +165,10 @@ async function main() {
     logger,
   );
 
-  // 11. 创建子智能体工具提供者
+  // 16. 创建子智能体工具提供者
   //     注入 permissionManager（子智能体继承同一权限模式）
   //     注入 hookRunner（子智能体继承父级 Hook，工具执行前后可观察）
+  //     复用父级的稳定 system prompt 快照，保证 cache 前缀一致
   const subagentProvider = createSubagentToolProvider({
     llm,
     logger,
@@ -160,10 +178,10 @@ async function main() {
     createCompressorFn: () => createContextCompressor(config.compression),
     permissionManager,
     hookRunner,
-    memoryHint: memoryManager.buildPromptSection(),
+    getStableSystemPrompt: () => systemPromptProvider.getSnapshot().systemPrompt,
   });
 
-  // 12. 创建工具注册表
+  // 17. 创建工具注册表
   const tools = createToolRegistry(
     todoManager,
     subagentProvider,
@@ -171,23 +189,10 @@ async function main() {
     memoryProvider,
   );
 
-  // 13. 创建 System Prompt Provider（组合 Skill hint 和 Memory hint）
-  //     每轮 run() 时动态生成 system prompt，反映最新的 memory 状态
-  const systemPromptProvider = createSystemPromptProvider({
-    getSkillHint: () =>
-      skillManager.listMeta().length > 0 ? SKILL_SYSTEM_PROMPT_HINT : null,
-    getMemoryHint: () => memoryManager.buildPromptSection(),
-  });
-  // 设置初始 system prompt（后续每轮由 agent 动态更新）
-  const initialPrompt = systemPromptProvider.build("");
-  if (initialPrompt) {
-    history.setSystemPrompt(initialPrompt);
-  }
-
-  // 14. 创建上下文压缩器
+  // 18. 创建上下文压缩器
   const compressor = createContextCompressor(config.compression);
 
-  // 15. 创建 Agent（注入权限管理器、确认回调、Hook Runner 和 System Prompt Provider）
+  // 19. 创建 Agent（注入权限管理器、确认回调、Hook Runner、System Prompt Provider 和 SessionEventBuffer）
   const agent = createAgent({
     llm,
     history,
@@ -200,15 +205,16 @@ async function main() {
     askUserFn: terminal.askUser.bind(terminal),
     hookRunner,
     systemPromptProvider,
+    sessionEventBuffer,
   });
 
-  // 16. 注册 CLI 命令
+  // 20. 注册 CLI 命令（接入 sessionEventBuffer）
   const commandRegistry = createCliCommandRegistry();
-  commandRegistry.register(createSkillCliCommand(skillManager, logger));
-  commandRegistry.register(createModeCliCommand(permissionManager, logger));
-  commandRegistry.register(createMemoryCliCommand(memoryManager, logger));
+  commandRegistry.register(createSkillCliCommand(skillManager, logger, sessionEventBuffer));
+  commandRegistry.register(createModeCliCommand(permissionManager, logger, sessionEventBuffer));
+  commandRegistry.register(createMemoryCliCommand(memoryManager, logger, sessionEventBuffer));
 
-  // 16. 创建并启动 REPL
+  // 21. 创建并启动 REPL
   const repl = createRepl({ agent, logger, commands: commandRegistry, terminal });
   logger.info("Agent started (model: %s)", config.model);
   repl.start();

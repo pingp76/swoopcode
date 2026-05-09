@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + **Memory（长期记忆）**
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局**
 
 ## 源码结构
 
@@ -33,7 +33,9 @@ src/
 ├── permission.ts       # 权限管理器：三种模式（plan/auto/default）+ 黑白名单 + 路径边界 + ask 降级
 ├── hooks.ts            # Hook 系统：轻量进程内 Hook（SessionStart / PreToolUse / PostToolUse）+ HookRunner 工厂
 ├── memory.ts           # Memory 管理器：跨会话长期记忆（scan/list/read/create/delete/buildPromptSection）
-├── system-prompt.ts    # System Prompt 组合器：动态组合 Skill hint + Memory hint
+├── system-prompt.ts    # System Prompt 组合器：稳定 snapshot + turn reminder（cache-ready）
+├── session-events.ts   # 会话事件缓冲区：收集 out-of-band 状态变化，注入为 system-reminder
+├── cache-debug.ts      # Prompt Cache 调试：system/tools/prefix hash + 稳定性追踪
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
 ├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
 ├── message-block.test.ts # 消息块测试（24 个测试用例）
@@ -45,6 +47,9 @@ src/
 ├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
 ├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
 ├── normalize.test.ts   # 消息标准化测试
+├── system-prompt.test.ts # System Prompt 测试（15 个测试用例）
+├── session-events.test.ts # Session Event Buffer 测试（5 个测试用例）
+├── cache-debug.test.ts  # Cache Debug 测试（7 个测试用例）
 ├── index.test.ts       # 占位测试
 ├── history.test.ts     # history 模块测试（13 个测试用例）
 ├── logger.test.ts      # logger 模块测试
@@ -54,11 +59,12 @@ src/
     ├── bash.test.ts    # bash 工具测试
     ├── files.ts        # 文件操作工具：run_read、run_write、run_edit（限工作目录）
     ├── files.test.ts   # 文件操作工具测试
-    ├── subagent.ts     # 子智能体工具：run_subagent（独立上下文 + skill 支持 + 独立压缩器）
+    ├── subagent.ts     # 子智能体工具：run_subagent（复用父级 stable prompt + 独立上下文）
     ├── subagent.test.ts # 子智能体工具测试（13 个测试用例）
     ├── memory.ts       # Memory 工具提供者：run_memory_create/list/read/delete（4 个工具）
     ├── memory.test.ts  # Memory 工具测试（2 个测试用例）
-    └── registry.ts     # 工具注册表（bash + files + todo + subagent + skill + memory 工具）
+    ├── registry.ts     # 工具注册表（顺序稳定 + 重复注册报错）
+    └── registry.test.ts # 工具注册表测试（4 个测试用例）
 skills/
 ├── code-review/
 │   └── SKILL.md        # 代码审查 skill（示例）
@@ -81,10 +87,14 @@ skills/
 - **P1 即时压缩**：run_bash 工具的大输出自动存文件，只返回 preview
 - **P0 衰减压缩**：每轮自动截断旧的工具结果
 - **P2 全量压缩**：上下文超过阈值时，将历史压缩为摘要
+- **Cache Debug 追踪**：每轮调用 LLM 前计算 system prompt / tools / prefix hash，监控前缀稳定性
+- **Reminder 注入**：`systemPromptProvider.buildTurnReminders()` + `sessionEventBuffer.drain()` 以 user message 形式注入，不修改 system prompt
 - JSON 解析失败的容错处理（将错误告知 LLM 让其自行修正）
 - **maxRounds 支持**：可选的最大循环轮数（子智能体使用），超过时强制截断并返回摘要
 - **todoManager 可选**：子智能体不传 todoManager，父智能体行为不变
 - **compressor 必需**：上下文压缩器通过依赖注入传入
+- **systemPromptProvider 可选**：用于生成 turn reminders（如"本轮忽略 memory"），不用于每轮重建 system prompt
+- **sessionEventBuffer 可选**：收集 out-of-band 状态变化（mode 切换、memory reload 等），下一轮注入为 `<system-reminder>`
 
 ### 消息块 (`message-block.ts`)
 - **消息块是压缩操作的原子单位**：保证 tool_use/tool_result 配对不被拆分
@@ -111,13 +121,15 @@ skills/
 ### LLM 客户端 (`llm.ts`)
 - 使用 OpenAI SDK，通过 baseURL 接入 MiniMax API
 - 支持 function calling（工具调用）
-- 接口抽象：`LLMClient { chat(messages, tools?) }`
+- 接口抽象：`LLMClient { chat(messages, tools?, cacheDebug?) }`
 - **消息由调用方标准化**：normalize 移至 agent.ts，llm.chat() 接收已处理的消息
 - **LLM 通信日志**：可选的 `LLMLogger` 参数，记录完整请求/响应到本地文件
+- **Cache Debug 透传**：可选的 `cacheDebug` 参数透传至 LLMLogger，用于日志中记录前缀 hash
 
 ### LLM 通信日志 (`llm-logger.ts`)
-- **完整记录原始通信**：请求（消息列表 + 工具定义）和响应（内容 + 工具调用 + 耗时）
+- **完整记录原始通信**：请求（消息列表 + 工具定义 + cache debug）和响应（内容 + 工具调用 + 耗时）
 - **不做任何截断**：消息内容、工具参数、tool_call arguments 全部完整保留
+- **新增 Cache Debug 记录**：systemPromptHash、toolsHash、stablePrefixHash、变化标记
 - **格式化为易读结构**：角色标签对齐、JSON 美化、缩进
 - **文件策略**：固定 `logs/llm.log`，每次启动清空，超过 1MB 清空重写
 - **请求-响应成对**：每组用空行 + 分隔线隔开
@@ -141,7 +153,10 @@ skills/
   - `replaceAll` 行为：所有匹配项都会被替换
   - old_string 未找到时返回错误
   - 路径安全检查同上
-- **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数（含 bash、files、todo、subagent、skill 五类工具）
+- **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数（含 bash、files、todo、subagent、skill、memory 六类工具）
+- **工具定义顺序稳定**：`orderedEntries` 数组保证 `getToolDefinitions()` 多次调用顺序一致
+- **重复注册报错**：同名工具重复注册抛出错误，防止意外覆盖
+- **不因 mode 删减工具**：`/mode` 切换只改变权限策略，不改变工具定义列表
 
 ### 子智能体 / SubAgent (`tools/subagent.ts`)
 - **工具定义**：`run_subagent`，参数 `task`（必填）+ `max_rounds`（可选，默认 20）
@@ -150,6 +165,7 @@ skills/
 - **工具集**：子智能体可使用 run_bash、run_read、run_write、run_edit、**run_skill**
   - 排除 run_subagent（防止无限递归）
   - 排除 run_todo_*（隔离上下文中用户看不到进度，maxRounds 已够用）
+- **复用父级 stable system prompt**：通过 `getStableSystemPrompt` 注入，子智能体使用与父级相同的 system prompt 快照，保证 cache 前缀一致（阶段 A）
 - **skill 支持**：子智能体加载 system prompt hint，可自主调用 run_skill 获取专业指示
 - **独立压缩器**：通过 `createCompressorFn` 注入，子智能体使用独立的压缩器实例
 - **循环依赖解决**：通过依赖注入 `createAgentFn` + `createCompressorFn` 打破循环
@@ -199,7 +215,7 @@ skills/
 - **子智能体继承**：子智能体共享父级 hookRunner 实例
 - **PreToolUse 在权限检查之后触发**：Hook 不负责安全逻辑，权限系统仍然是独立的安全门卫
 
-### Memory 长期记忆 (`memory.ts` + `tools/memory.ts` + `system-prompt.ts`)
+### Memory 长期记忆 (`memory.ts` + `tools/memory.ts`)
 - **跨会话持久化**：每条 memory 是独立 Markdown 文件，存放在 `memory/` 目录（frontmatter + body）
 - **四种类型**：user（偏好）、feedback（纠正）、project（约定）、reference（外部资源）
 - **MemoryManager**：scan/list/read/create/findSimilar/delete/buildPromptSection/rebuildIndex
@@ -207,11 +223,34 @@ skills/
 - **权限规则**：list/read 无需确认；create/delete 所有模式都需用户确认（长期记忆影响未来会话）
 - **自动索引**：MEMORY.md 由 create/delete 自动重建，不手写维护
 - **教学版去重**：run_memory_create 写入前调用 findSimilar；不同名但疑似重复时默认拒绝新建，提示复用旧 name、询问用户是否删除旧 memory，或在用户明确要求保留两条时使用 `allow_duplicate: true`
-- **System Prompt 注入**：通过 SystemPromptProvider 每轮动态组合 Skill hint + Memory hint
-- **忽略 memory**：用户说"忽略 memory"时，该轮不注入 Memory hint
+- **Stable Snapshot 语义**：会话启动时的 memory 摘要固定在 system prompt 中；运行时 create/delete/reload 不自动刷新快照
+- **Cache 语义输出**：memory create/delete 成功后提示"stable system prompt snapshot 未自动更新"
+- **Reminder 推送**：create/delete/reload 成功后向 sessionEventBuffer 推送 reminder，下一轮以 user message 形式通知模型
 - **复用 parseFrontmatter**：直接复用 skills.ts 的 frontmatter 解析器
 - **REPL 命令**：`/memory list`（列出）、`/memory show <name>`（查看）、`/memory remove <name>`（删除）、`/memory reload`（重载）
 - **子智能体隔离**：子智能体不包含 memory 工具，不能直接操作长期记忆
+
+### System Prompt 组合器（Cache-Ready）(`system-prompt.ts`)
+- **三层设计**：Static（进程固定）+ Session Snapshot（会话固定）+ Turn Reminder（单轮动态）
+- **创建时生成快照**：`createSystemPromptProvider()` 立即调用 `getSkillHint()` 和 `getMemoryHint()` 生成稳定快照
+- **`getSnapshot()`**：返回缓存的快照，不重新读取底层数据
+- **`refreshSnapshot()`**：显式刷新快照，重新读取 Skill/Memory（会破坏 cache 前缀，需谨慎使用）
+- **`buildTurnReminders({ query })`**：只处理本轮动态要求（如"忽略 memory"），返回 `SessionReminder[]`
+- **忽略 memory 新语义**：不再从 system prompt 中删除 memory hint，而是追加 `<system-reminder source="memory">` user message
+
+### 会话事件缓冲区 (`session-events.ts`)
+- **职责**：收集 out-of-band 状态变化（mode 切换、memory reload、skill re-scan），下次用户请求时注入为 `<system-reminder>`
+- **轻量设计**：`push()` / `drain()` / `peek()` 三个方法，内部用数组保证顺序
+- **一次性消费**：`drain()` 返回并清空，避免重复注入
+- **格式统一**：各模块只提供纯文本，Agent 负责包装 XML
+
+### Prompt Cache 调试 (`cache-debug.ts`)
+- **职责**：计算 system prompt、tools、stable prefix 的 SHA256 hash，帮助观察请求前缀稳定性
+- **教学版语义**：不声称是底层 API 的真实 cache hit rate，只显示"前缀是否发生变化"
+- **稳定序列化**：`stableStringify()` 对对象 key 排序，保证相同内容产生相同 hash
+- **inspect()**：对比当前与上一次快照，标记 systemPrompt / tools / stablePrefix 是否变化
+- **formatCacheDebugLog()**：格式化为单行日志，便于阅读
+- **集成位置**：Agent 每轮调用 LLM 前执行 inspect，结果通过 `logger.info()` 输出，同时透传给 LLMLogger
 
 ### 终端封装 (`terminal.ts`)
 - **统一 readline 接口**：REPL 读取和权限确认共享同一个 `readline.Interface`
@@ -276,6 +315,10 @@ skills/
 | `src/agent.test.ts` | 7 | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序 |
 | `src/memory.test.ts` | 40 | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar |
 | `src/tools/memory.test.ts` | 2 | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复 |
+| `src/tools/registry.test.ts` | 4 | 重复注册报错、工具定义顺序稳定性、完整 registry 创建 |
+| `src/system-prompt.test.ts` | 15 | buildSystemPrompt 组合、snapshot 稳定性、refreshSnapshot、ignore memory reminder |
+| `src/session-events.test.ts` | 5 | drain 清空、peek 不清空、顺序保持 |
+| `src/cache-debug.test.ts` | 7 | inspect 变化检测、system prompt 不变性、formatCacheDebugLog |
 | `src/index.test.ts` | 1 | 占位 |
 
 ## 设计模式
@@ -291,7 +334,10 @@ skills/
 - **延迟注入**：Hook 的 exitCode 2 消息在所有 tool_result 写完后统一追加为 user 消息，避免破坏 tool_call/tool_result 配对
 - **权限继承**：子智能体共享父级 PermissionManager 实例，ask 决策因无回调降级为 deny
 - **终端共享**：REPL 和权限确认通过 Terminal 共享同一个 readline 实例，避免 stdin 冲突
-- **System Prompt 动态组合**：SystemPromptProvider 每轮 run() 时重新构建 system prompt，反映最新的 memory/skill 状态
+- **System Prompt 动静分离**：`SystemPromptProvider` 将 prompt 分为 Static + Session Snapshot + Turn Reminder 三层；snapshot 在启动或显式 refresh 时生成，不每轮重建
+- **动态状态变化走消息**：mode 切换、memory reload、skill re-scan 等变化通过 `sessionEventBuffer` 以 user message 形式注入，不修改 system prompt
+- **工具定义稳定性**：`ToolRegistry` 通过 `orderedEntries` 保证顺序稳定，重复注册报错，不因 mode 动态删减工具
+- **Cache-safe fork**：子智能体复用父级 stable system prompt，工具定义保持稳定，执行层限制能力而非删除工具定义
 
 ## 重构经验
 

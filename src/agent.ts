@@ -38,6 +38,7 @@ import type { ContextCompressor } from "./compressor.js";
 import type { PermissionManager, AskUserFn } from "./permission.js";
 import type { HookRunner } from "./hooks.js";
 import type { SystemPromptProvider } from "./system-prompt.js";
+import type { SessionEventBuffer } from "./session-events.js";
 import { createNoopHookRunner } from "./hooks.js";
 import { normalizeMessages } from "./normalize.js";
 import {
@@ -45,6 +46,10 @@ import {
   flattenToMessages,
   estimateMessagesTokens,
 } from "./message-block.js";
+import {
+  createCacheDebugTracker,
+  formatCacheDebugLog,
+} from "./cache-debug.js";
 
 /**
  * Agent — Agent 的接口
@@ -88,8 +93,10 @@ export function createAgent(deps: {
   askUserFn?: AskUserFn;
   /** Hook 运行器（可选，不传时使用空操作 runner，不触发任何 Hook） */
   hookRunner?: HookRunner;
-  /** System prompt 提供者（可选，传入后每轮 run() 动态更新 system prompt） */
+  /** System prompt 提供者（可选，用于生成 turn reminders） */
   systemPromptProvider?: SystemPromptProvider;
+  /** 会话事件缓冲区（可选，用于注入 out-of-band 状态变化提醒） */
+  sessionEventBuffer?: SessionEventBuffer;
 }): Agent {
   const {
     llm,
@@ -104,6 +111,7 @@ export function createAgent(deps: {
     askUserFn,
     hookRunner,
     systemPromptProvider,
+    sessionEventBuffer,
   } = deps;
 
   // 没有传入 hookRunner 时使用空操作实现，避免所有调用处都要做 if 判断
@@ -111,6 +119,9 @@ export function createAgent(deps: {
 
   // SessionStart 标记：每个 Agent 实例只在第一次 run() 时触发一次
   let sessionStarted = false;
+
+  // Cache Debug 追踪器：监控 system prompt / tools / prefix 稳定性
+  const cacheDebugTracker = createCacheDebugTracker();
 
   // =====================================================================
   // 内部步骤函数
@@ -504,11 +515,28 @@ export function createAgent(deps: {
     async run(query) {
       logger.info("User query: %s", query);
 
-      // 每轮动态更新 system prompt（如果有 provider）
-      // memory 文件可能在运行时新增/删除，下一轮就会反映在 system prompt 中
+      // 收集本轮需要注入的 reminder 消息
+      // 顺序：1. 用户原始 query  2. turn reminders  3. out-of-band reminders
+      const reminderMessages: string[] = [];
+
+      // 2. systemPromptProvider 根据 query 生成的本轮提醒
       if (systemPromptProvider) {
-        const prompt = systemPromptProvider.build(query);
-        history.setSystemPrompt(prompt ?? "");
+        const turnReminders = systemPromptProvider.buildTurnReminders({ query });
+        for (const r of turnReminders) {
+          reminderMessages.push(
+            `<system-reminder source="${r.source}">\n${r.message}\n</system-reminder>`,
+          );
+        }
+      }
+
+      // 3. sessionEventBuffer 中积累的 out-of-band 提醒
+      if (sessionEventBuffer) {
+        const events = sessionEventBuffer.drain();
+        for (const e of events) {
+          reminderMessages.push(
+            `<system-reminder source="${e.source}">\n${e.message}\n</system-reminder>`,
+          );
+        }
       }
 
       // SessionStart Hook：在用户消息写入之前触发
@@ -528,8 +556,11 @@ export function createAgent(deps: {
 
         // exitCode 2：注入补充提示，在用户消息之后作为 user 消息追加到历史
         if (sessionResult.exitCode === 2 && sessionResult.message) {
-          // 先写入用户消息，再写入 Hook 补充消息
+          // 先写入用户消息，再写入 reminder 和 Hook 补充消息
           appendMessage({ role: "user", content: query }, 0);
+          for (const msg of reminderMessages) {
+            appendMessage({ role: "user", content: msg }, 0);
+          }
           appendMessage(
             {
               role: "user",
@@ -538,12 +569,18 @@ export function createAgent(deps: {
             0,
           );
         } else {
-          // exitCode 0：正常写入用户消息
+          // exitCode 0：正常写入用户消息 + reminders
           appendMessage({ role: "user", content: query }, 0);
+          for (const msg of reminderMessages) {
+            appendMessage({ role: "user", content: msg }, 0);
+          }
         }
       } else {
-        // 后续 run() 调用：直接写入用户消息
+        // 后续 run() 调用：写入用户消息 + reminders
         appendMessage({ role: "user", content: query }, 0);
+        for (const msg of reminderMessages) {
+          appendMessage({ role: "user", content: msg }, 0);
+        }
       }
 
       // Agent 主循环：不断调用 LLM，直到它不再请求工具调用
@@ -574,7 +611,14 @@ export function createAgent(deps: {
         );
 
         // 4. 调用 LLM
-        const response = await llm.chat(finalMsgs, toolDefs);
+        //    先计算 cache debug hash，监控前缀稳定性
+        const cacheState = cacheDebugTracker.inspect({
+          messages: finalMsgs,
+          tools: toolDefs,
+        });
+        logger.info(formatCacheDebugLog(cacheState));
+
+        const response = await llm.chat(finalMsgs, toolDefs, cacheState);
         logger.debug(
           "LLM response: content=%s, toolCalls=%d",
           response.content ? "yes" : "none",

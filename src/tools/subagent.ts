@@ -122,8 +122,10 @@ export function createSubagentToolProvider(deps: {
   hookRunner?: HookRunner;
   /** Memory hint 摘要（可选），注入子智能体 system prompt，让它知道用户的长期偏好 */
   memoryHint?: string | null;
+  /** 获取父级稳定 system prompt 快照的函数（可选）。若提供，子智能体直接使用父级快照，保证 cache 前缀一致 */
+  getStableSystemPrompt?: () => string | null;
 }): SubagentToolProvider {
-  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn, permissionManager, hookRunner, memoryHint } = deps;
+  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn, permissionManager, hookRunner, memoryHint, getStableSystemPrompt } = deps;
 
   /**
    * executeSubagent — 执行子智能体任务
@@ -159,11 +161,16 @@ export function createSubagentToolProvider(deps: {
       //    子智能体的所有中间消息都只存在于这个 history 中
       //    设置 system prompt hint，帮助子智能体理解如何使用 skill
       const subHistory = createHistory();
-      // 子智能体 system prompt 包含 Skill hint + Memory hint（如果有）
-      // 这样子智能体能了解用户的长期偏好和反馈约定
-      const subParts = [SKILL_SYSTEM_PROMPT_HINT];
-      if (memoryHint) subParts.push(memoryHint);
-      subHistory.setSystemPrompt(subParts.join("\n\n"));
+      // 子智能体优先复用父级的稳定 system prompt 快照，保证 cache 前缀一致。
+      // 如果父级未提供 getStableSystemPrompt，则回退到旧行为（Skill hint + Memory hint）。
+      const stablePrompt = getStableSystemPrompt ? getStableSystemPrompt() : null;
+      if (stablePrompt) {
+        subHistory.setSystemPrompt(stablePrompt);
+      } else {
+        const subParts = [SKILL_SYSTEM_PROMPT_HINT];
+        if (memoryHint) subParts.push(memoryHint);
+        subHistory.setSystemPrompt(subParts.join("\n\n"));
+      }
 
       // 2. 获取过滤后的工具注册表
       //    只有 bash + files 四个工具，没有 run_subagent（防递归）和 run_todo_*（防干扰）

@@ -17,6 +17,7 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import type { LLMLogger } from "./llm-logger.js";
+import type { CacheDebugState } from "./cache-debug.js";
 
 /**
  * LLMResponse — LLM 返回结果的类型定义
@@ -47,10 +48,12 @@ export interface LLMClient {
    * 发送对话请求
    * @param messages - 对话历史（包含 system/user/assistant/tool 角色的消息）
    * @param tools - 可用工具的定义列表（可选，传了模型才知道能调用哪些工具）
+   * @param cacheDebug - 可选的缓存调试状态，用于 LLM 日志记录前缀稳定性
    */
   chat(
     messages: ChatCompletionMessageParam[],
     tools?: ChatCompletionTool[],
+    cacheDebug?: CacheDebugState,
   ): Promise<LLMResponse>;
 }
 
@@ -75,12 +78,12 @@ export function createLLMClient(config: {
   });
 
   return {
-    async chat(messages, tools) {
+    async chat(messages, tools, cacheDebug) {
       // 消息已由调用方（agent.ts）完成标准化和压缩处理
       // 这里直接使用传入的消息，不再做任何转换
 
-      // 记录发送给 LLM 的请求（消息列表 + 工具定义）
-      llmLogger?.logRequest(messages, tools);
+      // 记录发送给 LLM 的请求（消息列表 + 工具定义 + 可选 cache debug）
+      llmLogger?.logRequest(messages, tools, cacheDebug);
 
       // 基础请求参数：模型名和消息列表
       const baseParams = {

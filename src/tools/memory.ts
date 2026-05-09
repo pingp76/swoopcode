@@ -16,6 +16,7 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import type { ToolResult } from "./types.js";
 import type { MemoryManager } from "../memory.js";
+import type { SessionEventBuffer } from "../session-events.js";
 
 // ============================================================================
 // 类型定义
@@ -143,11 +144,16 @@ const memoryDeleteDef: ChatCompletionTool = {
  * createMemoryToolProvider — 创建 Memory 工具提供者
  *
  * @param manager - MemoryManager 实例
+ * @param options.sessionEventBuffer - 可选的会话事件缓冲区，用于在 create/delete 后推送 reminder
  * @returns MemoryToolProvider，包含 4 个 memory 工具的定义和执行函数
  */
 export function createMemoryToolProvider(
   manager: MemoryManager,
+  options?: {
+    sessionEventBuffer?: SessionEventBuffer;
+  },
 ): MemoryToolProvider {
+  const sessionEventBuffer = options?.sessionEventBuffer;
   /**
    * executeMemoryCreate — run_memory_create 的执行函数
    *
@@ -224,8 +230,19 @@ export function createMemoryToolProvider(
       }
 
       const entry = manager.create(input);
+      const outputLines = [
+        `Memory saved: [${entry.meta.type}] ${entry.meta.name}: ${entry.meta.description}`,
+        "Note: the stable system prompt memory snapshot is unchanged for cache stability. Use run_memory_list/read for the latest memory if needed.",
+      ];
+      if (sessionEventBuffer) {
+        sessionEventBuffer.push({
+          source: "memory",
+          message:
+            "Memory was created or updated by tool call. Use memory tools if the latest entry matters in later turns.",
+        });
+      }
       return {
-        output: `Memory saved: [${entry.meta.type}] ${entry.meta.name}: ${entry.meta.description}`,
+        output: outputLines.join("\n"),
         error: false,
       };
     } catch (err) {
@@ -310,7 +327,17 @@ export function createMemoryToolProvider(
 
     const deleted = manager.delete(name);
     if (deleted) {
-      return { output: `Memory "${name}" deleted.`, error: false };
+      const outputLines = [
+        `Memory "${name}" deleted.`,
+        "Note: the stable system prompt memory snapshot may still mention it until prompt snapshot refresh.",
+      ];
+      if (sessionEventBuffer) {
+        sessionEventBuffer.push({
+          source: "memory",
+          message: `Memory "${name}" was deleted by tool call. The stable system prompt snapshot may still mention it until snapshot refresh.`,
+        });
+      }
+      return { output: outputLines.join("\n"), error: false };
     }
     return { output: `Error: Memory "${name}" not found.`, error: true };
   }

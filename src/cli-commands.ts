@@ -18,6 +18,7 @@ import type { Logger } from "./logger.js";
 import type { createSkillManager } from "./skills.js";
 import type { PermissionManager, PermissionMode } from "./permission.js";
 import type { MemoryManager } from "./memory.js";
+import type { SessionEventBuffer } from "./session-events.js";
 
 // ---------------------------------------------------------------------------
 // 类型定义
@@ -99,6 +100,7 @@ export function createCliCommandRegistry(): CliCommandRegistry {
 export function createSkillCliCommand(
   manager: ReturnType<typeof createSkillManager>,
   logger: Logger,
+  sessionEventBuffer?: SessionEventBuffer,
 ): CliCommand {
   return {
     name: "skill",
@@ -132,6 +134,13 @@ export function createSkillCliCommand(
           console.log(
             "Restart the agent to update which skills the LLM can see.",
           );
+          if (sessionEventBuffer) {
+            sessionEventBuffer.push({
+              source: "skill",
+              message:
+                "Skills were re-scanned. Tool definitions remain the startup snapshot. Restart or explicitly refresh the prompt snapshot if the model must see new skill metadata.",
+            });
+          }
           break;
         }
         case "remove": {
@@ -172,6 +181,7 @@ export function createSkillCliCommand(
 export function createModeCliCommand(
   permissionManager: PermissionManager,
   logger: Logger,
+  sessionEventBuffer?: SessionEventBuffer,
 ): CliCommand {
   const validModes: PermissionMode[] = ["plan", "auto", "default"];
 
@@ -195,6 +205,14 @@ export function createModeCliCommand(
       permissionManager.setMode(subcommand as PermissionMode);
       logger.info("Mode switched to %s", subcommand);
       console.log(`Mode switched to ${subcommand}.`);
+
+      // 向 sessionEventBuffer 推送 reminder，让下一轮 LLM 知道 mode 变化
+      if (sessionEventBuffer) {
+        sessionEventBuffer.push({
+          source: "mode",
+          message: `Mode changed to ${subcommand}. Keep all tool definitions stable; local permission checks enforce read-only behavior.`,
+        });
+      }
     },
   };
 }
@@ -215,6 +233,7 @@ export function createModeCliCommand(
 export function createMemoryCliCommand(
   manager: MemoryManager,
   logger: Logger,
+  sessionEventBuffer?: SessionEventBuffer,
 ): CliCommand {
   return {
     name: "memory",
@@ -263,6 +282,12 @@ export function createMemoryCliCommand(
           if (removed) {
             logger.info("Memory removed: %s", name);
             console.log(`Memory "${name}" removed.`);
+            if (sessionEventBuffer) {
+              sessionEventBuffer.push({
+                source: "memory",
+                message: `Memory entry "${name}" was removed. The stable system prompt memory snapshot may still mention it until snapshot refresh.`,
+              });
+            }
           } else {
             console.log(`Memory "${name}" not found.`);
           }
@@ -274,10 +299,19 @@ export function createMemoryCliCommand(
           const count = manager.list().length;
           logger.info("Memory reloaded: %d entries", count);
           console.log(`Reloaded memory: ${count} entry(s).`);
+          if (sessionEventBuffer) {
+            sessionEventBuffer.push({
+              source: "memory",
+              message:
+                "Memory was reloaded. The stable system prompt memory snapshot was not automatically changed. Use run_memory_list/read if latest memory matters.",
+            });
+          }
           break;
         }
         default:
-          console.log("Usage: /memory <list|show <name>|remove <name>|reload>");
+          console.log(
+            "Usage: /memory <list|show <name>|remove <name>|reload>",
+          );
       }
     },
   };

@@ -21,6 +21,7 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 import type { LLMResponse } from "./llm.js";
+import type { CacheDebugState } from "./cache-debug.js";
 
 // ============================================================
 // 接口定义
@@ -33,6 +34,7 @@ export interface LLMLogger {
   logRequest(
     messages: ChatCompletionMessageParam[],
     tools?: ChatCompletionTool[],
+    cacheDebug?: CacheDebugState,
   ): void;
   logResponse(response: LLMResponse, durationMs: number): void;
 }
@@ -179,19 +181,23 @@ export function createLLMLogger(options?: {
   }
 
   return {
-    logRequest(messages, tools) {
+    logRequest(messages, tools, cacheDebug) {
       const timestamp = new Date().toISOString();
-      const log = [
+      const lines = [
         "",
         SEPARATOR,
         `[REQUEST] ${timestamp}`,
         SEPARATOR,
         formatMessages(messages),
         tools && tools.length > 0 ? formatTools(tools) : "",
-        "",
-      ]
-        .filter((line, idx) => idx > 0 || line !== "")
-        .join("\n");
+      ];
+      if (cacheDebug) {
+        lines.push(
+          `Cache Debug:\n  systemPromptHash: ${cacheDebug.current.systemPromptHash}\n  toolsHash: ${cacheDebug.current.toolsHash}\n  stablePrefixHash: ${cacheDebug.current.stablePrefixHash}\n  systemPromptChanged: ${cacheDebug.changed.systemPrompt ? "yes" : "no"}\n  toolsChanged: ${cacheDebug.changed.tools ? "yes" : "no"}`,
+        );
+      }
+      lines.push("");
+      const log = lines.filter((line, idx) => idx > 0 || line !== "").join("\n");
       appendLog(log);
     },
 
