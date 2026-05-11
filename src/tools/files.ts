@@ -39,11 +39,20 @@ import type { ToolResult } from "./types.js";
  * @returns true 表示路径安全（在工作目录内），false 表示不安全
  */
 export function isPathSafe(filePath: string, baseDir?: string): boolean {
-  const resolved = resolve(filePath);
   const cwd = baseDir ?? process.cwd();
+  const resolved = resolve(cwd, filePath);
   // 路径必须以 cwd + sep 开头（确保是 cwd 的子路径，而不是恰好前缀匹配）
   // 例如 cwd = "/home/user"，不匹配 "/home/userdata"
   return resolved === cwd || resolved.startsWith(cwd + sep);
+}
+
+/**
+ * resolveSafePath — 按项目根目录解析实际读写路径
+ *
+ * 相对路径会相对 baseDir 解析；绝对路径保持自身语义。
+ */
+function resolveSafePath(filePath: string, baseDir?: string): string {
+  return resolve(baseDir ?? process.cwd(), filePath);
 }
 
 /**
@@ -153,8 +162,9 @@ export async function executeRead(
   }
 
   try {
+    const targetPath = resolveSafePath(filePath, baseDir);
     // 使用 utf-8 编码读取文件，返回字符串
-    const content = await readFile(filePath, "utf-8");
+    const content = await readFile(targetPath, "utf-8");
     return { output: content, error: false };
   } catch (err) {
     // 文件不存在是最常见的错误，给出明确的提示
@@ -200,13 +210,14 @@ export async function executeWrite(
   try {
     // 确保父目录存在（相当于 mkdir -p）
     // 例如写入 "src/new-dir/file.ts" 时，自动创建 "src/new-dir/"
-    const dir = dirname(filePath);
+    const targetPath = resolveSafePath(filePath, baseDir);
+    const dir = dirname(targetPath);
     if (dir) {
       await mkdir(dir, { recursive: true });
     }
 
     // 写入文件内容，utf-8 编码
-    await writeFile(filePath, content, "utf-8");
+    await writeFile(targetPath, content, "utf-8");
     return {
       output: `Successfully wrote to "${filePath}" (${content.length} bytes)`,
       error: false,
@@ -249,8 +260,9 @@ export async function executeEdit(
   }
 
   try {
+    const targetPath = resolveSafePath(filePath, baseDir);
     // 先读取文件当前内容
-    const content = await readFile(filePath, "utf-8");
+    const content = await readFile(targetPath, "utf-8");
 
     // 检查 old_string 是否存在于文件中
     if (!content.includes(oldString)) {
@@ -264,7 +276,7 @@ export async function executeEdit(
     const newContent = content.replaceAll(oldString, newString);
 
     // 写回文件
-    await writeFile(filePath, newContent, "utf-8");
+    await writeFile(targetPath, newContent, "utf-8");
 
     return {
       output: `Successfully edited "${filePath}" (${oldString.length} → ${newString.length} chars)`,

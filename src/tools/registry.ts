@@ -41,7 +41,9 @@ import type { MemoryToolProvider } from "./memory.js";
  * 因为 LLM 返回的 JSON 经 JSON.parse 后值可以是 string、number、array。
  * 工具实现时需用 String() / Number() 等做类型转换。
  */
-export type ToolExecutor = (args: Record<string, unknown>) => Promise<ToolResult>;
+export type ToolExecutor = (
+  args: Record<string, unknown>,
+) => Promise<ToolResult>;
 
 /**
  * ToolEntry — 工具注册项
@@ -85,6 +87,7 @@ export function createToolRegistry(
   subagentProvider?: SubagentToolProvider,
   skillProvider?: SkillToolProvider,
   memoryProvider?: MemoryToolProvider,
+  options?: { projectRoot?: string },
 ): ToolRegistry {
   // 工具映射表：工具名 → 工具注册项
   const tools = new Map<string, ToolEntry>();
@@ -112,20 +115,26 @@ export function createToolRegistry(
   // 注册 bash 工具
   register({
     definition: bashToolDefinition,
-    execute: async (args) => executeBash(String(args["command"] ?? "")),
+    execute: async (args) =>
+      executeBash(String(args["command"] ?? ""), options?.projectRoot),
   });
 
   // 注册文件读取工具
   register({
     definition: runReadToolDefinition,
-    execute: async (args) => executeRead(String(args["path"] ?? "")),
+    execute: async (args) =>
+      executeRead(String(args["path"] ?? ""), options?.projectRoot),
   });
 
   // 注册文件写入工具
   register({
     definition: runWriteToolDefinition,
     execute: async (args) =>
-      executeWrite(String(args["path"] ?? ""), String(args["content"] ?? "")),
+      executeWrite(
+        String(args["path"] ?? ""),
+        String(args["content"] ?? ""),
+        options?.projectRoot,
+      ),
   });
 
   // 注册文件编辑工具
@@ -136,6 +145,7 @@ export function createToolRegistry(
         String(args["path"] ?? ""),
         String(args["old_string"] ?? ""),
         String(args["new_string"] ?? ""),
+        options?.projectRoot,
       ),
   });
 

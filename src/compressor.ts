@@ -14,13 +14,11 @@
  */
 
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { MessageBlock } from "./message-block.js";
-import {
-  estimateTokens,
-  truncateToTokens,
-} from "./message-block.js";
+import { estimateTokens, truncateToTokens } from "./message-block.js";
 
 // ---------------------------------------------------------------------------
 // 接口定义
@@ -44,6 +42,8 @@ export interface CompressionConfig {
   compactKeepRecent: number;
   /** 需要 P1 即时压缩的工具名列表（默认只压缩 run_bash） */
   compressibleTools: string[];
+  /** 大输出存储目录，默认是 Agent 全局运行根目录下的 .task_outputs */
+  outputDir: string;
 }
 
 /**
@@ -92,7 +92,11 @@ export interface ContextCompressor {
    * - 输出未超阈值 → 直接返回原文
    * - 输出超阈值 → 存文件，返回 preview
    */
-  compressToolResult(toolName: string, toolCallId: string, output: string): CompressedToolResult;
+  compressToolResult(
+    toolName: string,
+    toolCallId: string,
+    output: string,
+  ): CompressedToolResult;
   /** P0 衰减压缩：每轮 agent loop 开始时调用 */
   decayOldBlocks(blocks: MessageBlock[], currentRound: number): MessageBlock[];
   /** P2 全量压缩：上下文超过阈值时调用 */
@@ -114,6 +118,10 @@ const DEFAULT_CONFIG: CompressionConfig = {
   maxContextTokens: 80000,
   compactKeepRecent: 4,
   compressibleTools: ["run_bash"],
+  outputDir: resolve(
+    process.env["AGENT_HOME"] ?? resolve(homedir(), ".learn-claude-code-ts"),
+    ".task_outputs",
+  ),
 };
 
 // ---------------------------------------------------------------------------
@@ -140,14 +148,18 @@ export function createContextCompressor(
   // 追踪已存文件的 toolCallId → 文件相对路径，衰减压缩时用于追加路径引用
   const persistedToolOutputs: Map<string, string> = new Map();
 
-  // 存储目录路径
-  const outputDir = resolve(process.cwd(), ".task_outputs");
+  // 存储目录路径由组装根注入；若单独使用压缩器，默认也写入 Agent 全局目录。
+  const outputDir = cfg.outputDir;
 
   return {
     // -----------------------------------------------------------------------
     // P1 即时压缩
     // -----------------------------------------------------------------------
-    compressToolResult(toolName: string, toolCallId: string, output: string): CompressedToolResult {
+    compressToolResult(
+      toolName: string,
+      toolCallId: string,
+      output: string,
+    ): CompressedToolResult {
       // 工具名不在可压缩列表中，直接返回原文
       if (!cfg.compressibleTools.includes(toolName)) {
         return { content: output };
@@ -211,14 +223,14 @@ export function createContextCompressor(
         // tool_use 块：截断 tool result 的 content
         if (block.type === "tool_use") {
           const truncatedResults = block.toolResults.map((tr) => {
-            const content =
-              typeof tr.content === "string" ? tr.content : "";
+            const content = typeof tr.content === "string" ? tr.content : "";
             const truncated = truncateToTokens(content, cfg.decayPreviewTokens);
 
             // 检查该 toolCallId 是否有已存文件，有则追加路径引用
-            const tcId = "tool_call_id" in tr
-              ? (tr as { tool_call_id: string }).tool_call_id
-              : undefined;
+            const tcId =
+              "tool_call_id" in tr
+                ? (tr as { tool_call_id: string }).tool_call_id
+                : undefined;
             const persistedRelative = tcId
               ? persistedToolOutputs.get(tcId)
               : undefined;
@@ -272,9 +284,7 @@ export function createContextCompressor(
 
       for (const block of oldBlocks) {
         if (block.type === "text") {
-          const userContent = block.user
-            ? extractText(block.user)
-            : "";
+          const userContent = block.user ? extractText(block.user) : "";
           const assistantContent = block.assistant
             ? extractText(block.assistant)
             : "";
@@ -317,22 +327,23 @@ export function createContextCompressor(
 
       // 创建 summary 消息块
       const firstRound = oldBlocks[0]?.round;
-      const summaryBlock: MessageBlock = firstRound !== undefined
-        ? {
-            type: "summary",
-            user: {
-              role: "user",
-              content: summaryText,
-            } as ChatCompletionMessageParam,
-            round: firstRound,
-          }
-        : {
-            type: "summary",
-            user: {
-              role: "user",
-              content: summaryText,
-            } as ChatCompletionMessageParam,
-          };
+      const summaryBlock: MessageBlock =
+        firstRound !== undefined
+          ? {
+              type: "summary",
+              user: {
+                role: "user",
+                content: summaryText,
+              } as ChatCompletionMessageParam,
+              round: firstRound,
+            }
+          : {
+              type: "summary",
+              user: {
+                role: "user",
+                content: summaryText,
+              } as ChatCompletionMessageParam,
+            };
 
       // 更新内部状态
       hasCompacted = true;
@@ -432,9 +443,7 @@ function extractToolCallSummaries(
  *
  * 用于更新 recentFiles 状态。
  */
-function extractFilePaths(
-  assistant: ChatCompletionMessageParam,
-): string[] {
+function extractFilePaths(assistant: ChatCompletionMessageParam): string[] {
   const paths: string[] = [];
   if (!("tool_calls" in assistant) || !Array.isArray(assistant.tool_calls)) {
     return paths;

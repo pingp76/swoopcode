@@ -8,6 +8,8 @@ import type { LLMClient, LLMResponse } from "../llm.js";
 import type { ToolRegistry } from "./registry.js";
 import { createContextCompressor } from "../compressor.js";
 import { createPermissionManager } from "../permission.js";
+import { createSessionManager } from "../session.js";
+import { createTranscriptStore } from "../transcript.js";
 
 // ============================================================
 // Mock 工具：创建可控的 LLM 客户端，用于测试不同场景
@@ -83,13 +85,12 @@ describe("subagentToolDefinition", () => {
   });
 
   it("has optional max_rounds parameter", () => {
-    const props =
-      subagentToolDefinition.function.parameters?.properties ?? {};
+    const props = subagentToolDefinition.function.parameters?.properties ?? {};
     expect(props).toHaveProperty("task");
     expect(props).toHaveProperty("max_rounds");
-    expect(
-      subagentToolDefinition.function.parameters?.required,
-    ).not.toContain("max_rounds");
+    expect(subagentToolDefinition.function.parameters?.required).not.toContain(
+      "max_rounds",
+    );
   });
 });
 
@@ -152,7 +153,11 @@ describe("createSubagentToolProvider", () => {
   it("returns success result from sub-agent", async () => {
     // 子 Agent 的 LLM 直接返回文本回复（无工具调用），模拟任务一步完成
     const mockLLM = createMockLLM([
-      { content: "Analysis complete: found 3 issues", toolCalls: [], finishReason: "stop" },
+      {
+        content: "Analysis complete: found 3 issues",
+        toolCalls: [],
+        finishReason: "stop",
+      },
     ]);
     const mockLogger = createMockLogger();
 
@@ -207,6 +212,46 @@ describe("createSubagentToolProvider", () => {
     });
 
     expect(capturedMaxRounds).toBe(5);
+  });
+
+  it("creates a child session and passes it to the sub-agent", async () => {
+    const sessionManager = createSessionManager({
+      projectRoot: "/repo",
+      model: "test-model",
+      now: () => new Date("2026-05-11T00:00:00.000Z"),
+      idGenerator: (() => {
+        let id = 0;
+        return () => `session-${++id}`;
+      })(),
+    });
+    const transcriptStore = createTranscriptStore();
+    const parent = sessionManager.createMainSession();
+
+    let capturedSessionId: string | undefined;
+    const provider = createSubagentToolProvider({
+      llm: createMockLLM([]),
+      logger: createMockLogger(),
+      createFilteredRegistry: () =>
+        createToolRegistry() as unknown as ToolRegistry,
+      createAgentFn: (deps) => {
+        capturedSessionId = deps.sessionId;
+        expect(deps.transcriptStore).toBe(transcriptStore);
+        return { run: async () => "done" };
+      },
+      createCompressorFn: () => createContextCompressor(),
+      permissionManager: testPermissionManager,
+      sessionManager,
+      transcriptStore,
+      parentSessionId: parent.id,
+    });
+
+    await provider.toolEntries[0]!.execute({ task: "child task" });
+
+    expect(capturedSessionId).toBe("session-2");
+    const child = sessionManager.get("session-2");
+    expect(child?.kind).toBe("subagent");
+    expect(child?.parentSessionId).toBe(parent.id);
+    expect(child?.endedAt).toBe("2026-05-11T00:00:00.000Z");
   });
 
   it("returns error when LLM throws", async () => {

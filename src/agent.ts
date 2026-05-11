@@ -39,6 +39,7 @@ import type { PermissionManager, AskUserFn } from "./permission.js";
 import type { HookRunner } from "./hooks.js";
 import type { SystemPromptProvider } from "./system-prompt.js";
 import type { SessionEventBuffer } from "./session-events.js";
+import type { TranscriptStore } from "./transcript.js";
 import { createNoopHookRunner } from "./hooks.js";
 import { normalizeMessages } from "./normalize.js";
 import {
@@ -48,10 +49,7 @@ import {
   stripRound,
 } from "./message-block.js";
 import type { MessageBlock } from "./message-block.js";
-import {
-  createCacheDebugTracker,
-  formatCacheDebugLog,
-} from "./cache-debug.js";
+import { createCacheDebugTracker, formatCacheDebugLog } from "./cache-debug.js";
 import {
   createRecoveryState,
   classifyLLMError,
@@ -108,6 +106,10 @@ export function createAgent(deps: {
   systemPromptProvider?: SystemPromptProvider;
   /** 会话事件缓冲区（可选，用于注入 out-of-band 状态变化提醒） */
   sessionEventBuffer?: SessionEventBuffer;
+  /** 原始 transcript 存储（可选，不参与 prompt 构建） */
+  transcriptStore?: TranscriptStore;
+  /** 当前 Agent 对应的 sessionId（与 transcriptStore 配套使用） */
+  sessionId?: string;
 }): Agent {
   const {
     llm,
@@ -123,6 +125,8 @@ export function createAgent(deps: {
     hookRunner,
     systemPromptProvider,
     sessionEventBuffer,
+    transcriptStore,
+    sessionId,
   } = deps;
 
   // 没有传入 hookRunner 时使用空操作实现，避免所有调用处都要做 if 判断
@@ -155,6 +159,11 @@ export function createAgent(deps: {
     round: number,
   ): void {
     history.add(message, { round });
+    // transcript 是 append-only 原始事件流，专门服务未来搜索/回放/分析。
+    // 它不参与 prepareMessages，也不会因为 compact 而被改写。
+    if (transcriptStore && sessionId) {
+      transcriptStore.appendMessage({ sessionId, round, message });
+    }
   }
 
   /**
@@ -169,9 +178,7 @@ export function createAgent(deps: {
    * @param roundCount - 当前 agent loop 轮次，用于衰减压缩判断
    * @returns 最终给 LLM 的消息列表
    */
-  function prepareMessages(
-    roundCount: number,
-  ): ChatCompletionMessageParam[] {
+  function prepareMessages(roundCount: number): ChatCompletionMessageParam[] {
     // 从 history 获取带 round 元信息的条目（不含 system prompt）
     const entries = history.getEntries();
 
@@ -180,7 +187,10 @@ export function createAgent(deps: {
     // 因此在最后单独拼接到消息列表头部。
     const systemPrompt = history.getSystemPrompt();
     const systemMsg: ChatCompletionMessageParam | null = systemPrompt
-      ? { role: "system", content: systemPrompt } as ChatCompletionMessageParam
+      ? ({
+          role: "system",
+          content: systemPrompt,
+        } as ChatCompletionMessageParam)
       : null;
 
     // 将 HistoryEntry[] 转换为带 _round 的消息列表（不含 system prompt）
@@ -223,7 +233,9 @@ export function createAgent(deps: {
       // 压缩管道任何环节出错，降级使用标准化后的消息
       logger.warn(
         "Compression pipeline failed, using normalized messages: %s",
-        compressErr instanceof Error ? compressErr.message : String(compressErr),
+        compressErr instanceof Error
+          ? compressErr.message
+          : String(compressErr),
       );
       const fallback = [...normalized];
       if (systemMsg) fallback.unshift(systemMsg);
@@ -310,9 +322,7 @@ export function createAgent(deps: {
       } catch (parseError) {
         logger.warn(
           "Failed to parse tool args: %s",
-          parseError instanceof Error
-            ? parseError.message
-            : String(parseError),
+          parseError instanceof Error ? parseError.message : String(parseError),
         );
         appendMessage(
           {
@@ -347,7 +357,10 @@ export function createAgent(deps: {
       if (decision.action === "ask") {
         // 子智能体没有 askUserFn，ask 降级为 deny
         if (!askUserFn) {
-          logger.info("Permission denied (no confirmation callback): %s", fnName);
+          logger.info(
+            "Permission denied (no confirmation callback): %s",
+            fnName,
+          );
           appendMessage(
             {
               role: "tool",
@@ -390,7 +403,11 @@ export function createAgent(deps: {
       if (preResult.exitCode === 1) {
         // exitCode 1：阻止工具执行
         // 必须写入一条 role: "tool" 消息来满足 tool_call 配对
-        logger.info("PreToolUse hook blocked: %s — %s", fnName, preResult.message ?? "no reason");
+        logger.info(
+          "PreToolUse hook blocked: %s — %s",
+          fnName,
+          preResult.message ?? "no reason",
+        );
         appendMessage(
           {
             role: "tool",
@@ -493,9 +510,7 @@ export function createAgent(deps: {
       .reverse()
       .find(
         (m) =>
-          m.role === "assistant" &&
-          typeof m.content === "string" &&
-          m.content,
+          m.role === "assistant" && typeof m.content === "string" && m.content,
       );
     const summary =
       lastAssistantMsg && typeof lastAssistantMsg.content === "string"
@@ -520,6 +535,19 @@ export function createAgent(deps: {
     const compacted = compressor.compactHistory(decayed);
     const newEntries = blocksToEntries(compacted.blocks);
     history.replaceEntries(newEntries);
+    if (transcriptStore && sessionId) {
+      transcriptStore.append({
+        sessionId,
+        type: "history_replaced",
+        round: roundCount,
+        payload: {
+          reason: "context_length_recovery",
+          beforeEntryCount: entries.length,
+          afterEntryCount: newEntries.length,
+          summary: compacted.summary,
+        },
+      });
+    }
   }
 
   /**
@@ -554,7 +582,9 @@ export function createAgent(deps: {
           entries.push(entry);
         }
         const rAssistant = readRoundFromMessage(block.assistant) ?? block.round;
-        const assistantEntry: HistoryEntry = { message: stripRound(block.assistant) };
+        const assistantEntry: HistoryEntry = {
+          message: stripRound(block.assistant),
+        };
         if (rAssistant !== undefined) assistantEntry.round = rAssistant;
         entries.push(assistantEntry);
         for (const tr of block.toolResults) {
@@ -627,7 +657,9 @@ export function createAgent(deps: {
 
       // 2. systemPromptProvider 根据 query 生成的本轮提醒
       if (systemPromptProvider) {
-        const turnReminders = systemPromptProvider.buildTurnReminders({ query });
+        const turnReminders = systemPromptProvider.buildTurnReminders({
+          query,
+        });
         for (const r of turnReminders) {
           reminderMessages.push(
             `<system-reminder source="${r.source}">\n${r.message}\n</system-reminder>`,
@@ -722,7 +754,7 @@ export function createAgent(deps: {
 
         // 4. 调用 LLM（带错误恢复）
         //    先计算 cache debug hash，监控前缀稳定性
-        const cacheState = cacheDebugTracker.inspect({
+        let cacheState = cacheDebugTracker.inspect({
           messages: finalMsgs,
           tools: toolDefs,
         });
@@ -742,6 +774,18 @@ export function createAgent(deps: {
             if (action === "backoff") {
               recoveryState.apiRetryCount++;
               logger.warn(formatRecoveryNotice(action, kind, recoveryState));
+              if (transcriptStore && sessionId) {
+                transcriptStore.append({
+                  sessionId,
+                  type: "recovery_event",
+                  round: roundCount,
+                  payload: {
+                    kind,
+                    action,
+                    apiRetryCount: recoveryState.apiRetryCount,
+                  },
+                });
+              }
               await sleep(DEFAULT_RECOVERY_CONFIG.retryDelayMs);
               continue;
             }
@@ -749,6 +793,18 @@ export function createAgent(deps: {
             if (action === "compact") {
               recoveryState.compactRetryCount++;
               logger.info(formatRecoveryNotice(action, kind, recoveryState));
+              if (transcriptStore && sessionId) {
+                transcriptStore.append({
+                  sessionId,
+                  type: "recovery_event",
+                  round: roundCount,
+                  payload: {
+                    kind,
+                    action,
+                    compactRetryCount: recoveryState.compactRetryCount,
+                  },
+                });
+              }
               try {
                 compactCurrentHistoryForRecovery(roundCount);
               } catch (compactErr) {
@@ -762,15 +818,23 @@ export function createAgent(deps: {
               }
               // compact 后需要重新构建消息列表，并同步重算 cache debug
               finalMsgs = prepareMessages(roundCount);
-              const newCacheState = cacheDebugTracker.inspect({
+              cacheState = cacheDebugTracker.inspect({
                 messages: finalMsgs,
                 tools: toolDefs,
               });
-              logger.info(formatCacheDebugLog(newCacheState));
+              logger.info(formatCacheDebugLog(cacheState));
               continue;
             }
 
             logger.error(formatRecoveryNotice(action, kind, recoveryState));
+            if (transcriptStore && sessionId) {
+              transcriptStore.append({
+                sessionId,
+                type: "recovery_event",
+                round: roundCount,
+                payload: { kind, action },
+              });
+            }
             return formatFailureMessage(kind, error);
           }
         }
@@ -807,8 +871,24 @@ export function createAgent(deps: {
           if (action === "continue") {
             recoveryState.continueRetryCount++;
             logger.info(
-              formatRecoveryNotice("continue", "output_interrupted", recoveryState),
+              formatRecoveryNotice(
+                "continue",
+                "output_interrupted",
+                recoveryState,
+              ),
             );
+            if (transcriptStore && sessionId) {
+              transcriptStore.append({
+                sessionId,
+                type: "recovery_event",
+                round: roundCount,
+                payload: {
+                  kind: "output_interrupted",
+                  action,
+                  continueRetryCount: recoveryState.continueRetryCount,
+                },
+              });
+            }
             // 累积本次被截断的部分输出
             accumulatedContent += response.content ?? "";
             appendContinuationReminder(roundCount);

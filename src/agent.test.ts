@@ -16,6 +16,7 @@ import type { ToolResult } from "./tools/types.js";
 import type { Logger } from "./logger.js";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import * as recovery from "./recovery.js";
+import { createTranscriptStore } from "./transcript.js";
 
 // ============================================================
 // Mock 工具
@@ -86,7 +87,11 @@ function makeToolCall(
   id: string,
   name: string,
   args: string = "{}",
-): { id: string; type: "function"; function: { name: string; arguments: string } } {
+): {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+} {
   return {
     id,
     type: "function" as const,
@@ -121,10 +126,7 @@ describe("Agent Hook 集成", () => {
       compactKeepRecent: 4,
     });
     const permissionManager = createMockPermissionManager();
-    const hookRunner = createHookRunner(
-      deps.hookHandlers ?? {},
-      logger,
-    );
+    const hookRunner = createHookRunner(deps.hookHandlers ?? {}, logger);
 
     const agent = createAgent({
       llm: createMockLLM(deps.llmResponses),
@@ -166,7 +168,9 @@ describe("Agent Hook 集成", () => {
     );
 
     const agent = createAgent({
-      llm: createMockLLM([{ content: "done", toolCalls: [], finishReason: "stop" }]),
+      llm: createMockLLM([
+        { content: "done", toolCalls: [], finishReason: "stop" },
+      ]),
       history,
       tools: createMockToolRegistry("run_bash", async () => ({
         output: "ok",
@@ -187,16 +191,21 @@ describe("Agent Hook 集成", () => {
       (e) =>
         (e.message as { role: string }).role === "user" &&
         typeof (e.message as { content: unknown }).content === "string" &&
-        ((e.message as { content: string }).content as string).includes("[Hook: SessionStart]"),
+        ((e.message as { content: string }).content as string).includes(
+          "[Hook: SessionStart]",
+        ),
     );
     expect(hookEntries.length).toBeGreaterThanOrEqual(1);
     // 验证 Hook 消息的内容包含 handler 返回的文本
-    const hookContent = (hookEntries[0]!.message as { content: string }).content;
+    const hookContent = (hookEntries[0]!.message as { content: string })
+      .content;
     expect(hookContent).toContain("工作目录提示");
   });
 
   it("SessionStart 每个 Agent 实例只触发一次", async () => {
-    const sessionHandler = vi.fn<HookHandler>().mockReturnValue({ exitCode: 0 });
+    const sessionHandler = vi
+      .fn<HookHandler>()
+      .mockReturnValue({ exitCode: 0 });
 
     const { agent } = createTestAgent({
       llmResponses: [
@@ -250,7 +259,9 @@ describe("Agent Hook 集成", () => {
       (e) =>
         (e.message as { role: string }).role === "user" &&
         typeof (e.message as { content: unknown }).content === "string" &&
-        ((e.message as { content: string }).content as string).includes("blocked query"),
+        ((e.message as { content: string }).content as string).includes(
+          "blocked query",
+        ),
     );
     expect(blockedQuery).toBeUndefined();
   });
@@ -298,7 +309,9 @@ describe("Agent Hook 集成", () => {
       (e) =>
         (e.message as { role: string }).role === "tool" &&
         typeof (e.message as { content: unknown }).content === "string" &&
-        ((e.message as { content: string }).content as string).includes("Blocked by PreToolUse hook"),
+        ((e.message as { content: string }).content as string).includes(
+          "Blocked by PreToolUse hook",
+        ),
     );
     expect(blockedEntry).toBeDefined();
 
@@ -343,7 +356,9 @@ describe("Agent Hook 集成", () => {
       (e) =>
         (e.message as { role: string }).role === "user" &&
         typeof (e.message as { content: unknown }).content === "string" &&
-        ((e.message as { content: string }).content as string).includes("[Hook: PreToolUse]"),
+        ((e.message as { content: string }).content as string).includes(
+          "[Hook: PreToolUse]",
+        ),
     );
     expect(userEntries.length).toBeGreaterThanOrEqual(1);
   });
@@ -379,7 +394,9 @@ describe("Agent Hook 集成", () => {
       (e) =>
         (e.message as { role: string }).role === "user" &&
         typeof (e.message as { content: unknown }).content === "string" &&
-        ((e.message as { content: string }).content as string).includes("[Hook: PostToolUse]"),
+        ((e.message as { content: string }).content as string).includes(
+          "[Hook: PostToolUse]",
+        ),
     );
     expect(userEntries.length).toBeGreaterThanOrEqual(1);
   });
@@ -423,9 +440,7 @@ describe("Agent Hook 集成", () => {
     // assistant(tool_calls) → tool(result1) → tool(result2) → user(hook messages)
     // 中间不应有 user 消息
     const entries = history.getEntries();
-    const roles = entries.map(
-      (e) => (e.message as { role: string }).role,
-    );
+    const roles = entries.map((e) => (e.message as { role: string }).role);
 
     // 找到第一个 tool 消息的索引
     const firstToolIdx = roles.indexOf("tool");
@@ -471,9 +486,7 @@ describe("Agent 错误恢复", () => {
   }
 
   it("network 错误在上限内重试并最终成功", async () => {
-    const sleepSpy = vi
-      .spyOn(recovery, "sleep")
-      .mockResolvedValue(undefined);
+    const sleepSpy = vi.spyOn(recovery, "sleep").mockResolvedValue(undefined);
 
     let callCount = 0;
     const llm: LLMClient = {
@@ -501,9 +514,7 @@ describe("Agent 错误恢复", () => {
   });
 
   it("network 错误超过上限后返回失败提示", async () => {
-    const sleepSpy = vi
-      .spyOn(recovery, "sleep")
-      .mockResolvedValue(undefined);
+    const sleepSpy = vi.spyOn(recovery, "sleep").mockResolvedValue(undefined);
 
     let callCount = 0;
     const llm: LLMClient = {
@@ -525,9 +536,7 @@ describe("Agent 错误恢复", () => {
   });
 
   it("credential 错误不重试，直接返回配置提示", async () => {
-    const sleepSpy = vi
-      .spyOn(recovery, "sleep")
-      .mockResolvedValue(undefined);
+    const sleepSpy = vi.spyOn(recovery, "sleep").mockResolvedValue(undefined);
 
     let callCount = 0;
     const llm: LLMClient = {
@@ -650,9 +659,7 @@ describe("Agent 错误恢复", () => {
         if (callCount === 1) {
           return {
             content: null,
-            toolCalls: [
-              makeToolCall("call_1", "run_bash", '{"command":"ls"}'),
-            ],
+            toolCalls: [makeToolCall("call_1", "run_bash", '{"command":"ls"}')],
             finishReason: "length",
           };
         }
@@ -697,5 +704,55 @@ describe("Agent 错误恢复", () => {
         ),
     );
     expect(reminderEntry).toBeUndefined();
+  });
+});
+
+// ============================================================
+// Agent transcript 旁路记录
+// ============================================================
+
+describe("Agent transcript", () => {
+  it("records raw messages separately from prompt history", async () => {
+    const transcriptStore = createTranscriptStore({
+      now: () => new Date("2026-05-11T00:00:00.000Z"),
+      idGenerator: (() => {
+        let id = 0;
+        return () => `event-${++id}`;
+      })(),
+    });
+    const history = createHistory();
+    const agent = createAgent({
+      llm: createMockLLM([
+        { content: "done", toolCalls: [], finishReason: "stop" },
+      ]),
+      history,
+      tools: createMockToolRegistry("run_bash", async () => ({
+        output: "ok",
+        error: false,
+      })),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+      transcriptStore,
+      sessionId: "main-session",
+    });
+
+    await agent.run("hello");
+
+    const events = transcriptStore.readSession("main-session");
+    expect(events.map((e) => e.type)).toEqual([
+      "user_message",
+      "assistant_message",
+    ]);
+    expect(events[0]!.payload).toEqual({
+      message: { role: "user", content: "hello" },
+    });
+    expect(history.getEntries()).toHaveLength(2);
   });
 });

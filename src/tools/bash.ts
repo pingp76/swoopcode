@@ -83,7 +83,10 @@ export function isDangerousCommand(command: string): boolean {
  * @param command - 要执行的 bash 命令
  * @returns Promise<ToolResult> - 命令执行的结果
  */
-export function executeBash(command: string): Promise<ToolResult> {
+export function executeBash(
+  command: string,
+  cwd?: string,
+): Promise<ToolResult> {
   // 安全检查：危险命令直接拒绝，不执行
   if (isDangerousCommand(command)) {
     return Promise.resolve({
@@ -97,6 +100,7 @@ export function executeBash(command: string): Promise<ToolResult> {
     exec(
       command,
       {
+        cwd,
         timeout: 30_000, // 超时时间 30 秒，防止命令无限运行
         maxBuffer: 1024 * 1024, // 最大输出 1MB，防止内存溢出
       },

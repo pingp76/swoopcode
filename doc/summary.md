@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局**
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流
 
 ## 源码结构
 
@@ -20,6 +20,7 @@ src/
 ├── repl.ts             # REPL 交互层：readline 循环 + Agent/命令分发
 ├── cli-commands.ts     # CLI 命令注册与分发（/skill、/mode 等斜杠命令）
 ├── config.ts           # 从 .env 加载配置（含压缩配置）
+├── project-context.ts  # 项目上下文：集中解析 projectRoot、AGENTS.md、agentHome 与运行数据路径
 ├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
 ├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ LLM 日志记录
 ├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 logs/llm.log，超 1MB 清空重写
@@ -35,7 +36,10 @@ src/
 ├── memory.ts           # Memory 管理器：跨会话长期记忆（scan/list/read/create/delete/buildPromptSection）
 ├── system-prompt.ts    # System Prompt 组合器：稳定 snapshot + turn reminder（cache-ready）
 ├── session-events.ts   # 会话事件缓冲区：收集 out-of-band 状态变化，注入为 system-reminder
+├── session.ts          # Session 管理器：main/subagent sessionId + parentSessionId + 项目元信息
+├── transcript.ts       # Transcript 原始事件流：append-only 记录 user/assistant/tool/reminder/recovery 事件
 ├── cache-debug.ts      # Prompt Cache 调试：system/tools/prefix hash + 稳定性追踪
+├── recovery.ts         # LLM 错误分类与恢复决策：backoff/compact/continue/fail
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
 ├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
 ├── message-block.test.ts # 消息块测试（24 个测试用例）
@@ -47,9 +51,13 @@ src/
 ├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
 ├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
 ├── normalize.test.ts   # 消息标准化测试
-├── system-prompt.test.ts # System Prompt 测试（15 个测试用例）
+├── system-prompt.test.ts # System Prompt 测试（17 个测试用例）
 ├── session-events.test.ts # Session Event Buffer 测试（5 个测试用例）
 ├── cache-debug.test.ts  # Cache Debug 测试（7 个测试用例）
+├── project-context.test.ts # ProjectContext 路径派生测试
+├── recovery.test.ts    # LLM 错误恢复决策测试
+├── session.test.ts     # Session 管理器测试
+├── transcript.test.ts  # Transcript 原始事件流测试
 ├── index.test.ts       # 占位测试
 ├── history.test.ts     # history 模块测试（13 个测试用例）
 ├── logger.test.ts      # logger 模块测试
@@ -74,7 +82,36 @@ skills/
 
 ## 已实现功能
 
+### ProjectContext (`project-context.ts`)
+
+- **项目根目录抽象**：启动时集中解析 `projectRoot`，默认仍为 `process.cwd()`，后续可通过 `AGENT_PROJECT_ROOT` 扩展
+- **Agent 全局运行根目录**：启动时集中解析 `agentHome`，默认 `~/.learn-claude-code-ts`，可通过 `AGENT_HOME` 扩展
+- **项目级指令路径**：统一派生 `agentsFile = <projectRoot>/AGENTS.md`，存在时进入稳定 system prompt 头部
+- **路径集中管理**：`skillsDir`、`memoryDir`、`logsDir`、`taskOutputsDir` 全部从 `agentHome` 派生，不写入被操作项目目录
+- **组装根负责注入**：`index.ts` 创建一次 ProjectContext，再传给权限、工具注册表、压缩器、日志器、Memory/Skill 管理器
+- **进程级上下文**：projectRoot 在启动时确定，当前不支持运行中切换项目，也不按 conversation 切换 tools/skills
+- **项目目录边界**：只有 `AGENTS.md` 和工具执行/权限边界属于 `projectRoot`；Skill、Memory、LLM 日志和大工具输出都是 Agent 全局数据
+- **不落 agent 数据库**：当前不创建 `.agent-data/`，session/transcript 仍是内存能力，不实现磁盘持久化或 resume
+
+### Session 与 Transcript (`session.ts` + `transcript.ts`)
+
+- **SessionManager**：为主 Agent 创建 `main` session，为每次 `run_subagent` 创建 `subagent` child session
+- **SessionRecord 元信息**：记录 `id`、`kind`、`parentSessionId`、`startedAt`、`endedAt`、`projectRoot`、`cwd`、`model`、`title`
+- **TranscriptStore**：append-only 原始事件流，不参与 prompt 构建，不会因为 context compact 被改写
+- **暂不持久化**：当前 transcript/session 只保存在进程内，不实现新建 conversation、resume conversation 或磁盘快照恢复
+- **事件分类**：
+  - `user_message`：用户真实输入
+  - `assistant_message`：模型原始回复
+  - `tool_result`：工具结果消息
+  - `system_reminder`：memory/session/recovery 等系统提醒
+  - `hook_message`：Hook 注入消息
+  - `history_replaced`：强制 compact 写回 history 的结构化记录
+  - `recovery_event`：LLM 错误恢复行为记录
+- **双写边界**：`History` 继续作为 prompt working context；`TranscriptStore` 保存原始事件，未来用于搜索、回放、统计分析
+- **子智能体隔离**：子智能体仍使用独立 `History`，但 transcript 写入 child session，并通过 `parentSessionId` 关联父会话
+
 ### Agent 核心循环 (`agent.ts`)
+
 - 接收用户 query，存入 history
 - **主循环骨架**（六步）：轮次上限检测 → TODO 中断注入 → 消息处理管道 → 调用 LLM → 处理工具调用 → 返回最终回复
 - **内部步骤函数**（从 `run()` 提取的闭包函数，职责明确）：
@@ -95,8 +132,21 @@ skills/
 - **compressor 必需**：上下文压缩器通过依赖注入传入
 - **systemPromptProvider 可选**：用于生成 turn reminders（如"本轮忽略 memory"），不用于每轮重建 system prompt
 - **sessionEventBuffer 可选**：收集 out-of-band 状态变化（mode 切换、memory reload 等），下一轮注入为 `<system-reminder>`
+- **Transcript 旁路记录**：可选注入 `transcriptStore + sessionId`，每次 `appendMessage()` 同步记录原始事件，不影响 prompt 构建
+- **错误恢复事件记录**：backoff、compact、continue、fail 等恢复动作写入 transcript 的 `recovery_event`
+- **强制 compact 写回记录**：context window 超限恢复时，`history.replaceEntries()` 改写 working context，同时 transcript 追加 `history_replaced` 事件保留审计线索
+
+### LLM 错误恢复 (`recovery.ts` + `agent.ts`)
+
+- **错误分类**：network、rate_limit、credential、quota、context_length、output_interrupted、unknown
+- **恢复动作**：backoff、compact、continue、fail
+- **状态上限**：API 重试默认最多 5 次，compact 默认最多 1 次，输出续写默认最多 2 次
+- **输出中断续写**：`finishReason === "length"` 且无 tool calls 时，保存部分输出，追加 continuation reminder，再请求模型从断点继续
+- **上下文超限恢复**：API 报 context length 时触发强制 P2 compact 并写回 `History`
+- **不可恢复错误**：credential/quota/unknown 直接返回中文失败提示
 
 ### 消息块 (`message-block.ts`)
+
 - **消息块是压缩操作的原子单位**：保证 tool_use/tool_result 配对不被拆分
 - **三种类型**：
   - `text`：纯文本对话（user + assistant 无工具调用）
@@ -108,17 +158,20 @@ skills/
 - `truncateToTokens()`：按 token 估算截断文本
 
 ### 上下文压缩 (`compressor.ts`)
+
 - **三层压缩机制**（按优先级）：
   - **P0 衰减压缩**：`decayOldBlocks()` — 超过轮次阈值的 tool_use 块，截断 tool result content
-  - **P1 即时压缩**：`compressToolResult(toolName, toolCallId, output)` — 压缩器内部根据 `compressibleTools` 配置列表和输出大小决策是否压缩（默认只压缩 `run_bash`），大输出存入 `.task_outputs/`，返回 preview
+  - **P1 即时压缩**：`compressToolResult(toolName, toolCallId, output)` — 压缩器内部根据 `compressibleTools` 配置列表和输出大小决策是否压缩（默认只压缩 `run_bash`），大输出存入 Agent 全局 `.task_outputs/`，返回 preview
   - **P2 全量压缩**：`compactHistory()` — 纯规则压缩，保留 recent K 块，其余压缩为摘要
 - **消息块约束**：不拆分块、不孤立配对、不破坏 ID 关联
 - **状态管理**：hasCompacted、lastSummary、recentFiles（闭包保护）
 - **连续压缩**：后续压缩复用上一次 summary，避免信息退化
 - **降级策略**：文件写入失败跳过压缩、全量压缩后仍超限保留最精简上下文
-- **cleanup()**：清空 `.task_outputs/` 目录
+- **cleanup()**：清空 Agent 全局 `.task_outputs/` 目录
+- **输出目录可注入**：大工具输出目录由 `ProjectContext.taskOutputsDir` 注入，默认位于 `agentHome/.task_outputs/`
 
 ### LLM 客户端 (`llm.ts`)
+
 - 使用 OpenAI SDK，通过 baseURL 接入 MiniMax API
 - 支持 function calling（工具调用）
 - 接口抽象：`LLMClient { chat(messages, tools?, cacheDebug?) }`
@@ -127,6 +180,7 @@ skills/
 - **Cache Debug 透传**：可选的 `cacheDebug` 参数透传至 LLMLogger，用于日志中记录前缀 hash
 
 ### LLM 通信日志 (`llm-logger.ts`)
+
 - **完整记录原始通信**：请求（消息列表 + 工具定义 + cache debug）和响应（内容 + 工具调用 + 耗时）
 - **不做任何截断**：消息内容、工具参数、tool_call arguments 全部完整保留
 - **新增 Cache Debug 记录**：systemPromptHash、toolsHash、stablePrefixHash、变化标记
@@ -135,16 +189,19 @@ skills/
 - **请求-响应成对**：每组用空行 + 分隔线隔开
 
 ### 消息标准化 (`normalize.ts`)
+
 - **过滤元数据字段**：清理 content 数组中 `_` 开头的键（如 `_timestamp`、`_id`）
 - **补全缺失 tool_result**：每个 assistant 的 tool_call 都必须有对应的 tool 消息，缺失则插入占位消息
 - **合并连续同角色消息**：将 user+user 或 assistant+assistant 合并为一条（OpenAI API 要求角色严格交替）
 
 ### 工具系统 (`tools/`)
+
 - **命名规范**：所有工具名称以 `run_` 开头、全小写
 - **参数类型**：工具执行函数统一使用 `Record<string, unknown>`（与 LLM 返回的 JSON 类型一致）
 - **run_bash 工具**：通过 `child_process.exec` 执行 shell 命令
   - 危险命令过滤（rm -rf、mkfs、dd、fork bomb、shutdown 等）
   - 超时 30s，最大输出 1MB
+  - 支持由工具注册表注入 `projectRoot` 作为执行 cwd
 - **run_read 工具**：读取文件内容
   - 路径安全检查：限制在工作目录内，防止路径穿越
 - **run_write 工具**：写入文件（覆盖），自动创建父目录
@@ -154,17 +211,21 @@ skills/
   - old_string 未找到时返回错误
   - 路径安全检查同上
 - **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数（含 bash、files、todo、subagent、skill、memory 六类工具）
+- **工具定义全局稳定**：当前进程内只有一套工具定义列表，不随 conversation/session 改变；projectRoot 只作为 bash/file 工具的执行 cwd 与路径边界
+- **项目根目录注入**：`createToolRegistry(..., { projectRoot })` 将同一个 projectRoot 传给 bash 和文件工具，避免散落使用 `process.cwd()`
 - **工具定义顺序稳定**：`orderedEntries` 数组保证 `getToolDefinitions()` 多次调用顺序一致
 - **重复注册报错**：同名工具重复注册抛出错误，防止意外覆盖
 - **不因 mode 删减工具**：`/mode` 切换只改变权限策略，不改变工具定义列表
 
 ### 子智能体 / SubAgent (`tools/subagent.ts`)
+
 - **工具定义**：`run_subagent`，参数 `task`（必填）+ `max_rounds`（可选，默认 20）
 - **核心设计**：子智能体是一个独立的 Agent 实例，拥有自己的对话历史
 - **上下文隔离**：子智能体执行过程中产生的所有中间消息对父智能体不可见
+- **Session 隔离**：每次 `run_subagent` 创建 child session，transcript 事件写入子 session，通过 `parentSessionId` 与父 session 关联
 - **工具集**：子智能体可使用 run_bash、run_read、run_write、run_edit、**run_skill**
   - 排除 run_subagent（防止无限递归）
-  - 排除 run_todo_*（隔离上下文中用户看不到进度，maxRounds 已够用）
+  - 排除 `run_todo_*`（隔离上下文中用户看不到进度，maxRounds 已够用）
 - **复用父级 stable system prompt**：通过 `getStableSystemPrompt` 注入，子智能体使用与父级相同的 system prompt 快照，保证 cache 前缀一致（阶段 A）
 - **skill 支持**：子智能体加载 system prompt hint，可自主调用 run_skill 获取专业指示
 - **独立压缩器**：通过 `createCompressorFn` 注入，子智能体使用独立的压缩器实例
@@ -172,6 +233,7 @@ skills/
 - **停止条件**：任务完成（LLM 返回文本） / 轮数上限（强制截断） / LLM 错误（返回错误信息）
 
 ### TODO 任务管理 (`todo.ts`)
+
 - **纯 tool 驱动**：通过 6 个工具（run_todo_create、run_todo_update、run_todo_add、run_todo_remove、run_todo_list、run_todo_cancel）管理任务列表
 - **session 级别**：一个 session 最多一个活跃 todo list，新建时自动取消旧的
 - **状态机**：
@@ -184,6 +246,7 @@ skills/
 - **格式化输出**：统一格式展示任务状态（`[ ]` `[>]` `[x]` `[-]` `[_]` `[!]`）+ task_id + 统计摘要
 
 ### Skill 技能系统 (`skills.ts`)
+
 - **按需加载的 prompt 扩展**：Skill 不是新工具或子进程，而是通过 `run_skill` 工具注入的执行指示
 - **三阶段生命周期**：发现（启动时解析 SKILL.md frontmatter）→ 注册（嵌入 run_skill description）→ 触发（LLM function call 读取 body）
 - **SKILL.md 格式**：YAML frontmatter（name + description 必填）+ Markdown body（执行指示）
@@ -192,9 +255,11 @@ skills/
 - **SkillToolProvider**：遵循 TodoToolProvider/SubagentToolProvider 模式，提供 run_skill 工具
 - **REPL 命令**：`/skill list`（列出）、`/skill load`（重新扫描）、`/skill remove <name>`（删除）
 - **懒加载**：启动时只解析 frontmatter（name + description），触发时才读取 body
+- **当前进程级 catalog**：当前只在启动时扫描一套 Agent 全局 `skills/` 目录，不做 conversation/session 级别的 skill catalog 切换
 - **参考规范**：Anthropic 官方 Skill 系统（github.com/anthropics/skills）
 
 ### 权限管理 (`permission.ts`)
+
 - **三种运行模式**：
   - `plan`：只读模式，bash 禁止，写操作仅限 `.claude/plans/`
   - `auto`：自动模式，黑名单过滤后的操作直接放行
@@ -205,6 +270,7 @@ skills/
 - **`/mode` CLI 命令**：通过 `cli-commands.ts` 注册，切换运行模式
 
 ### Hook 机制 (`hooks.ts`)
+
 - **轻量进程内 Hook 系统**：在 Agent 主流程的固定时机发出事件，让外部逻辑观察或干预
 - **三种事件**：SessionStart（会话开始）、PreToolUse（工具执行前）、PostToolUse（工具执行后）
 - **三种返回语义**：exitCode 0（继续）、1（阻止）、2（注入补充消息后继续）
@@ -216,7 +282,8 @@ skills/
 - **PreToolUse 在权限检查之后触发**：Hook 不负责安全逻辑，权限系统仍然是独立的安全门卫
 
 ### Memory 长期记忆 (`memory.ts` + `tools/memory.ts`)
-- **跨会话持久化**：每条 memory 是独立 Markdown 文件，存放在 `memory/` 目录（frontmatter + body）
+
+- **跨会话持久化**：每条 memory 是独立 Markdown 文件，存放在 Agent 全局 `memory/` 目录（frontmatter + body）
 - **四种类型**：user（偏好）、feedback（纠正）、project（约定）、reference（外部资源）
 - **MemoryManager**：scan/list/read/create/findSimilar/delete/buildPromptSection/rebuildIndex
 - **4 个工具**：run_memory_create、run_memory_list、run_memory_read、run_memory_delete
@@ -231,20 +298,24 @@ skills/
 - **子智能体隔离**：子智能体不包含 memory 工具，不能直接操作长期记忆
 
 ### System Prompt 组合器（Cache-Ready）(`system-prompt.ts`)
-- **三层设计**：Static（进程固定）+ Session Snapshot（会话固定）+ Turn Reminder（单轮动态）
-- **创建时生成快照**：`createSystemPromptProvider()` 立即调用 `getSkillHint()` 和 `getMemoryHint()` 生成稳定快照
+
+- **三层设计**：Project Instructions（`AGENTS.md`，进程固定）+ Session Snapshot（Skill/Memory，会话固定）+ Turn Reminder（单轮动态）
+- **AGENTS.md 头部注入**：启动时读取 `<projectRoot>/AGENTS.md`（如果存在），放入稳定 system prompt 最前面
+- **创建时生成快照**：`createSystemPromptProvider()` 立即调用 `getProjectInstructions()`、`getSkillHint()` 和 `getMemoryHint()` 生成稳定快照
 - **`getSnapshot()`**：返回缓存的快照，不重新读取底层数据
-- **`refreshSnapshot()`**：显式刷新快照，重新读取 Skill/Memory（会破坏 cache 前缀，需谨慎使用）
+- **`refreshSnapshot()`**：显式刷新快照，重新读取 AGENTS.md/Skill/Memory 提供者（会破坏 cache 前缀，需谨慎使用）
 - **`buildTurnReminders({ query })`**：只处理本轮动态要求（如"忽略 memory"），返回 `SessionReminder[]`
 - **忽略 memory 新语义**：不再从 system prompt 中删除 memory hint，而是追加 `<system-reminder source="memory">` user message
 
 ### 会话事件缓冲区 (`session-events.ts`)
+
 - **职责**：收集 out-of-band 状态变化（mode 切换、memory reload、skill re-scan），下次用户请求时注入为 `<system-reminder>`
 - **轻量设计**：`push()` / `drain()` / `peek()` 三个方法，内部用数组保证顺序
 - **一次性消费**：`drain()` 返回并清空，避免重复注入
 - **格式统一**：各模块只提供纯文本，Agent 负责包装 XML
 
 ### Prompt Cache 调试 (`cache-debug.ts`)
+
 - **职责**：计算 system prompt、tools、stable prefix 的 SHA256 hash，帮助观察请求前缀稳定性
 - **教学版语义**：不声称是底层 API 的真实 cache hit rate，只显示"前缀是否发生变化"
 - **稳定序列化**：`stableStringify()` 对对象 key 排序，保证相同内容产生相同 hash
@@ -253,12 +324,14 @@ skills/
 - **集成位置**：Agent 每轮调用 LLM 前执行 inspect，结果通过 `logger.info()` 输出，同时透传给 LLMLogger
 
 ### 终端封装 (`terminal.ts`)
+
 - **统一 readline 接口**：REPL 读取和权限确认共享同一个 `readline.Interface`
 - `question(prompt)`：用于 REPL 输入
 - `askUser(message)`：用于权限确认（接受 y/yes，其他视为拒绝）
 - `close()`：关闭 readline
 
 ### 基础设施
+
 - **配置** (config.ts)：从 .env 加载 API key、baseURL、模型名
 - **日志** (logger.ts)：四级日志，通过 LOG_LEVEL 控制，使用 `util.format` 替换 %s/%d 占位符
 - **对话历史** (history.ts)：messages + rounds 统一存储，支持 add/getMessages/getEntries/clear/setSystemPrompt/getSystemPrompt
@@ -271,55 +344,57 @@ skills/
 
 ## 依赖
 
-| 包 | 用途 |
-|---|---|
-| `openai` | LLM API 客户端（OpenAI 兼容格式） |
-| `dotenv` | 从 .env 加载环境变量 |
-| `typescript` | 类型检查和编译 |
-| `tsx` | 直接运行 TS 文件（开发用） |
-| `vitest` | 测试框架 |
-| `eslint` + `typescript-eslint` | 代码检查 |
-| `prettier` | 代码格式化 |
+| 包                             | 用途                              |
+| ------------------------------ | --------------------------------- |
+| `openai`                       | LLM API 客户端（OpenAI 兼容格式） |
+| `dotenv`                       | 从 .env 加载环境变量              |
+| `typescript`                   | 类型检查和编译                    |
+| `tsx`                          | 直接运行 TS 文件（开发用）        |
+| `vitest`                       | 测试框架                          |
+| `eslint` + `typescript-eslint` | 代码检查                          |
+| `prettier`                     | 代码格式化                        |
 
 ## 配置项（.env）
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `LLM_API_KEY` | API 密钥 | `sk-cp-...` |
-| `LLM_BASE_URL` | API 基础 URL | `https://api.minimaxi.com/v1` |
-| `LLM_MODEL` | 模型名称 | `MiniMax-M2.5` |
-| `LOG_LEVEL` | 日志级别 | `info` |
-| `COMPRESS_TOOL_OUTPUT` | 即时压缩 token 阈值 | `2000` |
-| `COMPRESS_DECAY_THRESHOLD` | 衰减压缩轮次阈值 | `3` |
-| `COMPRESS_DECAY_PREVIEW` | 衰减后保留 token 数 | `100` |
-| `COMPRESS_MAX_CONTEXT` | 全量压缩 token 阈值 | `80000` |
-| `COMPACT_KEEP_RECENT` | 全量压缩保留消息块数 | `4` |
-| `MEMORY_DIR` | Memory 文件目录（相对 agentRoot） | `memory` |
+| 变量                       | 说明                                | 示例                          |
+| -------------------------- | ----------------------------------- | ----------------------------- |
+| `LLM_API_KEY`              | API 密钥                            | `sk-cp-...`                   |
+| `LLM_BASE_URL`             | API 基础 URL                        | `https://api.minimaxi.com/v1` |
+| `LLM_MODEL`                | 模型名称                            | `MiniMax-M2.5`                |
+| `LOG_LEVEL`                | 日志级别                            | `info`                        |
+| `COMPRESS_TOOL_OUTPUT`     | 即时压缩 token 阈值                 | `2000`                        |
+| `COMPRESS_DECAY_THRESHOLD` | 衰减压缩轮次阈值                    | `3`                           |
+| `COMPRESS_DECAY_PREVIEW`   | 衰减后保留 token 数                 | `100`                         |
+| `COMPRESS_MAX_CONTEXT`     | 全量压缩 token 阈值                 | `80000`                       |
+| `COMPACT_KEEP_RECENT`      | 全量压缩保留消息块数                | `4`                           |
+| `AGENT_PROJECT_ROOT`       | 被操作项目根目录                    | 当前启动目录                  |
+| `AGENT_HOME`               | Agent 全局运行根目录                | `~/.learn-claude-code-ts`     |
+| `MEMORY_DIR`               | Memory 文件目录名（相对 agentHome） | `memory`                      |
 
 ## 测试覆盖
 
-| 测试文件 | 测试数 | 覆盖内容 |
-|---------|-------|---------|
-| `src/tools/bash.test.ts` | 9 | 危险命令拦截、正常执行、错误处理 |
-| `src/tools/files.test.ts` | 17 | 路径安全检查、读写文件、编辑替换 |
-| `src/normalize.test.ts` | 10 | 元数据过滤、tool_result 补全、消息合并 |
-| `src/history.test.ts` | 13 | 增删、返回副本、清空、add 带 meta、getEntries、getSystemPrompt |
-| `src/logger.test.ts` | 1 | 日志级别过滤 |
-| `src/todo.test.ts` | 33 | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程 |
-| `src/tools/subagent.test.ts` | 13 | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表 |
-| `src/skills.test.ts` | 25 | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量 |
-| `src/message-block.test.ts` | 24 | 消息块分组、还原、_round 传递与清除、round-trip 一致性、token 估算 |
-| `src/compressor.test.ts` | 21 | 衰减压缩、即时压缩（含非压缩工具通过）、全量压缩、状态管理、cleanup |
-| `src/permission.test.ts` | 47 | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory 工具权限 |
-| `src/hooks.test.ts` | 11 | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner |
-| `src/agent.test.ts` | 7 | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序 |
-| `src/memory.test.ts` | 40 | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar |
-| `src/tools/memory.test.ts` | 2 | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复 |
-| `src/tools/registry.test.ts` | 4 | 重复注册报错、工具定义顺序稳定性、完整 registry 创建 |
-| `src/system-prompt.test.ts` | 15 | buildSystemPrompt 组合、snapshot 稳定性、refreshSnapshot、ignore memory reminder |
-| `src/session-events.test.ts` | 5 | drain 清空、peek 不清空、顺序保持 |
-| `src/cache-debug.test.ts` | 7 | inspect 变化检测、system prompt 不变性、formatCacheDebugLog |
-| `src/index.test.ts` | 1 | 占位 |
+| 测试文件                     | 测试数 | 覆盖内容                                                                                                        |
+| ---------------------------- | ------ | --------------------------------------------------------------------------------------------------------------- |
+| `src/tools/bash.test.ts`     | 9      | 危险命令拦截、正常执行、错误处理                                                                                |
+| `src/tools/files.test.ts`    | 17     | 路径安全检查、读写文件、编辑替换                                                                                |
+| `src/normalize.test.ts`      | 10     | 元数据过滤、tool_result 补全、消息合并                                                                          |
+| `src/history.test.ts`        | 13     | 增删、返回副本、清空、add 带 meta、getEntries、getSystemPrompt                                                  |
+| `src/logger.test.ts`         | 1      | 日志级别过滤                                                                                                    |
+| `src/todo.test.ts`           | 33     | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程                                                  |
+| `src/tools/subagent.test.ts` | 13     | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表                                             |
+| `src/skills.test.ts`         | 25     | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量                         |
+| `src/message-block.test.ts`  | 24     | 消息块分组、还原、\_round 传递与清除、round-trip 一致性、token 估算                                             |
+| `src/compressor.test.ts`     | 21     | 衰减压缩、即时压缩（含非压缩工具通过）、全量压缩、状态管理、cleanup                                             |
+| `src/permission.test.ts`     | 47     | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory 工具权限  |
+| `src/hooks.test.ts`          | 11     | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner                                             |
+| `src/agent.test.ts`          | 7      | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序                       |
+| `src/memory.test.ts`         | 40     | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar |
+| `src/tools/memory.test.ts`   | 2      | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复                                                |
+| `src/tools/registry.test.ts` | 4      | 重复注册报错、工具定义顺序稳定性、完整 registry 创建                                                            |
+| `src/system-prompt.test.ts`  | 17     | buildSystemPrompt 组合、AGENTS.md 项目指令头、snapshot 稳定性、refreshSnapshot、ignore memory reminder          |
+| `src/session-events.test.ts` | 5      | drain 清空、peek 不清空、顺序保持                                                                               |
+| `src/cache-debug.test.ts`    | 7      | inspect 变化检测、system prompt 不变性、formatCacheDebugLog                                                     |
+| `src/index.test.ts`          | 1      | 占位                                                                                                            |
 
 ## 设计模式
 
@@ -344,24 +419,31 @@ skills/
 以下是重构过程中积累的经验，供后续生成代码时参考：
 
 ### 平行数组是隐式耦合的高风险点
+
 当两个数组必须一一对应（如 messages 和 messageRounds），任何绕过同步函数的直接操作都会破坏对齐。解决方案：将元信息封装到统一存储中（如 history 内部的 rounds 数组），只暴露单一写入路径（`add()`），从接口层面消除失同步可能。
 
 ### 向后兼容的接口扩展
+
 扩展接口时，新参数用可选类型（`meta?: { round?: number }`）。这样所有现有调用无需修改，新功能按需启用。`exactOptionalPropertyTypes` 严格模式下，返回的对象不能包含值为 undefined 的可选字段，需要条件赋值。
 
 ### 压缩管道的注释解耦
+
 `prepareMessages()` 通过 `_round` 元数据与 `message-block.ts` 的 `groupToBlocks()` 通信。这个"协议"是松耦合的：`_round` 作为临时元数据，在 `flattenToMessages()` 中被清除，不会发送给 LLM API。只要 `_round` 的注入格式不变，下游模块（normalize、groupToBlocks、compressor）无需任何修改。
 
 ### getEntries() 不含 system prompt 的设计
+
 `getEntries()` 有意不返回 system prompt 条目，而是通过独立的 `getSystemPrompt()` 方法获取。这样设计是因为 system prompt 不参与压缩管道，调用方可按需组装。这避免了 `annotateWithRounds()` 之前的索引偏移计算。
 
 ### Record<string, unknown> 的类型转换策略
+
 将 `ToolExecutor` 从 `Record<string, string>` 升级为 `Record<string, unknown>` 时，所有工具实现需要用 `String()`/`Number()` 显式转换。`String(x ?? "")` 比 `x as string` 更安全，因为它处理了 `undefined`/`null`/`number` 等情况。对于数组参数（如 `args["tasks"]`），`as string[]` 断言是合理的，因为 JSON.parse 已经保证了类型。
 
 ### 压缩器统一决策 vs Agent 硬编码
+
 将"哪些工具需要即时压缩"的决策权从 agent 移到 compressor，通过 `compressibleTools` 配置列表实现。这样新增大输出工具时只需修改配置，不碰 agent 代码。关键接口变更：`compressToolResult(toolName, toolCallId, output)` 新增 `toolName` 参数。
 
 ### 组装根、应用服务、适配层的分离
+
 将 `index.ts` 拆成三层：`index.ts`（组装根 — 只做组件创建和接线）、`repl.ts`（应用服务 — REPL 交互循环）、`cli-commands.ts`（适配层 — CLI 斜杠命令注册和分发）。命令注册表模式让新命令只需 `register()`，不修改 REPL 代码。
 
 ### 副作用不能隐式替代返回值

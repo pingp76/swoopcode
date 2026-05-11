@@ -2,8 +2,8 @@
  * system-prompt.ts — System Prompt 组合器（Cache-Ready 版本）
  *
  * 职责：将 system prompt 分为三层管理，保证 prompt cache 前缀稳定：
- * 1. Static — 进程启动后固定不变
- * 2. Session Snapshot — 会话内固定，显式 refresh 才变化
+ * 1. Project Instructions — projectRoot/AGENTS.md，启动时读取，放在最前面
+ * 2. Session Snapshot — Skill/Memory 等会话内固定片段，显式 refresh 才变化
  * 3. Turn Reminder — 单轮动态，通过 user message 注入
  *
  * 核心原则：
@@ -20,6 +20,8 @@ import type { SessionReminder } from "./session-events.js";
 
 /** System prompt 的各个片段 */
 export interface SystemPromptParts {
+  /** 项目级 AGENTS.md 指令（存在时放在 system prompt 最前面） */
+  projectInstructions?: string | null;
   /** Skill 提示（有可用 skill 时注入） */
   skillHint?: string | null;
   /** Memory 摘要提示（有 memory 时注入） */
@@ -30,6 +32,8 @@ export interface SystemPromptParts {
 export interface SystemPromptSnapshot {
   /** 组合后的完整 system prompt */
   systemPrompt: string | null;
+  /** 当前 snapshot 中的项目级 AGENTS.md 指令（用于调试） */
+  projectInstructions: string | null;
   /** 当前 snapshot 中的 skill hint（用于调试） */
   skillHint: string | null;
   /** 当前 snapshot 中的 memory hint（用于调试） */
@@ -62,10 +66,11 @@ export interface SystemPromptProvider {
  * 规则：
  * 1. 没有任何片段时返回 null
  * 2. 有多个片段时用空行分隔
- * 3. Skill hint 在前，Memory hint 在后
+ * 3. AGENTS.md 项目指令在最前，然后是 Skill hint，最后是 Memory hint
  */
 export function buildSystemPrompt(parts: SystemPromptParts): string | null {
   const segments: string[] = [];
+  if (parts.projectInstructions) segments.push(parts.projectInstructions);
   if (parts.skillHint) segments.push(parts.skillHint);
   if (parts.memoryHint) segments.push(parts.memoryHint);
   if (segments.length === 0) return null;
@@ -89,6 +94,7 @@ const IGNORE_MEMORY_PATTERN =
  *
  * @param deps.getSkillHint - 返回当前 Skill hint 的函数
  * @param deps.getMemoryHint - 返回当前 Memory hint 的函数
+ * @param deps.getProjectInstructions - 返回项目级 AGENTS.md 指令的函数
  *
  * 内部行为：
  * - 创建时立即生成一次 snapshot
@@ -97,6 +103,7 @@ const IGNORE_MEMORY_PATTERN =
  * - buildTurnReminders() 检测忽略 memory 关键词，返回 reminder 列表
  */
 export function createSystemPromptProvider(deps: {
+  getProjectInstructions?: () => string | null;
   getSkillHint: () => string | null;
   getMemoryHint: () => string | null;
 }): SystemPromptProvider {
@@ -107,10 +114,16 @@ export function createSystemPromptProvider(deps: {
    * buildCurrentSnapshot — 根据当前 Skill/Memory hint 构建快照
    */
   function buildCurrentSnapshot(): SystemPromptSnapshot {
+    const projectInstructions = deps.getProjectInstructions?.() ?? null;
     const skillHint = deps.getSkillHint();
     const memoryHint = deps.getMemoryHint();
     return {
-      systemPrompt: buildSystemPrompt({ skillHint, memoryHint }),
+      systemPrompt: buildSystemPrompt({
+        projectInstructions,
+        skillHint,
+        memoryHint,
+      }),
+      projectInstructions,
       skillHint,
       memoryHint,
     };

@@ -15,6 +15,7 @@
  */
 
 import * as fs from "node:fs";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import type {
   ChatCompletionMessageParam,
@@ -61,7 +62,12 @@ function formatSystemPrompt(
   lines.push(indent(content, 2));
   if (cacheDebug) {
     const changedMark = cacheDebug.changed.systemPrompt ? "CHANGED" : "stable";
-    lines.push(indent(`# hash=${cacheDebug.current.systemPromptHash} (${changedMark})`, 2));
+    lines.push(
+      indent(
+        `# hash=${cacheDebug.current.systemPromptHash} (${changedMark})`,
+        2,
+      ),
+    );
   }
   return lines.join("\n");
 }
@@ -77,9 +83,15 @@ function formatMessages(messages: ChatCompletionMessageParam[]): string {
   for (const msg of messages) {
     const roleTag = `[${msg.role}]`;
 
-    if (msg.role === "assistant" && "tool_calls" in msg && Array.isArray(msg.tool_calls)) {
+    if (
+      msg.role === "assistant" &&
+      "tool_calls" in msg &&
+      Array.isArray(msg.tool_calls)
+    ) {
       if (msg.content) {
-        lines.push(indent(`${roleTag} ${formatMessageContent(msg.content)}`, 2));
+        lines.push(
+          indent(`${roleTag} ${formatMessageContent(msg.content)}`, 2),
+        );
       } else {
         lines.push(indent(`${roleTag}`, 2));
       }
@@ -89,7 +101,9 @@ function formatMessages(messages: ChatCompletionMessageParam[]): string {
         lines.push(indent(`function: ${tc.function.name}`, 8));
         try {
           const parsed = JSON.parse(tc.function.arguments);
-          lines.push(indent(`arguments: ${JSON.stringify(parsed, null, 2)}`, 8));
+          lines.push(
+            indent(`arguments: ${JSON.stringify(parsed, null, 2)}`, 8),
+          );
         } catch {
           lines.push(indent(`arguments: ${tc.function.arguments}`, 8));
         }
@@ -116,14 +130,20 @@ function formatTools(
   cacheDebug?: CacheDebugState,
 ): string {
   if (tools.length === 0) return "Tools: (none)";
-  const changedMark = cacheDebug ? (cacheDebug.changed.tools ? "CHANGED" : "stable") : null;
+  const changedMark = cacheDebug
+    ? cacheDebug.changed.tools
+      ? "CHANGED"
+      : "stable"
+    : null;
   const hashSuffix = cacheDebug
     ? ` hash=${cacheDebug.current.toolsHash} (${changedMark})`
     : "";
   const lines = [`Tools (${tools.length}):${hashSuffix}`];
   for (const t of tools) {
     if (t.function) {
-      lines.push(`  - ${t.function.name}: ${t.function.description ?? "(no description)"}`);
+      lines.push(
+        `  - ${t.function.name}: ${t.function.description ?? "(no description)"}`,
+      );
     }
   }
   return lines.join("\n");
@@ -155,12 +175,17 @@ function formatToolCalls(response: LLMResponse): string {
  * 处理 string、array（多模态内容块）和 null/undefined 三种情况。
  * 当 content 为数组时，提取 text 类型的内容块；遇到非 text 类型用占位符表示。
  */
-function formatMessageContent(content: string | unknown[] | null | undefined): string {
+function formatMessageContent(
+  content: string | unknown[] | null | undefined,
+): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     if (content.length === 0) return "(empty array)";
     const parts = content
-      .filter((b): b is Record<string, unknown> => typeof b === "object" && b !== null)
+      .filter(
+        (b): b is Record<string, unknown> =>
+          typeof b === "object" && b !== null,
+      )
       .map((b) => {
         if (b.type === "text" && typeof b.text === "string") return b.text;
         return `<${b.type}>`;
@@ -189,14 +214,20 @@ function indent(text: string, spaces: number): string {
 /**
  * createLLMLogger — 创建 LLM 通信日志记录器
  *
- * @param options.logDir - 日志目录（默认 "logs"）
+ * @param options.logDir - 日志目录（默认 Agent 全局运行目录下的 "logs"）
  * @param options.maxSize - 文件最大字节数（默认 1MB），超过后清空重写
  */
 export function createLLMLogger(options?: {
   logDir?: string;
   maxSize?: number;
 }): LLMLogger {
-  const logDir = options?.logDir ?? "logs";
+  const logDir =
+    options?.logDir ??
+    path.resolve(
+      process.env["AGENT_HOME"] ??
+        path.resolve(homedir(), ".learn-claude-code-ts"),
+      "logs",
+    );
   const maxSize = options?.maxSize ?? 1024 * 1024; // 1MB
   const logFile = path.join(logDir, "llm.log");
 
@@ -243,12 +274,7 @@ export function createLLMLogger(options?: {
         typeof systemMsg?.content === "string" ? systemMsg.content : null;
       const nonSystemMessages = messages.filter((m) => m.role !== "system");
 
-      const lines = [
-        "",
-        SEPARATOR,
-        `[REQUEST] ${timestamp}`,
-        SEPARATOR,
-      ];
+      const lines = ["", SEPARATOR, `[REQUEST] ${timestamp}`, SEPARATOR];
 
       // 1. System Prompt — cache 稳定前缀的第一部分
       if (systemContent) {
@@ -266,7 +292,9 @@ export function createLLMLogger(options?: {
       }
 
       lines.push("");
-      const log = lines.filter((line, idx) => idx > 0 || line !== "").join("\n");
+      const log = lines
+        .filter((line, idx) => idx > 0 || line !== "")
+        .join("\n");
       appendLog(log);
     },
 

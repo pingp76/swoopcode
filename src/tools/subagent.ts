@@ -24,6 +24,8 @@ import type { Agent } from "../agent.js";
 import type { ContextCompressor } from "../compressor.js";
 import type { PermissionManager } from "../permission.js";
 import type { HookRunner } from "../hooks.js";
+import type { SessionManager } from "../session.js";
+import type { TranscriptStore } from "../transcript.js";
 import { createHistory } from "../history.js";
 import { SKILL_SYSTEM_PROMPT_HINT } from "../skills.js";
 
@@ -45,7 +47,7 @@ export const subagentToolDefinition: ChatCompletionTool = {
       "Best practices:\n" +
       "- The sub-agent can load skills (run_skill) on its own — no need to load " +
       "skills in the parent before delegating. For example, delegate " +
-      "\"Review src/agent.ts for code quality issues\" and the sub-agent will " +
+      '"Review src/agent.ts for code quality issues" and the sub-agent will ' +
       "load the code-review skill internally if needed.\n" +
       "- Use TODO tasks to track progress at the parent level, and delegate " +
       "the actual work to sub-agents.\n" +
@@ -114,6 +116,10 @@ export function createSubagentToolProvider(deps: {
     askUserFn?: import("../permission.js").AskUserFn;
     /** Hook 运行器：子智能体继承父级 Hook */
     hookRunner?: HookRunner;
+    /** 原始 transcript 存储：子智能体写入自己的 child session */
+    transcriptStore?: TranscriptStore;
+    /** 当前 Agent 对应的 sessionId */
+    sessionId?: string;
   }) => Agent;
   createCompressorFn: () => ContextCompressor;
   /** 权限管理器：子智能体继承父级的同一个实例 */
@@ -124,8 +130,27 @@ export function createSubagentToolProvider(deps: {
   memoryHint?: string | null;
   /** 获取父级稳定 system prompt 快照的函数（可选）。若提供，子智能体直接使用父级快照，保证 cache 前缀一致 */
   getStableSystemPrompt?: () => string | null;
+  /** session 管理器：为每次 run_subagent 创建子 session */
+  sessionManager?: SessionManager;
+  /** 原始 transcript 存储：子 session 事件写入同一个 store */
+  transcriptStore?: TranscriptStore;
+  /** 父 Agent 的 sessionId，用于建立 parentSessionId */
+  parentSessionId?: string;
 }): SubagentToolProvider {
-  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn, permissionManager, hookRunner, memoryHint, getStableSystemPrompt } = deps;
+  const {
+    llm,
+    logger,
+    createFilteredRegistry,
+    createAgentFn,
+    createCompressorFn,
+    permissionManager,
+    hookRunner,
+    memoryHint,
+    getStableSystemPrompt,
+    sessionManager,
+    transcriptStore,
+    parentSessionId,
+  } = deps;
 
   /**
    * executeSubagent — 执行子智能体任务
@@ -154,8 +179,12 @@ export function createSubagentToolProvider(deps: {
       };
     }
 
-    logger.info("[SubAgent] Starting sub-agent for task: %s", task.slice(0, 100));
+    logger.info(
+      "[SubAgent] Starting sub-agent for task: %s",
+      task.slice(0, 100),
+    );
 
+    let childSessionId: string | null = null;
     try {
       // 1. 创建独立的对话历史（不与父级共享引用）
       //    子智能体的所有中间消息都只存在于这个 history 中
@@ -163,7 +192,9 @@ export function createSubagentToolProvider(deps: {
       const subHistory = createHistory();
       // 子智能体优先复用父级的稳定 system prompt 快照，保证 cache 前缀一致。
       // 如果父级未提供 getStableSystemPrompt，则回退到旧行为（Skill hint + Memory hint）。
-      const stablePrompt = getStableSystemPrompt ? getStableSystemPrompt() : null;
+      const stablePrompt = getStableSystemPrompt
+        ? getStableSystemPrompt()
+        : null;
       if (stablePrompt) {
         subHistory.setSystemPrompt(stablePrompt);
       } else {
@@ -184,6 +215,14 @@ export function createSubagentToolProvider(deps: {
       //    - 共享同一个 permissionManager（继承父级权限模式）
       //    - 不传 askUserFn（子智能体内的 ask 降级为 deny）
       const subCompressor = createCompressorFn();
+      const childSession =
+        sessionManager && parentSessionId
+          ? sessionManager.createChildSession(
+              parentSessionId,
+              task.slice(0, 80),
+            )
+          : null;
+      childSessionId = childSession?.id ?? null;
       // 子智能体创建参数：只有 hookRunner 有值时才传入
       // exactOptionalPropertyTypes 不允许显式传 undefined 给可选属性
       const subAgentDeps: Parameters<typeof createAgentFn>[0] = {
@@ -199,15 +238,25 @@ export function createSubagentToolProvider(deps: {
       if (hookRunner) {
         subAgentDeps.hookRunner = hookRunner;
       }
+      if (transcriptStore && childSession) {
+        subAgentDeps.transcriptStore = transcriptStore;
+        subAgentDeps.sessionId = childSession.id;
+      }
       const subAgent = createAgentFn(subAgentDeps);
 
       // 4. 运行子 Agent（父智能体在此阻塞等待）
       const result = await subAgent.run(task);
+      if (childSessionId) {
+        sessionManager?.endSession(childSessionId);
+      }
 
       logger.info("[SubAgent] Completed sub-agent task");
       // 成功：返回子智能体的最终文本
       return { output: result, error: false };
     } catch (err) {
+      if (childSessionId) {
+        sessionManager?.endSession(childSessionId);
+      }
       // LLM 调用失败或其他异常：返回错误信息，不中断父智能体
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error("[SubAgent] Error: %s", errMsg);

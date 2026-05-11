@@ -13,12 +13,18 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createContextCompressor } from "./compressor.js";
 import type { MessageBlock } from "./message-block.js";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import { existsSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
+
+/** 为需要落盘的压缩测试创建独立临时目录，避免写入项目目录或真实 agentHome。 */
+function makeTempOutputDir(): string {
+  return mkdtempSync(join(tmpdir(), "compressor-test-"));
+}
 
 /** 创建一个 text 类型的消息块 */
 function makeTextBlock(
@@ -73,7 +79,10 @@ function makeToolUseBlock(
 function makeSummaryBlock(summaryText: string, round?: number): MessageBlock {
   const block: MessageBlock = {
     type: "summary",
-    user: { role: "user", content: `[Context Summary]\n${summaryText}` } as ChatCompletionMessageParam,
+    user: {
+      role: "user",
+      content: `[Context Summary]\n${summaryText}`,
+    } as ChatCompletionMessageParam,
   };
   if (round !== undefined) block.round = round;
   return block;
@@ -84,16 +93,29 @@ function makeSummaryBlock(summaryText: string, round?: number): MessageBlock {
 // ---------------------------------------------------------------------------
 
 describe("decayOldBlocks (P0)", () => {
-  const compressor = createContextCompressor({ decayThreshold: 3, decayPreviewTokens: 100 });
+  const compressor = createContextCompressor({
+    decayThreshold: 3,
+    decayPreviewTokens: 100,
+  });
 
   it("does not modify recent tool_use blocks (within threshold)", () => {
-    const block = makeToolUseBlock("run_bash", '{"command":"ls"}', "file1.txt\nfile2.txt", 5);
+    const block = makeToolUseBlock(
+      "run_bash",
+      '{"command":"ls"}',
+      "file1.txt\nfile2.txt",
+      5,
+    );
     const result = compressor.decayOldBlocks([block], 7); // age = 7 - 5 = 2 < 3
     expect(result[0]).toEqual(block);
   });
 
   it("does not modify blocks at exact threshold boundary", () => {
-    const block = makeToolUseBlock("run_bash", '{"command":"ls"}', "file1.txt", 4);
+    const block = makeToolUseBlock(
+      "run_bash",
+      '{"command":"ls"}',
+      "file1.txt",
+      4,
+    );
     const result = compressor.decayOldBlocks([block], 7); // age = 7 - 4 = 3 <= 3
     expect(result[0]).toEqual(block);
   });
@@ -101,24 +123,41 @@ describe("decayOldBlocks (P0)", () => {
   it("truncates old tool_use block tool result content", () => {
     // 创建一个很长的输出（超过 100 token）
     const longOutput = "x".repeat(1000);
-    const block = makeToolUseBlock("run_bash", '{"command":"ls"}', longOutput, 1);
+    const block = makeToolUseBlock(
+      "run_bash",
+      '{"command":"ls"}',
+      longOutput,
+      1,
+    );
     const result = compressor.decayOldBlocks([block], 10); // age = 10 - 1 = 9 > 3
 
     expect(result[0]!.type).toBe("tool_use");
     if (result[0]!.type === "tool_use") {
       const toolResult = result[0]!.toolResults[0]!;
       // 内容应该被截断（远短于原始 1000 字符）
-      expect((toolResult as { content: string }).content.length).toBeLessThan(longOutput.length);
+      expect((toolResult as { content: string }).content.length).toBeLessThan(
+        longOutput.length,
+      );
       // tool_call_id 必须保留
-      expect((toolResult as { tool_call_id: string }).tool_call_id).toBeDefined();
+      expect(
+        (toolResult as { tool_call_id: string }).tool_call_id,
+      ).toBeDefined();
     }
   });
 
   it("preserves tool_call_id in truncated results", () => {
-    const block = makeToolUseBlock("run_bash", '{"command":"pwd"}', "output", 1, "my_call_id_123");
+    const block = makeToolUseBlock(
+      "run_bash",
+      '{"command":"pwd"}',
+      "output",
+      1,
+      "my_call_id_123",
+    );
     const result = compressor.decayOldBlocks([block], 10);
     if (result[0]!.type === "tool_use") {
-      expect((result[0]!.toolResults[0]! as { tool_call_id: string }).tool_call_id).toBe("my_call_id_123");
+      expect(
+        (result[0]!.toolResults[0]! as { tool_call_id: string }).tool_call_id,
+      ).toBe("my_call_id_123");
     }
   });
 
@@ -142,11 +181,13 @@ describe("decayOldBlocks (P0)", () => {
   });
 
   it("appends persisted file path after truncating tool results", () => {
+    const outputDir = makeTempOutputDir();
     // 使用同一个 compressor 实例：先 P1 存文件，再 P0 衰减
     const comp = createContextCompressor({
-      thresholdToolOutput: 100,  // 降低阈值，确保 1000 字符的输出会触发存文件
+      thresholdToolOutput: 100, // 降低阈值，确保 1000 字符的输出会触发存文件
       decayThreshold: 3,
       decayPreviewTokens: 100,
+      outputDir,
     });
     const tcId = "tc_persist_test";
 
@@ -155,13 +196,22 @@ describe("decayOldBlocks (P0)", () => {
     comp.compressToolResult("run_bash", tcId, longOutput);
 
     // 构造包含该 toolCallId 的 tool_use 块
-    const block = makeToolUseBlock("run_bash", '{"command":"ls"}', longOutput, 1, tcId);
+    const block = makeToolUseBlock(
+      "run_bash",
+      '{"command":"ls"}',
+      longOutput,
+      1,
+      tcId,
+    );
     const result = comp.decayOldBlocks([block], 10); // age = 9 > 3
 
     if (result[0]!.type === "tool_use") {
-      const content = (result[0]!.toolResults[0]! as { content: string }).content;
+      const content = (result[0]!.toolResults[0]! as { content: string })
+        .content;
       // 截断后应该追加了文件路径引用
-      expect(content).toContain("[Full output: .task_outputs/tc_persist_test.txt]");
+      expect(content).toContain(
+        "[Full output: .task_outputs/tc_persist_test.txt]",
+      );
     }
 
     // 清理
@@ -169,13 +219,23 @@ describe("decayOldBlocks (P0)", () => {
   });
 
   it("does not append file path for non-persisted tool results", () => {
-    const comp = createContextCompressor({ decayThreshold: 3, decayPreviewTokens: 100 });
+    const comp = createContextCompressor({
+      decayThreshold: 3,
+      decayPreviewTokens: 100,
+    });
     // 这个 toolCallId 从未被 compressToolResult 存过文件
-    const block = makeToolUseBlock("run_bash", '{"command":"ls"}', "short output", 1, "tc_no_persist");
+    const block = makeToolUseBlock(
+      "run_bash",
+      '{"command":"ls"}',
+      "short output",
+      1,
+      "tc_no_persist",
+    );
     const result = comp.decayOldBlocks([block], 10);
 
     if (result[0]!.type === "tool_use") {
-      const content = (result[0]!.toolResults[0]! as { content: string }).content;
+      const content = (result[0]!.toolResults[0]! as { content: string })
+        .content;
       // 不应包含文件路径引用
       expect(content).not.toContain("[Full output:");
     }
@@ -190,13 +250,29 @@ describe("decayOldBlocks (P0)", () => {
         role: "assistant",
         content: null,
         tool_calls: [
-          { id: tcId1, type: "function" as const, function: { name: "run_bash", arguments: '{"command":"ls"}' } },
-          { id: tcId2, type: "function" as const, function: { name: "run_read", arguments: '{"path":"f.txt"}' } },
+          {
+            id: tcId1,
+            type: "function" as const,
+            function: { name: "run_bash", arguments: '{"command":"ls"}' },
+          },
+          {
+            id: tcId2,
+            type: "function" as const,
+            function: { name: "run_read", arguments: '{"path":"f.txt"}' },
+          },
         ],
       } as ChatCompletionMessageParam,
       toolResults: [
-        { role: "tool", tool_call_id: tcId1, content: "file1.txt" } as ChatCompletionMessageParam,
-        { role: "tool", tool_call_id: tcId2, content: "content" } as ChatCompletionMessageParam,
+        {
+          role: "tool",
+          tool_call_id: tcId1,
+          content: "file1.txt",
+        } as ChatCompletionMessageParam,
+        {
+          role: "tool",
+          tool_call_id: tcId2,
+          content: "content",
+        } as ChatCompletionMessageParam,
       ],
       round: 1,
     };
@@ -204,8 +280,12 @@ describe("decayOldBlocks (P0)", () => {
     if (result[0]!.type === "tool_use") {
       // 两个 tool result 都应该被截断
       expect(result[0]!.toolResults).toHaveLength(2);
-      expect((result[0]!.toolResults[0]! as { tool_call_id: string }).tool_call_id).toBe(tcId1);
-      expect((result[0]!.toolResults[1]! as { tool_call_id: string }).tool_call_id).toBe(tcId2);
+      expect(
+        (result[0]!.toolResults[0]! as { tool_call_id: string }).tool_call_id,
+      ).toBe(tcId1);
+      expect(
+        (result[0]!.toolResults[1]! as { tool_call_id: string }).tool_call_id,
+      ).toBe(tcId2);
     }
   });
 });
@@ -215,7 +295,11 @@ describe("decayOldBlocks (P0)", () => {
 // ---------------------------------------------------------------------------
 
 describe("compressToolResult (P1)", () => {
-  const outputDir = resolve(process.cwd(), ".task_outputs");
+  let outputDir: string;
+
+  beforeEach(() => {
+    outputDir = makeTempOutputDir();
+  });
 
   afterEach(() => {
     // 清理测试产生的临时文件
@@ -225,29 +309,52 @@ describe("compressToolResult (P1)", () => {
   });
 
   it("passes through small output unchanged", () => {
-    const compressor = createContextCompressor({ thresholdToolOutput: 2000 });
-    const result = compressor.compressToolResult("run_bash", "tc1", "small output");
+    const compressor = createContextCompressor({
+      thresholdToolOutput: 2000,
+      outputDir,
+    });
+    const result = compressor.compressToolResult(
+      "run_bash",
+      "tc1",
+      "small output",
+    );
     expect(result.content).toBe("small output");
     expect(result.persistedPath).toBeUndefined();
   });
 
   it("passes through output from non-compressible tools", () => {
-    const compressor = createContextCompressor({ thresholdToolOutput: 50 });
+    const compressor = createContextCompressor({
+      thresholdToolOutput: 50,
+      outputDir,
+    });
     const largeOutput = "x".repeat(500);
     // run_read 不在 compressibleTools 列表中，即使输出很大也不压缩
-    const result = compressor.compressToolResult("run_read", "tc_nocomp", largeOutput);
+    const result = compressor.compressToolResult(
+      "run_read",
+      "tc_nocomp",
+      largeOutput,
+    );
     expect(result.content).toBe(largeOutput);
     expect(result.persistedPath).toBeUndefined();
   });
 
   it("persists large output and returns preview with toolCallId", () => {
-    const compressor = createContextCompressor({ thresholdToolOutput: 100 });
+    const compressor = createContextCompressor({
+      thresholdToolOutput: 100,
+      outputDir,
+    });
     // 生成超过 100 token 的输出（100 / 0.25 = 400 字符）
     const largeOutput = "a".repeat(1000);
-    const result = compressor.compressToolResult("run_bash", "tc_test_large", largeOutput);
+    const result = compressor.compressToolResult(
+      "run_bash",
+      "tc_test_large",
+      largeOutput,
+    );
 
     // 内容应该包含 persisted-output 标记，且嵌入 toolCallId
-    expect(result.content).toContain(`<persisted-output tool-call-id="tc_test_large">`);
+    expect(result.content).toContain(
+      `<persisted-output tool-call-id="tc_test_large">`,
+    );
     expect(result.content).toContain(".task_outputs/tc_test_large.txt");
     expect(result.persistedPath).toBeDefined();
 
@@ -256,9 +363,16 @@ describe("compressToolResult (P1)", () => {
   });
 
   it("preview is shorter than original output", () => {
-    const compressor = createContextCompressor({ thresholdToolOutput: 100 });
+    const compressor = createContextCompressor({
+      thresholdToolOutput: 100,
+      outputDir,
+    });
     const largeOutput = "hello world ".repeat(200);
-    const result = compressor.compressToolResult("run_bash", "tc_preview_test", largeOutput);
+    const result = compressor.compressToolResult(
+      "run_bash",
+      "tc_preview_test",
+      largeOutput,
+    );
 
     expect(result.content.length).toBeLessThan(largeOutput.length);
   });
@@ -271,10 +385,7 @@ describe("compressToolResult (P1)", () => {
 describe("compactHistory (P2)", () => {
   it("does not compact when blocks are fewer than keepRecent", () => {
     const compressor = createContextCompressor({ compactKeepRecent: 4 });
-    const blocks = [
-      makeTextBlock("q1", "a1", 1),
-      makeTextBlock("q2", "a2", 2),
-    ];
+    const blocks = [makeTextBlock("q1", "a1", 1), makeTextBlock("q2", "a2", 2)];
     const result = compressor.compactHistory(blocks);
     // 没有旧块需要压缩，直接返回
     expect(result.blocks).toEqual(blocks);
@@ -309,7 +420,12 @@ describe("compactHistory (P2)", () => {
   it("includes tool_use blocks in summary", () => {
     const compressor = createContextCompressor({ compactKeepRecent: 1 });
     const blocks: MessageBlock[] = [
-      makeToolUseBlock("run_bash", '{"command":"ls"}', "file1.txt\nfile2.txt", 1),
+      makeToolUseBlock(
+        "run_bash",
+        '{"command":"ls"}',
+        "file1.txt\nfile2.txt",
+        1,
+      ),
       makeTextBlock("recent", "reply", 2),
     ];
     const result = compressor.compactHistory(blocks);
@@ -380,10 +496,12 @@ describe("getState", () => {
 // ---------------------------------------------------------------------------
 
 describe("cleanup", () => {
-  const outputDir = resolve(process.cwd(), ".task_outputs");
-
   it("removes .task_outputs directory", () => {
-    const compressor = createContextCompressor({ thresholdToolOutput: 50 });
+    const outputDir = makeTempOutputDir();
+    const compressor = createContextCompressor({
+      thresholdToolOutput: 50,
+      outputDir,
+    });
     // 触发一次文件写入
     compressor.compressToolResult("run_bash", "tc_cleanup", "x".repeat(500));
     expect(existsSync(outputDir)).toBe(true);

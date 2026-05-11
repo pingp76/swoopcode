@@ -253,7 +253,7 @@ export const SKILL_SYSTEM_PROMPT_HINT = [
 /**
  * createSkillManager — 创建 Skill 管理器实例
  *
- * @param skillsDir - skills 根目录的绝对路径（通常是项目下的 "skills/" 目录）
+ * @param skillsDir - 全局 skills 根目录的绝对路径（不随被操作项目切换）
  * @returns SkillManager 接口的实现
  *
  * 使用 Map 存储已发现的 skill，以 skill name 为 key。

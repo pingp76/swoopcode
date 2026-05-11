@@ -4,15 +4,16 @@
  * 职责：初始化所有组件并将它们连接在一起，然后启动 REPL。
  *
  * 组件初始化顺序（每步只依赖前面已创建的组件，无循环依赖）：
- * config → logger → terminal → llm → history → todoManager → skillManager →
- * permissionManager → memoryManager → sessionEventBuffer → systemPromptProvider →
+ * config → projectContext → logger → terminal → llm → session/transcript →
+ * history → todoManager → skillManager → permissionManager → memoryManager →
+ * sessionEventBuffer → systemPromptProvider →
  * tool providers → tool registry → subagent provider → compressor → agent →
  * cli commands → repl
  */
 
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { loadConfig } from "./config.js";
+import { createProjectContext } from "./project-context.js";
 import { createLogger } from "./logger.js";
 import { createLLMClient } from "./llm.js";
 import { createHistory } from "./history.js";
@@ -41,6 +42,8 @@ import { createMemoryManager } from "./memory.js";
 import { createMemoryToolProvider } from "./tools/memory.js";
 import { createSystemPromptProvider } from "./system-prompt.js";
 import { createSessionEventBuffer } from "./session-events.js";
+import { createSessionManager } from "./session.js";
+import { createTranscriptStore } from "./transcript.js";
 
 /**
  * main — 主函数
@@ -51,71 +54,96 @@ async function main() {
   // 1. 加载配置（从 .env 文件）
   const config = loadConfig();
 
-  // 2. 创建日志器
+  // 2. 创建项目上下文：集中管理 projectRoot 和 Agent 全局运行目录
+  const projectContext = createProjectContext();
+
+  // 3. 创建日志器
   const logger = createLogger(config.logLevel);
 
-  // 3. 创建终端（统一 readline，供 REPL 和权限确认共享）
+  // 4. 创建终端（统一 readline，供 REPL 和权限确认共享）
   const terminal = createTerminal();
 
-  // 4. 创建 LLM 客户端
-  const llmLogger = createLLMLogger();
+  // 5. 创建 LLM 客户端
+  const llmLogger = createLLMLogger({ logDir: projectContext.logsDir });
   const llm = createLLMClient(config, llmLogger);
 
-  // 5. 创建对话历史管理器
+  // 6. 创建会话管理器和原始 transcript 存储
+  const sessionManager = createSessionManager({
+    projectRoot: projectContext.projectRoot,
+    cwd: projectContext.projectRoot,
+    model: config.model,
+  });
+  const mainSession = sessionManager.createMainSession("main");
+  const transcriptStore = createTranscriptStore();
+
+  // 7. 创建对话历史管理器
   const history = createHistory();
 
-  // 6. 创建 todo 管理器
+  // 8. 创建 todo 管理器
   const todoManager = createTodoManager();
 
-  // 7. 创建 Skill 管理器并扫描 skills/ 目录
-  const skillsDir = resolve(process.cwd(), "skills");
-  const skillManager = createSkillManager(skillsDir);
-  if (existsSync(skillsDir)) {
+  // 9. 创建 Skill 管理器并扫描 Agent 全局 skills/ 目录
+  const skillManager = createSkillManager(projectContext.skillsDir);
+  if (existsSync(projectContext.skillsDir)) {
     skillManager.scan();
     logger.info("Loaded %d skills", skillManager.listMeta().length);
   } else {
-    logger.info("No skills/ directory found, skills disabled");
+    logger.info("No global skills/ directory found, skills disabled");
   }
 
-  // 8. 创建权限管理器
-  const permissionManager = createPermissionManager(process.cwd());
+  // 10. 创建权限管理器
+  const permissionManager = createPermissionManager(projectContext.projectRoot);
 
-  // 9. 创建 skill 工具提供者
+  // 11. 创建 skill 工具提供者
   const skillProvider = createSkillToolProvider(skillManager);
 
-  // 10. 创建 Memory 管理器并扫描 memory/ 目录
-  const memoryDir = resolve(process.cwd(), process.env["MEMORY_DIR"] ?? "memory");
-  const memoryManager = createMemoryManager({ memoryDir, logger });
-  if (existsSync(memoryDir)) {
+  // 12. 创建 Memory 管理器并扫描 Agent 全局 memory/ 目录
+  const memoryManager = createMemoryManager({
+    memoryDir: projectContext.memoryDir,
+    logger,
+  });
+  if (existsSync(projectContext.memoryDir)) {
     memoryManager.scan();
     logger.info("Loaded %d memories", memoryManager.list().length);
   } else {
-    logger.info("No memory/ directory found, memory system initialized empty");
+    logger.info(
+      "No global memory/ directory found, memory system initialized empty",
+    );
   }
 
-  // 11. 创建会话事件缓冲区（用于收集 out-of-band 状态变化）
+  // 13. 创建会话事件缓冲区（用于收集 out-of-band 状态变化）
   const sessionEventBuffer = createSessionEventBuffer();
 
-  // 12. 创建 System Prompt Provider（组合 Skill hint 和 Memory hint）
+  // 14. 读取项目级 AGENTS.md 指令（如果存在），作为稳定 system prompt 的最前缀。
+  //     这是 coding agent 的常见惯例：项目约束高于通用 skill/memory 提示。
+  const projectInstructions = existsSync(projectContext.agentsFile)
+    ? readFileSync(projectContext.agentsFile, "utf-8")
+    : null;
+  if (projectInstructions) {
+    logger.info("Loaded project instructions from AGENTS.md");
+  }
+
+  // 15. 创建 System Prompt Provider（组合 AGENTS.md + Skill hint + Memory hint）
   //     创建时立即生成一次稳定快照，会话内不再自动刷新
   const systemPromptProvider = createSystemPromptProvider({
+    getProjectInstructions: () => projectInstructions,
     getSkillHint: () =>
       skillManager.listMeta().length > 0 ? SKILL_SYSTEM_PROMPT_HINT : null,
     getMemoryHint: () => memoryManager.buildPromptSection(),
   });
 
-  // 13. 设置稳定的 system prompt（只设置一次，不再每轮更新）
+  // 16. 设置稳定的 system prompt（只设置一次，不再每轮更新）
   const snapshot = systemPromptProvider.getSnapshot();
   if (snapshot.systemPrompt) {
     history.setSystemPrompt(snapshot.systemPrompt);
   }
 
-  // 14. 创建 memory 工具提供者（接入 sessionEventBuffer）
+  // 17. 创建 memory 工具提供者（接入 sessionEventBuffer）
   const memoryProvider = createMemoryToolProvider(memoryManager, {
     sessionEventBuffer,
   });
 
-  // 15. 创建 Hook Runner（注册三个教学演示 handler，仅打印日志不修改对话）
+  // 18. 创建 Hook Runner（注册三个教学演示 handler，仅打印日志不修改对话）
   //     父子 Agent 共享同一个实例，确保子智能体继承父级 Hook
   const hookRunner = createHookRunner(
     {
@@ -165,7 +193,7 @@ async function main() {
     logger,
   );
 
-  // 16. 创建子智能体工具提供者
+  // 19. 创建子智能体工具提供者
   //     注入 permissionManager（子智能体继承同一权限模式）
   //     注入 hookRunner（子智能体继承父级 Hook，工具执行前后可观察）
   //     复用父级的稳定 system prompt 快照，保证 cache 前缀一致
@@ -173,26 +201,40 @@ async function main() {
     llm,
     logger,
     createFilteredRegistry: () =>
-      createToolRegistry(undefined, undefined, skillProvider, memoryProvider),
+      createToolRegistry(undefined, undefined, skillProvider, memoryProvider, {
+        projectRoot: projectContext.projectRoot,
+      }),
     createAgentFn: createAgent,
-    createCompressorFn: () => createContextCompressor(config.compression),
+    createCompressorFn: () =>
+      createContextCompressor({
+        ...config.compression,
+        outputDir: projectContext.taskOutputsDir,
+      }),
     permissionManager,
     hookRunner,
-    getStableSystemPrompt: () => systemPromptProvider.getSnapshot().systemPrompt,
+    getStableSystemPrompt: () =>
+      systemPromptProvider.getSnapshot().systemPrompt,
+    sessionManager,
+    transcriptStore,
+    parentSessionId: mainSession.id,
   });
 
-  // 17. 创建工具注册表
+  // 20. 创建工具注册表
   const tools = createToolRegistry(
     todoManager,
     subagentProvider,
     skillProvider,
     memoryProvider,
+    { projectRoot: projectContext.projectRoot },
   );
 
-  // 18. 创建上下文压缩器
-  const compressor = createContextCompressor(config.compression);
+  // 21. 创建上下文压缩器
+  const compressor = createContextCompressor({
+    ...config.compression,
+    outputDir: projectContext.taskOutputsDir,
+  });
 
-  // 19. 创建 Agent（注入权限管理器、确认回调、Hook Runner、System Prompt Provider 和 SessionEventBuffer）
+  // 22. 创建 Agent（注入权限管理器、确认回调、Hook Runner、System Prompt Provider 和 SessionEventBuffer）
   const agent = createAgent({
     llm,
     history,
@@ -206,16 +248,29 @@ async function main() {
     hookRunner,
     systemPromptProvider,
     sessionEventBuffer,
+    transcriptStore,
+    sessionId: mainSession.id,
   });
 
-  // 20. 注册 CLI 命令（接入 sessionEventBuffer）
+  // 23. 注册 CLI 命令（接入 sessionEventBuffer）
   const commandRegistry = createCliCommandRegistry();
-  commandRegistry.register(createSkillCliCommand(skillManager, logger, sessionEventBuffer));
-  commandRegistry.register(createModeCliCommand(permissionManager, logger, sessionEventBuffer));
-  commandRegistry.register(createMemoryCliCommand(memoryManager, logger, sessionEventBuffer));
+  commandRegistry.register(
+    createSkillCliCommand(skillManager, logger, sessionEventBuffer),
+  );
+  commandRegistry.register(
+    createModeCliCommand(permissionManager, logger, sessionEventBuffer),
+  );
+  commandRegistry.register(
+    createMemoryCliCommand(memoryManager, logger, sessionEventBuffer),
+  );
 
-  // 21. 创建并启动 REPL
-  const repl = createRepl({ agent, logger, commands: commandRegistry, terminal });
+  // 24. 创建并启动 REPL
+  const repl = createRepl({
+    agent,
+    logger,
+    commands: commandRegistry,
+    terminal,
+  });
   logger.info("Agent started (model: %s)", config.model);
   repl.start();
 }

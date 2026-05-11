@@ -6,7 +6,10 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { buildSystemPrompt, createSystemPromptProvider } from "./system-prompt.js";
+import {
+  buildSystemPrompt,
+  createSystemPromptProvider,
+} from "./system-prompt.js";
 
 // ============================================================================
 // buildSystemPrompt
@@ -15,7 +18,22 @@ import { buildSystemPrompt, createSystemPromptProvider } from "./system-prompt.j
 describe("buildSystemPrompt", () => {
   it("returns null when no parts", () => {
     expect(buildSystemPrompt({})).toBeNull();
-    expect(buildSystemPrompt({ skillHint: null, memoryHint: null })).toBeNull();
+    expect(
+      buildSystemPrompt({
+        projectInstructions: null,
+        skillHint: null,
+        memoryHint: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("returns project instructions first", () => {
+    const result = buildSystemPrompt({
+      projectInstructions: "agents text",
+      skillHint: "skill",
+      memoryHint: "memory",
+    });
+    expect(result).toBe("agents text\n\nskill\n\nmemory");
   });
 
   it("returns skill hint only", () => {
@@ -51,8 +69,23 @@ describe("SystemPromptProvider snapshot stability", () => {
     const s1 = provider.getSnapshot();
     const s2 = provider.getSnapshot();
     expect(s1.systemPrompt).toBe(s2.systemPrompt);
+    expect(s1.projectInstructions).toBe(s2.projectInstructions);
     expect(s1.skillHint).toBe(s2.skillHint);
     expect(s1.memoryHint).toBe(s2.memoryHint);
+  });
+
+  it("snapshot includes project instructions from AGENTS.md provider", () => {
+    const provider = createSystemPromptProvider({
+      getProjectInstructions: () => "project rules",
+      getSkillHint: () => "skill hint",
+      getMemoryHint: () => "memory hint",
+    });
+
+    const snapshot = provider.getSnapshot();
+    expect(snapshot.projectInstructions).toBe("project rules");
+    expect(snapshot.systemPrompt).toBe(
+      "project rules\n\nskill hint\n\nmemory hint",
+    );
   });
 
   it("snapshot does not change when memory source changes without refresh", () => {
@@ -71,14 +104,19 @@ describe("SystemPromptProvider snapshot stability", () => {
 
   it("snapshot updates after refreshSnapshot()", () => {
     let memoryHint = "memory hint v1";
+    let projectInstructions = "project rules v1";
     const provider = createSystemPromptProvider({
+      getProjectInstructions: () => projectInstructions,
       getSkillHint: () => "skill hint",
       getMemoryHint: () => memoryHint,
     });
 
     const s1 = provider.getSnapshot();
     memoryHint = "memory hint v2";
+    projectInstructions = "project rules v2";
     const s2 = provider.refreshSnapshot();
+    expect(s2.systemPrompt).toContain("project rules v2");
+    expect(s2.projectInstructions).toBe("project rules v2");
     expect(s2.systemPrompt).toContain("memory hint v2");
     expect(s2.memoryHint).toBe("memory hint v2");
     expect(s2.systemPrompt).not.toBe(s1.systemPrompt);
@@ -105,7 +143,9 @@ describe("SystemPromptProvider turn reminders", () => {
   });
 
   it("returns memory reminder for '忽略 memory'", () => {
-    const reminders = provider.buildTurnReminders({ query: "忽略 memory，帮我分析代码" });
+    const reminders = provider.buildTurnReminders({
+      query: "忽略 memory，帮我分析代码",
+    });
     expect(reminders).toHaveLength(1);
     expect(reminders[0]?.source).toBe("memory");
     expect(reminders[0]?.message).toContain("do not use long-term memory");
@@ -118,7 +158,9 @@ describe("SystemPromptProvider turn reminders", () => {
   });
 
   it("returns memory reminder for '本轮不要使用 memory'", () => {
-    const reminders = provider.buildTurnReminders({ query: "本轮不要使用 memory" });
+    const reminders = provider.buildTurnReminders({
+      query: "本轮不要使用 memory",
+    });
     expect(reminders).toHaveLength(1);
     expect(reminders[0]?.source).toBe("memory");
   });
@@ -130,13 +172,17 @@ describe("SystemPromptProvider turn reminders", () => {
   });
 
   it("returns memory reminder for 'ignore memory'", () => {
-    const reminders = provider.buildTurnReminders({ query: "please ignore memory for this" });
+    const reminders = provider.buildTurnReminders({
+      query: "please ignore memory for this",
+    });
     expect(reminders).toHaveLength(1);
     expect(reminders[0]?.source).toBe("memory");
   });
 
-  it("returns memory reminder for \"don't use memory\"", () => {
-    const reminders = provider.buildTurnReminders({ query: "don't use memory this turn" });
+  it('returns memory reminder for "don\'t use memory"', () => {
+    const reminders = provider.buildTurnReminders({
+      query: "don't use memory this turn",
+    });
     expect(reminders).toHaveLength(1);
     expect(reminders[0]?.source).toBe("memory");
   });
