@@ -46,7 +46,28 @@ export interface LLMLogger {
 const SEPARATOR = "=".repeat(60);
 
 /**
- * formatMessages — 格式化消息列表
+ * formatSystemPrompt — 单独格式化 system prompt
+ *
+ * 从消息列表中提取 system 消息，单独显示在日志最前面，
+ * 强调它是 cache 稳定前缀的第一部分。
+ *
+ * 若传入 cacheDebug，附加 hash 和变化标记。
+ */
+function formatSystemPrompt(
+  content: string,
+  cacheDebug?: CacheDebugState,
+): string {
+  const lines = [`System Prompt:`];
+  lines.push(indent(content, 2));
+  if (cacheDebug) {
+    const changedMark = cacheDebug.changed.systemPrompt ? "CHANGED" : "stable";
+    lines.push(indent(`# hash=${cacheDebug.current.systemPromptHash} (${changedMark})`, 2));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * formatMessages — 格式化消息列表（不含 system）
  *
  * 每条消息完整输出，包括角色、内容、tool_calls 等。
  * 多行内容会缩进对齐。不截断任何内容。
@@ -58,7 +79,7 @@ function formatMessages(messages: ChatCompletionMessageParam[]): string {
 
     if (msg.role === "assistant" && "tool_calls" in msg && Array.isArray(msg.tool_calls)) {
       if (msg.content) {
-        lines.push(indent(`${roleTag} ${msg.content}`, 2));
+        lines.push(indent(`${roleTag} ${formatMessageContent(msg.content)}`, 2));
       } else {
         lines.push(indent(`${roleTag}`, 2));
       }
@@ -76,10 +97,9 @@ function formatMessages(messages: ChatCompletionMessageParam[]): string {
     } else if (msg.role === "tool") {
       const toolCallId = "tool_call_id" in msg ? msg.tool_call_id : "(unknown)";
       lines.push(indent(`${roleTag} tool_call_id=${toolCallId}`, 2));
-      lines.push(indent(String(msg.content ?? "(null)"), 6));
+      lines.push(indent(formatMessageContent(msg.content), 6));
     } else {
-      const content = msg.content ?? "(null)";
-      lines.push(indent(`${roleTag} ${content}`, 2));
+      lines.push(indent(`${roleTag} ${formatMessageContent(msg.content)}`, 2));
     }
   }
   return lines.join("\n");
@@ -87,10 +107,20 @@ function formatMessages(messages: ChatCompletionMessageParam[]): string {
 
 /**
  * formatTools — 格式化工具定义列表
+ *
+ * 若传入 cacheDebug，在标题行附加 toolsHash 和变化标记，
+ * 便于直接从工具结构观察工具定义是否发生变化。
  */
-function formatTools(tools: ChatCompletionTool[]): string {
+function formatTools(
+  tools: ChatCompletionTool[],
+  cacheDebug?: CacheDebugState,
+): string {
   if (tools.length === 0) return "Tools: (none)";
-  const lines = [`Tools (${tools.length}):`];
+  const changedMark = cacheDebug ? (cacheDebug.changed.tools ? "CHANGED" : "stable") : null;
+  const hashSuffix = cacheDebug
+    ? ` hash=${cacheDebug.current.toolsHash} (${changedMark})`
+    : "";
+  const lines = [`Tools (${tools.length}):${hashSuffix}`];
   for (const t of tools) {
     if (t.function) {
       lines.push(`  - ${t.function.name}: ${t.function.description ?? "(no description)"}`);
@@ -117,6 +147,28 @@ function formatToolCalls(response: LLMResponse): string {
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * formatMessageContent — 将消息的 content 格式化为可读的字符串
+ *
+ * 处理 string、array（多模态内容块）和 null/undefined 三种情况。
+ * 当 content 为数组时，提取 text 类型的内容块；遇到非 text 类型用占位符表示。
+ */
+function formatMessageContent(content: string | unknown[] | null | undefined): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    if (content.length === 0) return "(empty array)";
+    const parts = content
+      .filter((b): b is Record<string, unknown> => typeof b === "object" && b !== null)
+      .map((b) => {
+        if (b.type === "text" && typeof b.text === "string") return b.text;
+        return `<${b.type}>`;
+      });
+    if (parts.length > 0) return parts.join("\n");
+    return JSON.stringify(content);
+  }
+  return "(null)";
 }
 
 /**
@@ -183,19 +235,36 @@ export function createLLMLogger(options?: {
   return {
     logRequest(messages, tools, cacheDebug) {
       const timestamp = new Date().toISOString();
+
+      // 将 system prompt 从 messages 中分离，日志中先显示稳定前缀（system + tools），
+      // 再显示动态消息，这样更符合 cache-friendly 请求布局的直观理解。
+      const systemMsg = messages.find((m) => m.role === "system");
+      const systemContent =
+        typeof systemMsg?.content === "string" ? systemMsg.content : null;
+      const nonSystemMessages = messages.filter((m) => m.role !== "system");
+
       const lines = [
         "",
         SEPARATOR,
         `[REQUEST] ${timestamp}`,
         SEPARATOR,
-        formatMessages(messages),
-        tools && tools.length > 0 ? formatTools(tools) : "",
       ];
-      if (cacheDebug) {
-        lines.push(
-          `Cache Debug:\n  systemPromptHash: ${cacheDebug.current.systemPromptHash}\n  toolsHash: ${cacheDebug.current.toolsHash}\n  stablePrefixHash: ${cacheDebug.current.stablePrefixHash}\n  systemPromptChanged: ${cacheDebug.changed.systemPrompt ? "yes" : "no"}\n  toolsChanged: ${cacheDebug.changed.tools ? "yes" : "no"}`,
-        );
+
+      // 1. System Prompt — cache 稳定前缀的第一部分
+      if (systemContent) {
+        lines.push(formatSystemPrompt(systemContent, cacheDebug));
       }
+
+      // 2. Tools — cache 稳定前缀的第二部分
+      if (tools && tools.length > 0) {
+        lines.push(formatTools(tools, cacheDebug));
+      }
+
+      // 3. Messages（不含 system）— 动态部分，不断增长和变化
+      if (nonSystemMessages.length > 0) {
+        lines.push(formatMessages(nonSystemMessages));
+      }
+
       lines.push("");
       const log = lines.filter((line, idx) => idx > 0 || line !== "").join("\n");
       appendLog(log);

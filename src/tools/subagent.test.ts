@@ -6,7 +6,6 @@ import {
 import { createToolRegistry } from "./registry.js";
 import type { LLMClient, LLMResponse } from "../llm.js";
 import type { ToolRegistry } from "./registry.js";
-import type { ToolResult } from "./types.js";
 import { createContextCompressor } from "../compressor.js";
 import { createPermissionManager } from "../permission.js";
 
@@ -51,6 +50,7 @@ function createAlwaysToolCallLLM(): LLMClient {
             },
           },
         ],
+        finishReason: "stop",
       };
     },
   };
@@ -152,7 +152,7 @@ describe("createSubagentToolProvider", () => {
   it("returns success result from sub-agent", async () => {
     // 子 Agent 的 LLM 直接返回文本回复（无工具调用），模拟任务一步完成
     const mockLLM = createMockLLM([
-      { content: "Analysis complete: found 3 issues", toolCalls: [] },
+      { content: "Analysis complete: found 3 issues", toolCalls: [], finishReason: "stop" },
     ]);
     const mockLogger = createMockLogger();
 
@@ -218,7 +218,7 @@ describe("createSubagentToolProvider", () => {
     };
 
     // createAgentFn 返回一个真实使用 failingLLM 的 Agent
-    // 由于 agent loop 会调用 llm.chat()，它会抛错
+    // Agent 现在内置错误恢复：不再直接把错误抛出，而是分类后返回失败提示
     const { createAgent } = await import("../agent.js");
     const permissionManager = createPermissionManager(process.cwd());
     permissionManager.setMode("auto"); // auto 模式允许 bash，避免权限拦截干扰测试
@@ -236,8 +236,9 @@ describe("createSubagentToolProvider", () => {
       task: "will fail",
     });
 
-    expect(result.error).toBe(true);
-    expect(result.output).toContain("Sub-agent error");
+    // Agent 内部捕获错误并返回失败提示，不再向上抛出
+    expect(result.error).toBe(false);
+    expect(result.output).toContain("未知错误");
     expect(result.output).toContain("API rate limit exceeded");
   });
 });

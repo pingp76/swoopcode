@@ -79,6 +79,14 @@ export interface History {
   setSystemPrompt(prompt: string): void;
   /** 获取当前 system prompt（未设置时返回 null） */
   getSystemPrompt(): string | null;
+  /**
+   * 替换所有普通对话消息和对应 round 元信息。
+   *
+   * 用于错误恢复中的强制 compact：将压缩后的历史写回，
+   * 确保下一次请求携带的上下文真的变短。
+   * 不修改 system prompt。
+   */
+  replaceEntries(entries: HistoryEntry[]): void;
 }
 
 /**
@@ -152,6 +160,17 @@ export function createHistory(): History {
     // 获取当前 system prompt
     getSystemPrompt(): string | null {
       return systemPrompt;
+    },
+
+    // 替换所有普通对话消息和对应 round 元信息
+    // system prompt 独立存储，不受此操作影响
+    replaceEntries(entries: HistoryEntry[]): void {
+      messages.length = 0;
+      rounds.length = 0;
+      for (const entry of entries) {
+        messages.push(entry.message);
+        rounds.push(entry.round);
+      }
     },
   };
 }

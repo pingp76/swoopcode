@@ -45,11 +45,22 @@ import {
   groupToBlocks,
   flattenToMessages,
   estimateMessagesTokens,
+  stripRound,
 } from "./message-block.js";
+import type { MessageBlock } from "./message-block.js";
 import {
   createCacheDebugTracker,
   formatCacheDebugLog,
 } from "./cache-debug.js";
+import {
+  createRecoveryState,
+  classifyLLMError,
+  decideRecovery,
+  formatRecoveryNotice,
+  formatFailureMessage,
+  sleep,
+  DEFAULT_RECOVERY_CONFIG,
+} from "./recovery.js";
 
 /**
  * Agent — Agent 的接口
@@ -493,6 +504,101 @@ export function createAgent(deps: {
     return `[Round limit reached (${maxRounds})] ${summary}`;
   }
 
+  /**
+   * compactCurrentHistoryForRecovery — 当 API 报 context window 超限时，强制压缩当前 history 并写回
+   *
+   * 流程与 prepareMessages 一致，但会把压缩后的结果写回 history.replaceEntries()，
+   * 确保下一次请求携带的上下文真的变短。
+   * system prompt 不参与此流程，仍由 history 独立维护。
+   */
+  function compactCurrentHistoryForRecovery(roundCount: number): void {
+    const entries = history.getEntries();
+    const annotated = annotateEntries(entries);
+    const normalized = normalizeMessages(annotated);
+    const blocks = groupToBlocks(normalized);
+    const decayed = compressor.decayOldBlocks(blocks, roundCount);
+    const compacted = compressor.compactHistory(decayed);
+    const newEntries = blocksToEntries(compacted.blocks);
+    history.replaceEntries(newEntries);
+  }
+
+  /**
+   * blocksToEntries — 将 MessageBlock[] 转换为 HistoryEntry[]
+   *
+   * 与 flattenToMessages 对应，但保留 round 元信息并清除 _round 内部字段。
+   *
+   * 优先读取每条消息自己的 _round，缺失时才 fallback 到 block.round。
+   * 避免 compact 写回时把一个 block 内所有消息的 round 统一覆盖。
+   */
+  function blocksToEntries(blocks: MessageBlock[]): HistoryEntry[] {
+    const entries: HistoryEntry[] = [];
+    for (const block of blocks) {
+      if (block.type === "text") {
+        if (block.user) {
+          const r = readRoundFromMessage(block.user) ?? block.round;
+          const entry: HistoryEntry = { message: stripRound(block.user) };
+          if (r !== undefined) entry.round = r;
+          entries.push(entry);
+        }
+        if (block.assistant) {
+          const r = readRoundFromMessage(block.assistant) ?? block.round;
+          const entry: HistoryEntry = { message: stripRound(block.assistant) };
+          if (r !== undefined) entry.round = r;
+          entries.push(entry);
+        }
+      } else if (block.type === "tool_use") {
+        if (block.user) {
+          const r = readRoundFromMessage(block.user) ?? block.round;
+          const entry: HistoryEntry = { message: stripRound(block.user) };
+          if (r !== undefined) entry.round = r;
+          entries.push(entry);
+        }
+        const rAssistant = readRoundFromMessage(block.assistant) ?? block.round;
+        const assistantEntry: HistoryEntry = { message: stripRound(block.assistant) };
+        if (rAssistant !== undefined) assistantEntry.round = rAssistant;
+        entries.push(assistantEntry);
+        for (const tr of block.toolResults) {
+          const r = readRoundFromMessage(tr) ?? block.round;
+          const entry: HistoryEntry = { message: stripRound(tr) };
+          if (r !== undefined) entry.round = r;
+          entries.push(entry);
+        }
+      } else if (block.type === "summary") {
+        const r = readRoundFromMessage(block.user) ?? block.round;
+        const entry: HistoryEntry = { message: stripRound(block.user) };
+        if (r !== undefined) entry.round = r;
+        entries.push(entry);
+      }
+    }
+    return entries;
+  }
+
+  /**
+   * readRoundFromMessage — 从消息的 _round 内部字段读取轮次
+   */
+  function readRoundFromMessage(
+    msg: ChatCompletionMessageParam,
+  ): number | undefined {
+    const annotated = msg as ChatCompletionMessageParam & { _round?: number };
+    return annotated._round;
+  }
+
+  /**
+   * appendContinuationReminder — LLM 输出被截断后，追加一条 user reminder
+   *
+   * 作为普通 user 消息注入，不修改 system prompt。
+   * 必须在已经保存 assistant 部分输出之后追加。
+   */
+  function appendContinuationReminder(roundCount: number): void {
+    appendMessage(
+      {
+        role: "user",
+        content: `<system-reminder source="recovery">\n你的上一次输出因为长度限制中断了。请从断点继续输出，不要从头重写，也不要重复已经完成的工具调用。\n</system-reminder>`,
+      },
+      roundCount,
+    );
+  }
+
   // =====================================================================
   // Agent 实例
   // =====================================================================
@@ -584,7 +690,11 @@ export function createAgent(deps: {
       }
 
       // Agent 主循环：不断调用 LLM，直到它不再请求工具调用
+      // 每次 run() 创建独立的恢复状态，避免死循环和重复执行
+      const recoveryState = createRecoveryState();
       let roundCount = 0;
+      // 累积因 finishReason === "length" 被截断的多段输出
+      let accumulatedContent = "";
 
       for (;;) {
         roundCount++;
@@ -602,7 +712,7 @@ export function createAgent(deps: {
         }
 
         // 3. 消息处理管道
-        const finalMsgs = prepareMessages(roundCount);
+        let finalMsgs = prepareMessages(roundCount);
         const toolDefs = tools.getToolDefinitions();
         logger.debug(
           "Calling LLM with %d messages, %d tools",
@@ -610,7 +720,7 @@ export function createAgent(deps: {
           toolDefs.length,
         );
 
-        // 4. 调用 LLM
+        // 4. 调用 LLM（带错误恢复）
         //    先计算 cache debug hash，监控前缀稳定性
         const cacheState = cacheDebugTracker.inspect({
           messages: finalMsgs,
@@ -618,7 +728,53 @@ export function createAgent(deps: {
         });
         logger.info(formatCacheDebugLog(cacheState));
 
-        const response = await llm.chat(finalMsgs, toolDefs, cacheState);
+        let response: import("./llm.js").LLMResponse;
+
+        // 恢复循环：根据错误类型执行 backoff / compact / fail
+        for (;;) {
+          try {
+            response = await llm.chat(finalMsgs, toolDefs, cacheState);
+            break; // 成功，跳出恢复循环
+          } catch (error) {
+            const kind = classifyLLMError(error);
+            const action = decideRecovery(kind, recoveryState);
+
+            if (action === "backoff") {
+              recoveryState.apiRetryCount++;
+              logger.warn(formatRecoveryNotice(action, kind, recoveryState));
+              await sleep(DEFAULT_RECOVERY_CONFIG.retryDelayMs);
+              continue;
+            }
+
+            if (action === "compact") {
+              recoveryState.compactRetryCount++;
+              logger.info(formatRecoveryNotice(action, kind, recoveryState));
+              try {
+                compactCurrentHistoryForRecovery(roundCount);
+              } catch (compactErr) {
+                logger.warn(
+                  "Compact failed: %s",
+                  compactErr instanceof Error
+                    ? compactErr.message
+                    : String(compactErr),
+                );
+                return formatFailureMessage(kind, error);
+              }
+              // compact 后需要重新构建消息列表，并同步重算 cache debug
+              finalMsgs = prepareMessages(roundCount);
+              const newCacheState = cacheDebugTracker.inspect({
+                messages: finalMsgs,
+                tools: toolDefs,
+              });
+              logger.info(formatCacheDebugLog(newCacheState));
+              continue;
+            }
+
+            logger.error(formatRecoveryNotice(action, kind, recoveryState));
+            return formatFailureMessage(kind, error);
+          }
+        }
+
         logger.debug(
           "LLM response: content=%s, toolCalls=%d",
           response.content ? "yes" : "none",
@@ -637,16 +793,35 @@ export function createAgent(deps: {
         );
 
         // 5. 处理工具调用
+        //    如果响应包含 tool_calls，即使 finishReason 异常，
+        //    也优先按工具调用流程处理，避免破坏 tool_call / tool_result 配对。
         if (response.toolCalls.length > 0) {
           await handleToolCalls(response.toolCalls, roundCount);
           continue;
         }
 
         // 6. 没有工具调用 → 最终回复
-        if (response.content) {
-          return response.content;
+        //    检查输出是否因长度被截断（finishReason === "length"）
+        if (response.finishReason === "length") {
+          const action = decideRecovery("output_interrupted", recoveryState);
+          if (action === "continue") {
+            recoveryState.continueRetryCount++;
+            logger.info(
+              formatRecoveryNotice("continue", "output_interrupted", recoveryState),
+            );
+            // 累积本次被截断的部分输出
+            accumulatedContent += response.content ?? "";
+            appendContinuationReminder(roundCount);
+            continue; // 进入下一轮 LLM 调用，请求从断点继续
+          }
+          // 超过继续次数上限，返回累积的部分内容加中断说明
+          return `[模型输出被截断，已达到继续次数上限]\n${accumulatedContent}${response.content ?? ""}`;
         }
-        return "(no response)";
+
+        if (response.content) {
+          return accumulatedContent + response.content;
+        }
+        return accumulatedContent || "(no response)";
       }
     },
   };

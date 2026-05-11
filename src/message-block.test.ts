@@ -299,6 +299,27 @@ describe("flattenToMessages", () => {
     expect(result[0]!.role).toBe("user");
     expect((result[0]! as { content: string }).content).toContain("[Context Summary]");
   });
+
+  it("preserves trailing user message (latest query)", () => {
+    // 模拟对话历史末尾有一条未配对的 user 消息（新一轮的用户 query）
+    const messages: ChatCompletionMessageParam[] = [
+      { role: "user" as const, content: "Previous question" },
+      { role: "assistant" as const, content: "Previous answer" },
+      { role: "user" as const, content: "Latest query" },
+    ];
+    const blocks = groupToBlocks(messages);
+    // 应该生成两个 text 块，最后一个是只有 user 的块
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]!.type).toBe("text");
+    expect(blocks[1]!.type).toBe("text");
+    expect((blocks[1]! as { user?: { content?: string } }).user?.content).toBe("Latest query");
+
+    // round-trip 也应该保留末尾的 user 消息
+    const result = flattenToMessages(blocks);
+    const lastMsg = result[result.length - 1];
+    expect(lastMsg!.role).toBe("user");
+    expect((lastMsg as { content: string }).content).toBe("Latest query");
+  });
 });
 
 // ---------------------------------------------------------------------------

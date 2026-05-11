@@ -28,7 +28,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
  * 由 groupToBlocks() 从消息的 _round 元数据中提取。
  */
 export type MessageBlock =
-  | { type: "text"; user?: ChatCompletionMessageParam; assistant: ChatCompletionMessageParam; round?: number }
+  | { type: "text"; user?: ChatCompletionMessageParam; assistant?: ChatCompletionMessageParam; round?: number }
   | { type: "tool_use"; user?: ChatCompletionMessageParam; assistant: ChatCompletionMessageParam; toolResults: ChatCompletionMessageParam[]; round?: number }
   | { type: "summary"; user: ChatCompletionMessageParam; round?: number };
 
@@ -87,7 +87,9 @@ export function estimateBlockTokens(block: MessageBlock): number {
     if (block.user) {
       total += estimateTokens(extractContent(block.user));
     }
-    total += estimateTokens(extractContent(block.assistant));
+    if (block.assistant) {
+      total += estimateTokens(extractContent(block.assistant));
+    }
   } else if (block.type === "tool_use") {
     if (block.user) {
       total += estimateTokens(extractContent(block.user));
@@ -287,6 +289,18 @@ export function groupToBlocks(
     i++;
   }
 
+  // 循环结束后，如果还有未配对的 user 消息（通常是当前轮最新的用户 query），
+  // 将其作为一个独立的 text 块加入，避免消息丢失。
+  if (pendingUser !== undefined) {
+    const block: MessageBlock = {
+      type: "text",
+      user: pendingUser,
+    };
+    const r = readRound(pendingUser);
+    if (r !== undefined) block.round = r;
+    blocks.push(block);
+  }
+
   return blocks;
 }
 
@@ -308,7 +322,9 @@ export function flattenToMessages(
       if (block.user) {
         result.push(stripRound(block.user));
       }
-      result.push(stripRound(block.assistant));
+      if (block.assistant) {
+        result.push(stripRound(block.assistant));
+      }
     } else if (block.type === "tool_use") {
       if (block.user) {
         result.push(stripRound(block.user));
@@ -359,13 +375,14 @@ function extractContent(msg: ChatCompletionMessageParam): string {
  * 确保发送给 LLM API 的消息不会包含内部元数据。
  * 使用 spread 操作创建新对象，不修改原消息。
  */
-function stripRound(
+export function stripRound(
   msg: ChatCompletionMessageParam,
 ): ChatCompletionMessageParam {
   const annotated = msg as AnnotatedMessage;
   if (!("_round" in annotated)) return msg;
 
   // 创建新对象，排除 _round 字段
-  const { _round: _, ...rest } = annotated;
+  const { _round, ...rest } = annotated;
+  void _round; // 显式丢弃，避免 ESLint 未使用变量警告
   return rest as ChatCompletionMessageParam;
 }

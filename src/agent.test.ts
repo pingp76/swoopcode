@@ -15,6 +15,7 @@ import type { ToolRegistry, ToolExecutor } from "./tools/registry.js";
 import type { ToolResult } from "./tools/types.js";
 import type { Logger } from "./logger.js";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import * as recovery from "./recovery.js";
 
 // ============================================================
 // Mock 工具
@@ -165,7 +166,7 @@ describe("Agent Hook 集成", () => {
     );
 
     const agent = createAgent({
-      llm: createMockLLM([{ content: "done", toolCalls: [] }]),
+      llm: createMockLLM([{ content: "done", toolCalls: [], finishReason: "stop" }]),
       history,
       tools: createMockToolRegistry("run_bash", async () => ({
         output: "ok",
@@ -200,9 +201,9 @@ describe("Agent Hook 集成", () => {
     const { agent } = createTestAgent({
       llmResponses: [
         // 第一次 run
-        { content: "first response", toolCalls: [] },
+        { content: "first response", toolCalls: [], finishReason: "stop" },
         // 第二次 run
-        { content: "second response", toolCalls: [] },
+        { content: "second response", toolCalls: [], finishReason: "stop" },
       ],
       hookHandlers: { SessionStart: [sessionHandler] },
     });
@@ -218,7 +219,7 @@ describe("Agent Hook 集成", () => {
     const { agent, history } = createTestAgent({
       llmResponses: [
         // 第二次 run（如果 SessionStart 没被正确处理，可能需要这个响应）
-        { content: "second response", toolCalls: [] },
+        { content: "second response", toolCalls: [], finishReason: "stop" },
       ],
       hookHandlers: {
         SessionStart: [
@@ -270,9 +271,10 @@ describe("Agent Hook 集成", () => {
         {
           content: null,
           toolCalls: [makeToolCall("call_1", "run_bash", '{"command":"ls"}')],
+          finishReason: "stop",
         },
         // 第二轮：LLM 看到 blocked 结果后回复
-        { content: "understood", toolCalls: [] },
+        { content: "understood", toolCalls: [], finishReason: "stop" },
       ],
       toolExecutor,
       hookHandlers: {
@@ -315,8 +317,9 @@ describe("Agent Hook 集成", () => {
         {
           content: null,
           toolCalls: [makeToolCall("call_1", "run_bash", '{"command":"ls"}')],
+          finishReason: "stop",
         },
-        { content: "final answer", toolCalls: [] },
+        { content: "final answer", toolCalls: [], finishReason: "stop" },
       ],
       toolExecutor,
       hookHandlers: {
@@ -355,8 +358,9 @@ describe("Agent Hook 集成", () => {
         {
           content: null,
           toolCalls: [makeToolCall("call_1", "run_bash", '{"command":"ls"}')],
+          finishReason: "stop",
         },
-        { content: "noted", toolCalls: [] },
+        { content: "noted", toolCalls: [], finishReason: "stop" },
       ],
       hookHandlers: {
         PostToolUse: [
@@ -398,8 +402,9 @@ describe("Agent Hook 集成", () => {
             makeToolCall("call_1", "run_bash", '{"command":"ls"}'),
             makeToolCall("call_2", "run_bash", '{"command":"pwd"}'),
           ],
+          finishReason: "stop",
         },
-        { content: "done", toolCalls: [] },
+        { content: "done", toolCalls: [], finishReason: "stop" },
       ],
       toolExecutor,
       hookHandlers: {
@@ -432,5 +437,265 @@ describe("Agent Hook 集成", () => {
 
     // 两个工具都应该被执行
     expect(toolExecutor).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ============================================================
+// Agent 错误恢复
+// ============================================================
+
+describe("Agent 错误恢复", () => {
+  /** 创建带指定 LLM 的测试 Agent */
+  function createTestAgentWithLLM(llm: LLMClient) {
+    const logger = createMockLogger();
+    const history = createHistory();
+    const compressor = createContextCompressor({
+      thresholdToolOutput: 2000,
+      decayThreshold: 3,
+      decayPreviewTokens: 100,
+      maxContextTokens: 80000,
+      compactKeepRecent: 4,
+    });
+    const agent = createAgent({
+      llm,
+      history,
+      tools: createMockToolRegistry("run_bash", async () => ({
+        output: "ok",
+        error: false,
+      })),
+      logger,
+      compressor,
+      permissionManager: createMockPermissionManager(),
+    });
+    return { agent, history, logger };
+  }
+
+  it("network 错误在上限内重试并最终成功", async () => {
+    const sleepSpy = vi
+      .spyOn(recovery, "sleep")
+      .mockResolvedValue(undefined);
+
+    let callCount = 0;
+    const llm: LLMClient = {
+      async chat() {
+        callCount++;
+        if (callCount <= 2) {
+          throw Object.assign(new Error("timeout"), { status: 504 });
+        }
+        return {
+          content: "success",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      },
+    };
+
+    const { agent } = createTestAgentWithLLM(llm);
+    const result = await agent.run("hello");
+
+    expect(result).toBe("success");
+    expect(callCount).toBe(3);
+    expect(sleepSpy).toHaveBeenCalledTimes(2);
+
+    sleepSpy.mockRestore();
+  });
+
+  it("network 错误超过上限后返回失败提示", async () => {
+    const sleepSpy = vi
+      .spyOn(recovery, "sleep")
+      .mockResolvedValue(undefined);
+
+    let callCount = 0;
+    const llm: LLMClient = {
+      async chat() {
+        callCount++;
+        throw Object.assign(new Error("timeout"), { status: 504 });
+      },
+    };
+
+    const { agent } = createTestAgentWithLLM(llm);
+    const result = await agent.run("hello");
+
+    expect(result).toContain("暂时不可用");
+    // 1 次初始 + 5 次重试（maxApiRetries=5），第 6 次判定为 fail
+    expect(callCount).toBe(6);
+    expect(sleepSpy).toHaveBeenCalledTimes(5);
+
+    sleepSpy.mockRestore();
+  });
+
+  it("credential 错误不重试，直接返回配置提示", async () => {
+    const sleepSpy = vi
+      .spyOn(recovery, "sleep")
+      .mockResolvedValue(undefined);
+
+    let callCount = 0;
+    const llm: LLMClient = {
+      async chat() {
+        callCount++;
+        throw Object.assign(new Error("invalid api key"), { status: 401 });
+      },
+    };
+
+    const { agent } = createTestAgentWithLLM(llm);
+    const result = await agent.run("hello");
+
+    expect(result).toContain("认证配置错误");
+    expect(callCount).toBe(1);
+    expect(sleepSpy).not.toHaveBeenCalled();
+
+    sleepSpy.mockRestore();
+  });
+
+  it("context_length 错误触发 compact 后再次调用", async () => {
+    let callCount = 0;
+    const llm: LLMClient = {
+      async chat() {
+        callCount++;
+        if (callCount === 1) {
+          throw Object.assign(new Error("context length exceeded"), {
+            status: 400,
+          });
+        }
+        return {
+          content: "ok after compact",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      },
+    };
+
+    const { agent } = createTestAgentWithLLM(llm);
+    const result = await agent.run("hello");
+
+    expect(result).toBe("ok after compact");
+    expect(callCount).toBe(2);
+  });
+
+  it("finishReason='length' 且无 tool calls 时追加 continuation reminder", async () => {
+    let callCount = 0;
+    const llm: LLMClient = {
+      async chat() {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            content: "partial output",
+            toolCalls: [],
+            finishReason: "length",
+          };
+        }
+        return {
+          content: "continued",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      },
+    };
+
+    const { agent, history } = createTestAgentWithLLM(llm);
+    const result = await agent.run("hello");
+
+    // 累积了第一次的 partial output 与第二次的 continuation
+    expect(result).toBe("partial outputcontinued");
+    expect(callCount).toBe(2);
+
+    // history 中应有 continuation reminder（user 消息）
+    const entries = history.getEntries();
+    const reminderEntry = entries.find(
+      (e) =>
+        (e.message as { role: string }).role === "user" &&
+        typeof (e.message as { content: unknown }).content === "string" &&
+        ((e.message as { content: string }).content as string).includes(
+          "从断点继续输出",
+        ),
+    );
+    expect(reminderEntry).toBeDefined();
+  });
+
+  it("continuation 超过上限后返回部分内容和中断说明", async () => {
+    let callCount = 0;
+    const llm: LLMClient = {
+      async chat() {
+        callCount++;
+        return {
+          content: `partial ${callCount}`,
+          toolCalls: [],
+          finishReason: "length",
+        };
+      },
+    };
+
+    const { agent } = createTestAgentWithLLM(llm);
+    const result = await agent.run("hello");
+
+    // maxContinueRetries = 2，所以：
+    // 第 1 次返回 length -> continue (continueRetryCount=1)
+    // 第 2 次返回 length -> continue (continueRetryCount=2)
+    // 第 3 次返回 length -> fail (continueRetryCount=2 == max)
+    expect(callCount).toBe(3);
+    expect(result).toContain("模型输出被截断，已达到继续次数上限");
+    expect(result).toContain("partial 3");
+  });
+
+  it("带 tool calls 的响应即使 finishReason='length' 也不走 continuation", async () => {
+    const toolExecutor = vi.fn<ToolExecutor>().mockResolvedValue({
+      output: "tool ok",
+      error: false,
+    });
+
+    let callCount = 0;
+    const llm: LLMClient = {
+      async chat() {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            content: null,
+            toolCalls: [
+              makeToolCall("call_1", "run_bash", '{"command":"ls"}'),
+            ],
+            finishReason: "length",
+          };
+        }
+        return {
+          content: "done",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      },
+    };
+
+    const { history } = createTestAgentWithLLM(llm);
+    // 替换工具执行器
+    const agentWithTool = createAgent({
+      llm,
+      history,
+      tools: createMockToolRegistry("run_bash", toolExecutor),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+    });
+
+    const result = await agentWithTool.run("run ls");
+
+    expect(result).toBe("done");
+    expect(toolExecutor).toHaveBeenCalledTimes(1);
+
+    // 不应有 continuation reminder
+    const entries = history.getEntries();
+    const reminderEntry = entries.find(
+      (e) =>
+        (e.message as { role: string }).role === "user" &&
+        typeof (e.message as { content: unknown }).content === "string" &&
+        ((e.message as { content: string }).content as string).includes(
+          "从断点继续输出",
+        ),
+    );
+    expect(reminderEntry).toBeUndefined();
   });
 });

@@ -126,3 +126,64 @@ describe("clear with entries", () => {
     expect(history.getMessages()).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// replaceEntries() — 替换消息和元信息
+// ---------------------------------------------------------------------------
+
+describe("replaceEntries", () => {
+  it("replaces ordinary messages", () => {
+    const history = createHistory();
+    history.add({ role: "user", content: "old" }, { round: 0 });
+    history.replaceEntries([
+      { message: { role: "user", content: "new" }, round: 1 },
+    ]);
+    const entries = history.getEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.message).toEqual({ role: "user", content: "new" });
+    expect(entries[0]!.round).toBe(1);
+  });
+
+  it("preserves round metadata", () => {
+    const history = createHistory();
+    history.add({ role: "assistant", content: "a" }, { round: 2 });
+    history.replaceEntries([
+      { message: { role: "user", content: "u" }, round: 3 },
+      { message: { role: "assistant", content: "a2" }, round: 4 },
+    ]);
+    const entries = history.getEntries();
+    expect(entries[0]!.round).toBe(3);
+    expect(entries[1]!.round).toBe(4);
+  });
+
+  it("does not modify system prompt", () => {
+    const history = createHistory();
+    history.setSystemPrompt("You are a helper");
+    history.add({ role: "user", content: "hello" }, { round: 0 });
+    history.replaceEntries([
+      { message: { role: "user", content: "replaced" }, round: 1 },
+    ]);
+    expect(history.getSystemPrompt()).toBe("You are a helper");
+  });
+
+  it("getMessages still prepends system prompt after replacement", () => {
+    const history = createHistory();
+    history.setSystemPrompt("SYS");
+    history.add({ role: "user", content: "old" }, { round: 0 });
+    history.replaceEntries([
+      { message: { role: "user", content: "new" }, round: 1 },
+    ]);
+    const msgs = history.getMessages();
+    expect(msgs[0]).toEqual({ role: "system", content: "SYS" });
+    expect(msgs[1]).toEqual({ role: "user", content: "new" });
+  });
+
+  it("removes all previous messages when replacing", () => {
+    const history = createHistory();
+    history.add({ role: "user", content: "a" }, { round: 0 });
+    history.add({ role: "assistant", content: "b" }, { round: 1 });
+    history.replaceEntries([]);
+    expect(history.getEntries()).toHaveLength(0);
+    expect(history.getMessages()).toHaveLength(0);
+  });
+});

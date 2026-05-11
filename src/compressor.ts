@@ -19,7 +19,6 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import type { MessageBlock } from "./message-block.js";
 import {
   estimateTokens,
-  estimateBlockTokens,
   truncateToTokens,
 } from "./message-block.js";
 
@@ -276,15 +275,19 @@ export function createContextCompressor(
           const userContent = block.user
             ? extractText(block.user)
             : "";
-          const assistantContent = extractText(block.assistant);
+          const assistantContent = block.assistant
+            ? extractText(block.assistant)
+            : "";
           // user 消息全文保留（意图不可丢失）
           if (userContent) {
             summaryLines.push(`User: ${userContent}`);
           }
           // assistant 回复保留最后一条（简短）
-          summaryLines.push(
-            `Assistant: ${truncateToTokens(assistantContent, 200)}`,
-          );
+          if (assistantContent) {
+            summaryLines.push(
+              `Assistant: ${truncateToTokens(assistantContent, 200)}`,
+            );
+          }
         } else if (block.type === "tool_use") {
           // 从 assistant 的 tool_calls 提取工具名和参数概要
           const callSummaries = extractToolCallSummaries(block.assistant);
