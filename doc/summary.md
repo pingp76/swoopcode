@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统
 
 ## 源码结构
 
@@ -38,6 +38,8 @@ src/
 ├── session-events.ts   # 会话事件缓冲区：收集 out-of-band 状态变化，注入为 system-reminder
 ├── session.ts          # Session 管理器：main/subagent sessionId + parentSessionId + 项目元信息
 ├── transcript.ts       # Transcript 原始事件流：append-only 记录 user/assistant/tool/reminder/recovery 事件
+├── task-store.ts       # 持久化 Task 存储层：groups/<group_id>/group.json + project 索引 + 读写校验
+├── tasks.ts            # Task 业务层：Task Group 状态机、依赖校验、activeTaskGroupId、格式化输出
 ├── cache-debug.ts      # Prompt Cache 调试：system/tools/prefix hash + 稳定性追踪
 ├── recovery.ts         # LLM 错误分类与恢复决策：backoff/compact/continue/fail
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
@@ -58,6 +60,9 @@ src/
 ├── recovery.test.ts    # LLM 错误恢复决策测试
 ├── session.test.ts     # Session 管理器测试
 ├── transcript.test.ts  # Transcript 原始事件流测试
+├── task-store.test.ts  # TaskStore 持久化、索引和清理测试
+├── tasks.test.ts       # TaskManager 状态机和依赖测试
+├── cli-commands.test.ts # CLI 命令测试（含 /task）
 ├── index.test.ts       # 占位测试
 ├── history.test.ts     # history 模块测试（13 个测试用例）
 ├── logger.test.ts      # logger 模块测试
@@ -71,6 +76,8 @@ src/
     ├── subagent.test.ts # 子智能体工具测试（13 个测试用例）
     ├── memory.ts       # Memory 工具提供者：run_memory_create/list/read/delete（4 个工具）
     ├── memory.test.ts  # Memory 工具测试（2 个测试用例）
+    ├── tasks.ts        # Task 工具提供者：run_task_group_create/list/read + run_task_add/update/delete
+    ├── tasks.test.ts   # Task 工具测试
     ├── registry.ts     # 工具注册表（顺序稳定 + 重复注册报错）
     └── registry.test.ts # 工具注册表测试（4 个测试用例）
 skills/
@@ -87,7 +94,7 @@ skills/
 - **项目根目录抽象**：启动时集中解析 `projectRoot`，默认仍为 `process.cwd()`，后续可通过 `AGENT_PROJECT_ROOT` 扩展
 - **Agent 全局运行根目录**：启动时集中解析 `agentHome`，默认 `~/.learn-claude-code-ts`，可通过 `AGENT_HOME` 扩展
 - **项目级指令路径**：统一派生 `agentsFile = <projectRoot>/AGENTS.md`，存在时进入稳定 system prompt 头部
-- **路径集中管理**：`skillsDir`、`memoryDir`、`logsDir`、`taskOutputsDir` 全部从 `agentHome` 派生，不写入被操作项目目录
+- **路径集中管理**：`skillsDir`、`memoryDir`、`logsDir`、`taskOutputsDir`、`tasksDir` 全部从 `agentHome` 派生，不写入被操作项目目录
 - **组装根负责注入**：`index.ts` 创建一次 ProjectContext，再传给权限、工具注册表、压缩器、日志器、Memory/Skill 管理器
 - **进程级上下文**：projectRoot 在启动时确定，当前不支持运行中切换项目，也不按 conversation 切换 tools/skills
 - **项目目录边界**：只有 `AGENTS.md` 和工具执行/权限边界属于 `projectRoot`；Skill、Memory、LLM 日志和大工具输出都是 Agent 全局数据
@@ -109,6 +116,22 @@ skills/
   - `recovery_event`：LLM 错误恢复行为记录
 - **双写边界**：`History` 继续作为 prompt working context；`TranscriptStore` 保存原始事件，未来用于搜索、回放、统计分析
 - **子智能体隔离**：子智能体仍使用独立 `History`，但 transcript 写入 child session，并通过 `parentSessionId` 关联父会话
+
+### 持久化 Task 任务系统 (`task-store.ts` + `tasks.ts` + `tools/tasks.ts`)
+
+- **长期任务边界**：Task system 用于跨会话、跨重启的长期工作计划；`todo.ts` 仍负责当前 session 的短期执行步骤
+- **Agent 全局存储**：Task 数据位于 `ProjectContext.tasksDir`，默认 `<agentHome>/tasks`，不写入被操作项目目录
+- **Task Group 主身份**：每个 Task Group 使用 `groups/<group_id>/group.json` 作为唯一真实数据源，`group_id` 同时是目录名和内容身份
+- **Project 派生索引**：`index.json` 从所有合法 `group.json` 的 `projectRoots` 重建，支持当前项目过滤和跨项目总览
+- **跨项目支持**：Task Group 保存 `scope`、`projectRoots`、`primaryProjectRoot` 元数据；物理目录不按 projectKey 分层
+- **读写对称校验**：读取和保存都校验 group id 格式、目录名与内容 id 一致、task id 唯一、依赖引用存在、依赖图无环、projectRoots 为绝对路径
+- **状态机**：Task 支持 `pending/in_progress/completed/failed/cancelled/deleted`；依赖未完成时不能进入 `in_progress`；所有非 deleted task 完成后 group 自动 `completed`
+- **依赖派生状态**：`ready`、`blocks`、`blockedReason` 只在读取时计算，不写入文件，避免状态漂移
+- **activeTaskGroupId**：TaskManager 维护 session 级内存状态，tool 输出和 `<system-reminder>` 提醒模型当前 group；修改工具仍必须显式传 `group_id`
+- **LLM 工具**：新增 6 个工具：`run_task_group_create`、`run_task_group_list`、`run_task_group_read`、`run_task_add`、`run_task_update`、`run_task_delete`
+- **与 TODO 的选择边界**：稳定 system prompt 和 tool description 都明确提示：TODO 用于当前 session 临时执行步骤，Task 用于跨会话/跨项目/多 owner/有依赖图的持久化计划
+- **REPL 命令**：新增 `/task list`、`/task list --all`、`/task list --all-projects`、`/task show <group_id>`、`/task archive <group_id>`
+- **权限策略**：`run_task_*` 属于 Agent 运行数据操作，plan/default/auto 模式均允许；文件和 bash 仍由原权限边界控制
 
 ### Agent 核心循环 (`agent.ts`)
 
@@ -210,7 +233,7 @@ skills/
   - `replaceAll` 行为：所有匹配项都会被替换
   - old_string 未找到时返回错误
   - 路径安全检查同上
-- **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数（含 bash、files、todo、subagent、skill、memory 六类工具）
+- **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数（含 bash、files、todo、subagent、skill、memory、task 七类工具）
 - **工具定义全局稳定**：当前进程内只有一套工具定义列表，不随 conversation/session 改变；projectRoot 只作为 bash/file 工具的执行 cwd 与路径边界
 - **项目根目录注入**：`createToolRegistry(..., { projectRoot })` 将同一个 projectRoot 传给 bash 和文件工具，避免散落使用 `process.cwd()`
 - **工具定义顺序稳定**：`orderedEntries` 数组保证 `getToolDefinitions()` 多次调用顺序一致
@@ -301,6 +324,7 @@ skills/
 
 - **三层设计**：Project Instructions（`AGENTS.md`，进程固定）+ Session Snapshot（Skill/Memory，会话固定）+ Turn Reminder（单轮动态）
 - **AGENTS.md 头部注入**：启动时读取 `<projectRoot>/AGENTS.md`（如果存在），放入稳定 system prompt 最前面
+- **TODO vs Task 固定提示**：稳定 system prompt 内包含固定的 TODO/Task 选择规则，降低 `run_todo_*` 与 `run_task_*` 的误用概率；该提示不含动态状态，不破坏 prompt cache 前缀
 - **创建时生成快照**：`createSystemPromptProvider()` 立即调用 `getProjectInstructions()`、`getSkillHint()` 和 `getMemoryHint()` 生成稳定快照
 - **`getSnapshot()`**：返回缓存的快照，不重新读取底层数据
 - **`refreshSnapshot()`**：显式刷新快照，重新读取 AGENTS.md/Skill/Memory 提供者（会破坏 cache 前缀，需谨慎使用）

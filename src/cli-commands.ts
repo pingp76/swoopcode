@@ -19,6 +19,8 @@ import type { createSkillManager } from "./skills.js";
 import type { PermissionManager, PermissionMode } from "./permission.js";
 import type { MemoryManager } from "./memory.js";
 import type { SessionEventBuffer } from "./session-events.js";
+import type { TaskManager } from "./tasks.js";
+import { formatTaskGroupList, formatTaskGroupView } from "./tasks.js";
 
 // ---------------------------------------------------------------------------
 // 类型定义
@@ -309,8 +311,80 @@ export function createMemoryCliCommand(
           break;
         }
         default:
+          console.log("Usage: /memory <list|show <name>|remove <name>|reload>");
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// /task 命令
+// ---------------------------------------------------------------------------
+
+/**
+ * createTaskCliCommand — 创建 /task CLI 命令
+ *
+ * 直接操作持久化 TaskManager，不经过 LLM：
+ * - /task list                列出当前项目未归档的 Task Group
+ * - /task list --all          列出当前项目含归档的 Task Group
+ * - /task list --all-projects 列出所有项目的 Task Group
+ * - /task show <group_id>     显示单个 Task Group 详情
+ * - /task archive <group_id>  归档已完成或已取消的 Task Group
+ */
+export function createTaskCliCommand(
+  manager: TaskManager,
+  logger: Logger,
+): CliCommand {
+  return {
+    name: "task",
+    handler(args: string[]): void {
+      const subcommand = args[0];
+
+      switch (subcommand) {
+        case "list": {
+          const includeArchived = args.includes("--all");
+          const currentProjectOnly = !args.includes("--all-projects");
+          const groups = manager.listGroups({
+            includeArchived,
+            currentProjectOnly,
+          });
+          console.log(formatTaskGroupList(groups));
+          break;
+        }
+        case "show": {
+          const groupId = args[1];
+          if (!groupId) {
+            console.log("Usage: /task show <group_id>");
+            break;
+          }
+          const view = manager.readGroup(groupId);
+          if (!view) {
+            console.log(`Task group "${groupId}" not found.`);
+          } else {
+            console.log(formatTaskGroupView(view));
+          }
+          break;
+        }
+        case "archive": {
+          const groupId = args[1];
+          if (!groupId) {
+            console.log("Usage: /task archive <group_id>");
+            break;
+          }
+          try {
+            const view = manager.archiveGroup(groupId);
+            logger.info("Task group archived: %s", groupId);
+            console.log(formatTaskGroupView(view));
+          } catch (error) {
+            console.log(
+              `Error: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          break;
+        }
+        default:
           console.log(
-            "Usage: /memory <list|show <name>|remove <name>|reload>",
+            "Usage: /task <list [--all] [--all-projects]|show <group_id>|archive <group_id>>",
           );
       }
     },

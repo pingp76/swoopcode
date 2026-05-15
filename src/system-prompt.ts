@@ -22,6 +22,8 @@ import type { SessionReminder } from "./session-events.js";
 export interface SystemPromptParts {
   /** 项目级 AGENTS.md 指令（存在时放在 system prompt 最前面） */
   projectInstructions?: string | null;
+  /** Task/TODO 选择规则（稳定固定片段） */
+  taskPlanningHint?: string | null;
   /** Skill 提示（有可用 skill 时注入） */
   skillHint?: string | null;
   /** Memory 摘要提示（有 memory 时注入） */
@@ -34,6 +36,8 @@ export interface SystemPromptSnapshot {
   systemPrompt: string | null;
   /** 当前 snapshot 中的项目级 AGENTS.md 指令（用于调试） */
   projectInstructions: string | null;
+  /** 当前 snapshot 中的 Task/TODO 选择规则（用于调试） */
+  taskPlanningHint: string | null;
   /** 当前 snapshot 中的 skill hint（用于调试） */
   skillHint: string | null;
   /** 当前 snapshot 中的 memory hint（用于调试） */
@@ -66,16 +70,33 @@ export interface SystemPromptProvider {
  * 规则：
  * 1. 没有任何片段时返回 null
  * 2. 有多个片段时用空行分隔
- * 3. AGENTS.md 项目指令在最前，然后是 Skill hint，最后是 Memory hint
+ * 3. AGENTS.md 项目指令在最前，然后是 Task/TODO 选择规则、Skill hint、Memory hint
  */
 export function buildSystemPrompt(parts: SystemPromptParts): string | null {
   const segments: string[] = [];
   if (parts.projectInstructions) segments.push(parts.projectInstructions);
+  if (parts.taskPlanningHint) segments.push(parts.taskPlanningHint);
   if (parts.skillHint) segments.push(parts.skillHint);
   if (parts.memoryHint) segments.push(parts.memoryHint);
   if (segments.length === 0) return null;
   return segments.join("\n\n");
 }
+
+/**
+ * TASK_PLANNING_SYSTEM_HINT — TODO 与 Task 的选择规则
+ *
+ * 这是稳定 system prompt 的固定片段，用来降低 LLM 在 run_todo_* 和 run_task_*
+ * 两组工具之间的混淆概率。它不包含任何动态任务状态，因此不会破坏 prompt cache 前缀。
+ */
+export const TASK_PLANNING_SYSTEM_HINT = [
+  "## TODO vs Task Tool Choice",
+  "",
+  "Use TODO tools (`run_todo_*`) for temporary execution steps inside the current session only. TODO lists are not durable and are appropriate when losing the list after restart is acceptable.",
+  "",
+  "Use Task tools (`run_task_*`) for durable long-running work that may span sessions, restarts, projects, owners, or dependency graphs. Task groups persist under the Agent runtime directory and every modifying Task tool call must pass an explicit `group_id`.",
+  "",
+  "A good workflow for complex durable work is: create or read a Task Group, pick one ready task, then optionally use a session TODO list for the small steps needed to complete that task.",
+].join("\n");
 
 // ============================================================================
 // 工厂函数
@@ -115,15 +136,18 @@ export function createSystemPromptProvider(deps: {
    */
   function buildCurrentSnapshot(): SystemPromptSnapshot {
     const projectInstructions = deps.getProjectInstructions?.() ?? null;
+    const taskPlanningHint = TASK_PLANNING_SYSTEM_HINT;
     const skillHint = deps.getSkillHint();
     const memoryHint = deps.getMemoryHint();
     return {
       systemPrompt: buildSystemPrompt({
         projectInstructions,
+        taskPlanningHint,
         skillHint,
         memoryHint,
       }),
       projectInstructions,
+      taskPlanningHint,
       skillHint,
       memoryHint,
     };

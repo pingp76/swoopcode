@@ -6,7 +6,7 @@
  * 组件初始化顺序（每步只依赖前面已创建的组件，无循环依赖）：
  * config → projectContext → logger → terminal → llm → session/transcript →
  * history → todoManager → skillManager → permissionManager → memoryManager →
- * sessionEventBuffer → systemPromptProvider →
+ * sessionEventBuffer → taskStore/taskManager → systemPromptProvider →
  * tool providers → tool registry → subagent provider → compressor → agent →
  * cli commands → repl
  */
@@ -34,6 +34,7 @@ import {
   createSkillCliCommand,
   createModeCliCommand,
   createMemoryCliCommand,
+  createTaskCliCommand,
 } from "./cli-commands.js";
 import { createTerminal } from "./terminal.js";
 import { createPermissionManager } from "./permission.js";
@@ -44,6 +45,9 @@ import { createSystemPromptProvider } from "./system-prompt.js";
 import { createSessionEventBuffer } from "./session-events.js";
 import { createSessionManager } from "./session.js";
 import { createTranscriptStore } from "./transcript.js";
+import { createTaskStore } from "./task-store.js";
+import { createTaskManager } from "./tasks.js";
+import { createTaskToolProvider } from "./tools/tasks.js";
 
 /**
  * main — 主函数
@@ -114,7 +118,29 @@ async function main() {
   // 13. 创建会话事件缓冲区（用于收集 out-of-band 状态变化）
   const sessionEventBuffer = createSessionEventBuffer();
 
-  // 14. 读取项目级 AGENTS.md 指令（如果存在），作为稳定 system prompt 的最前缀。
+  // 14. 创建持久化 Task 系统
+  //     Task 是 Agent 全局运行数据，默认放在 agentHome/tasks，不写入被操作项目目录。
+  const taskStore = createTaskStore({
+    tasksDir: projectContext.tasksDir,
+    projectRoot: projectContext.projectRoot,
+    logger,
+  });
+  taskStore.cleanupTempFiles();
+  const taskSummaries = taskStore.scan();
+  const taskManager = createTaskManager({
+    store: taskStore,
+    projectRoot: projectContext.projectRoot,
+  });
+  const activeTaskCount = taskStore.list({ status: "active" }).length;
+  if (activeTaskCount > 0) {
+    sessionEventBuffer.push({
+      source: "task",
+      message: `Current project has ${activeTaskCount} active task group(s). Use run_task_group_list/read if the user wants to continue previous work.`,
+    });
+  }
+  logger.info("Loaded %d task group(s)", taskSummaries.length);
+
+  // 15. 读取项目级 AGENTS.md 指令（如果存在），作为稳定 system prompt 的最前缀。
   //     这是 coding agent 的常见惯例：项目约束高于通用 skill/memory 提示。
   const projectInstructions = existsSync(projectContext.agentsFile)
     ? readFileSync(projectContext.agentsFile, "utf-8")
@@ -123,7 +149,7 @@ async function main() {
     logger.info("Loaded project instructions from AGENTS.md");
   }
 
-  // 15. 创建 System Prompt Provider（组合 AGENTS.md + Skill hint + Memory hint）
+  // 16. 创建 System Prompt Provider（组合 AGENTS.md + Skill hint + Memory hint）
   //     创建时立即生成一次稳定快照，会话内不再自动刷新
   const systemPromptProvider = createSystemPromptProvider({
     getProjectInstructions: () => projectInstructions,
@@ -132,18 +158,23 @@ async function main() {
     getMemoryHint: () => memoryManager.buildPromptSection(),
   });
 
-  // 16. 设置稳定的 system prompt（只设置一次，不再每轮更新）
+  // 17. 设置稳定的 system prompt（只设置一次，不再每轮更新）
   const snapshot = systemPromptProvider.getSnapshot();
   if (snapshot.systemPrompt) {
     history.setSystemPrompt(snapshot.systemPrompt);
   }
 
-  // 17. 创建 memory 工具提供者（接入 sessionEventBuffer）
+  // 18. 创建 memory 工具提供者（接入 sessionEventBuffer）
   const memoryProvider = createMemoryToolProvider(memoryManager, {
     sessionEventBuffer,
   });
 
-  // 18. 创建 Hook Runner（注册三个教学演示 handler，仅打印日志不修改对话）
+  // 19. 创建 task 工具提供者（接入 sessionEventBuffer）
+  const taskProvider = createTaskToolProvider(taskManager, {
+    sessionEventBuffer,
+  });
+
+  // 20. 创建 Hook Runner（注册三个教学演示 handler，仅打印日志不修改对话）
   //     父子 Agent 共享同一个实例，确保子智能体继承父级 Hook
   const hookRunner = createHookRunner(
     {
@@ -193,7 +224,7 @@ async function main() {
     logger,
   );
 
-  // 19. 创建子智能体工具提供者
+  // 21. 创建子智能体工具提供者
   //     注入 permissionManager（子智能体继承同一权限模式）
   //     注入 hookRunner（子智能体继承父级 Hook，工具执行前后可观察）
   //     复用父级的稳定 system prompt 快照，保证 cache 前缀一致
@@ -201,9 +232,16 @@ async function main() {
     llm,
     logger,
     createFilteredRegistry: () =>
-      createToolRegistry(undefined, undefined, skillProvider, memoryProvider, {
-        projectRoot: projectContext.projectRoot,
-      }),
+      createToolRegistry(
+        undefined,
+        undefined,
+        skillProvider,
+        memoryProvider,
+        undefined,
+        {
+          projectRoot: projectContext.projectRoot,
+        },
+      ),
     createAgentFn: createAgent,
     createCompressorFn: () =>
       createContextCompressor({
@@ -219,22 +257,23 @@ async function main() {
     parentSessionId: mainSession.id,
   });
 
-  // 20. 创建工具注册表
+  // 22. 创建工具注册表
   const tools = createToolRegistry(
     todoManager,
     subagentProvider,
     skillProvider,
     memoryProvider,
+    taskProvider,
     { projectRoot: projectContext.projectRoot },
   );
 
-  // 21. 创建上下文压缩器
+  // 23. 创建上下文压缩器
   const compressor = createContextCompressor({
     ...config.compression,
     outputDir: projectContext.taskOutputsDir,
   });
 
-  // 22. 创建 Agent（注入权限管理器、确认回调、Hook Runner、System Prompt Provider 和 SessionEventBuffer）
+  // 24. 创建 Agent（注入权限管理器、确认回调、Hook Runner、System Prompt Provider 和 SessionEventBuffer）
   const agent = createAgent({
     llm,
     history,
@@ -252,7 +291,7 @@ async function main() {
     sessionId: mainSession.id,
   });
 
-  // 23. 注册 CLI 命令（接入 sessionEventBuffer）
+  // 25. 注册 CLI 命令（接入 sessionEventBuffer）
   const commandRegistry = createCliCommandRegistry();
   commandRegistry.register(
     createSkillCliCommand(skillManager, logger, sessionEventBuffer),
@@ -263,8 +302,9 @@ async function main() {
   commandRegistry.register(
     createMemoryCliCommand(memoryManager, logger, sessionEventBuffer),
   );
+  commandRegistry.register(createTaskCliCommand(taskManager, logger));
 
-  // 24. 创建并启动 REPL
+  // 26. 创建并启动 REPL
   const repl = createRepl({
     agent,
     logger,

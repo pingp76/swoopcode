@@ -89,7 +89,7 @@ const todoCreateDef: ChatCompletionTool = {
   function: {
     name: "run_todo_create",
     description:
-      "Create a new todo list with the given tasks. If a list already exists, it will be cancelled automatically.",
+      "Create a temporary TODO list for the current session's execution steps. Use TODO when the steps are short-lived and losing them after restart is acceptable. For durable long-running plans, use run_task_group_create instead. If a list already exists, it will be cancelled automatically.",
     parameters: {
       type: "object",
       properties: {
@@ -115,7 +115,7 @@ const todoUpdateDef: ChatCompletionTool = {
   function: {
     name: "run_todo_update",
     description:
-      "Update the status of a task. Optionally attach a note about progress.\n" +
+      "Update the status of a temporary TODO item in the current session. Do not use this for persistent task groups; use run_task_update for durable work.\n" +
       "Tip: You can return multiple tool_calls in one response. For example, " +
       "mark task_1 as completed and task_2 as in_progress in the same response.",
     parameters: {
@@ -150,7 +150,7 @@ const todoAddDef: ChatCompletionTool = {
   function: {
     name: "run_todo_add",
     description:
-      "Add a new task to the todo list. Optionally insert after a specific task.",
+      "Add a temporary execution step to the current session TODO list. For durable cross-session tasks, use run_task_add.",
     parameters: {
       type: "object",
       properties: {
@@ -202,7 +202,7 @@ const todoListDef: ChatCompletionTool = {
   function: {
     name: "run_todo_list",
     description:
-      "View the current todo list with all task statuses and progress notes.",
+      "View the current session TODO list. This does not show persistent Task Groups; use run_task_group_list/read for durable plans.",
     parameters: {
       type: "object",
       properties: {},
@@ -370,10 +370,7 @@ export function createTodoManager(
    * 在 update、cancel 等操作后调用。
    */
   function checkAutoComplete(): void {
-    if (
-      todoList.status !== "active" &&
-      todoList.status !== "interrupted"
-    )
+    if (todoList.status !== "active" && todoList.status !== "interrupted")
       return;
     if (todoList.tasks.length === 0) return;
     if (todoList.tasks.every((t) => TERMINAL_STATUSES.has(t.status))) {
@@ -396,10 +393,7 @@ export function createTodoManager(
    */
   function doCreate(tasks: string[]): ToolResult {
     // 如果已有活跃/中断的 list，先取消
-    if (
-      todoList.status === "active" ||
-      todoList.status === "interrupted"
-    ) {
+    if (todoList.status === "active" || todoList.status === "interrupted") {
       for (const task of todoList.tasks) {
         if (!TERMINAL_STATUSES.has(task.status)) {
           task.status = "cancelled";
@@ -430,16 +424,9 @@ export function createTodoManager(
    * - completed/skipped：标记为终态
    * 当所有 task 都处于终态时，list 自动变为 completed。
    */
-  function doUpdate(
-    taskId: string,
-    status: string,
-    note?: string,
-  ): ToolResult {
+  function doUpdate(taskId: string, status: string, note?: string): ToolResult {
     // 前置检查：必须有活跃或中断中的 list
-    if (
-      todoList.status !== "active" &&
-      todoList.status !== "interrupted"
-    ) {
+    if (todoList.status !== "active" && todoList.status !== "interrupted") {
       return { output: "Error: No active todo list.", error: true };
     }
 
@@ -496,10 +483,7 @@ export function createTodoManager(
    * 新 task 初始为 pending 状态。
    */
   function doAdd(task: string, afterTaskId?: string): ToolResult {
-    if (
-      todoList.status !== "active" &&
-      todoList.status !== "interrupted"
-    ) {
+    if (todoList.status !== "active" && todoList.status !== "interrupted") {
       return { output: "Error: No active todo list.", error: true };
     }
 
@@ -534,10 +518,7 @@ export function createTodoManager(
    * 只能删除 pending 状态的 task，防止误删正在执行或已完成的任务。
    */
   function doRemove(taskId: string): ToolResult {
-    if (
-      todoList.status !== "active" &&
-      todoList.status !== "interrupted"
-    ) {
+    if (todoList.status !== "active" && todoList.status !== "interrupted") {
       return { output: "Error: No active todo list.", error: true };
     }
 
@@ -573,10 +554,7 @@ export function createTodoManager(
    * 所有未完成的 task 标记为 cancelled，list 状态变为 cancelled。
    */
   function doCancel(): ToolResult {
-    if (
-      todoList.status !== "active" &&
-      todoList.status !== "interrupted"
-    ) {
+    if (todoList.status !== "active" && todoList.status !== "interrupted") {
       return {
         output: "Error: No active todo list to cancel.",
         error: true,
@@ -655,13 +633,20 @@ export function createTodoManager(
       definition: todoUpdateDef,
       // run_todo_update：解析 task_id、status、可选 note
       execute: async (args) =>
-        doUpdate(String(args["task_id"] ?? ""), String(args["status"] ?? ""), args["note"] as string | undefined),
+        doUpdate(
+          String(args["task_id"] ?? ""),
+          String(args["status"] ?? ""),
+          args["note"] as string | undefined,
+        ),
     },
     {
       definition: todoAddDef,
       // run_todo_add：解析 task 描述、可选 after_task_id
       execute: async (args) =>
-        doAdd(String(args["task"] ?? ""), args["after_task_id"] as string | undefined),
+        doAdd(
+          String(args["task"] ?? ""),
+          args["after_task_id"] as string | undefined,
+        ),
     },
     {
       definition: todoRemoveDef,

@@ -16,6 +16,7 @@ describe("createProjectContext", () => {
     expect(ctx.memoryDir).toBe(resolve("/tmp/agent-home/memory"));
     expect(ctx.logsDir).toBe(resolve("/tmp/agent-home/logs"));
     expect(ctx.taskOutputsDir).toBe(resolve("/tmp/agent-home/.task_outputs"));
+    expect(ctx.tasksDir).toBe(resolve("/tmp/agent-home/tasks"));
   });
 
   it("allows memory directory name override under agentHome", () => {

@@ -35,6 +35,8 @@ export interface ProjectContext {
   logsDir: string;
   /** 大工具输出目录，放在 Agent 全局运行根目录下 */
   taskOutputsDir: string;
+  /** 持久化 Task Group 目录，放在 Agent 全局运行根目录下 */
+  tasksDir: string;
 }
 
 /**
@@ -70,5 +72,6 @@ export function createProjectContext(options?: {
     memoryDir: resolve(agentHome, memoryDirName),
     logsDir: resolve(agentHome, "logs"),
     taskOutputsDir: resolve(agentHome, ".task_outputs"),
+    tasksDir: resolve(agentHome, "tasks"),
   };
 }

@@ -9,6 +9,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildSystemPrompt,
   createSystemPromptProvider,
+  TASK_PLANNING_SYSTEM_HINT,
 } from "./system-prompt.js";
 
 // ============================================================================
@@ -30,10 +31,11 @@ describe("buildSystemPrompt", () => {
   it("returns project instructions first", () => {
     const result = buildSystemPrompt({
       projectInstructions: "agents text",
+      taskPlanningHint: "task planning",
       skillHint: "skill",
       memoryHint: "memory",
     });
-    expect(result).toBe("agents text\n\nskill\n\nmemory");
+    expect(result).toBe("agents text\n\ntask planning\n\nskill\n\nmemory");
   });
 
   it("returns skill hint only", () => {
@@ -70,6 +72,7 @@ describe("SystemPromptProvider snapshot stability", () => {
     const s2 = provider.getSnapshot();
     expect(s1.systemPrompt).toBe(s2.systemPrompt);
     expect(s1.projectInstructions).toBe(s2.projectInstructions);
+    expect(s1.taskPlanningHint).toBe(TASK_PLANNING_SYSTEM_HINT);
     expect(s1.skillHint).toBe(s2.skillHint);
     expect(s1.memoryHint).toBe(s2.memoryHint);
   });
@@ -83,9 +86,22 @@ describe("SystemPromptProvider snapshot stability", () => {
 
     const snapshot = provider.getSnapshot();
     expect(snapshot.projectInstructions).toBe("project rules");
+    expect(snapshot.taskPlanningHint).toContain("TODO vs Task Tool Choice");
     expect(snapshot.systemPrompt).toBe(
-      "project rules\n\nskill hint\n\nmemory hint",
+      `project rules\n\n${TASK_PLANNING_SYSTEM_HINT}\n\nskill hint\n\nmemory hint`,
     );
+  });
+
+  it("snapshot always includes stable TODO vs Task guidance", () => {
+    const provider = createSystemPromptProvider({
+      getSkillHint: () => null,
+      getMemoryHint: () => null,
+    });
+
+    const snapshot = provider.getSnapshot();
+    expect(snapshot.taskPlanningHint).toContain("Use TODO tools");
+    expect(snapshot.taskPlanningHint).toContain("Use Task tools");
+    expect(snapshot.systemPrompt).toBe(TASK_PLANNING_SYSTEM_HINT);
   });
 
   it("snapshot does not change when memory source changes without refresh", () => {

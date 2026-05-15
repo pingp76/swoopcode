@@ -28,7 +28,7 @@
  */
 export interface SessionReminder {
   /** 提醒来源 */
-  source: "memory" | "mode" | "skill" | "cache" | "system";
+  source: "memory" | "mode" | "skill" | "cache" | "task" | "system";
   /** 提醒内容（纯文本，不含 XML 标签） */
   message: string;
 }

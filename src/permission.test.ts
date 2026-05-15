@@ -7,7 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 import { createPermissionManager } from "./permission.js";
-import type { PermissionContext, PermissionMode } from "./permission.js";
+import type { PermissionContext } from "./permission.js";
 import { resolve } from "node:path";
 
 // 测试用的项目目录
@@ -89,7 +89,9 @@ describe("bash blacklist", () => {
   });
 
   it("denies mkfs", () => {
-    const decision = pm.check(ctx("run_bash", { command: "mkfs.ext4 /dev/sda1" }));
+    const decision = pm.check(
+      ctx("run_bash", { command: "mkfs.ext4 /dev/sda1" }),
+    );
     expect(decision.action).toBe("deny");
   });
 
@@ -187,6 +189,16 @@ describe("whitelist", () => {
     expect(decision.action).toBe("allow");
   });
 
+  it("allows run_task_* tools", () => {
+    const decision = pm.check(
+      ctx("run_task_update", {
+        group_id: "tg_20260513_153000_task_system",
+        task_id: "task_1",
+      }),
+    );
+    expect(decision.action).toBe("allow");
+  });
+
   it("allows run_skill", () => {
     const decision = pm.check(ctx("run_skill", { name: "code-review" }));
     expect(decision.action).toBe("allow");
@@ -230,6 +242,16 @@ describe("plan mode", () => {
     expect(decision.action).toBe("allow");
   });
 
+  it("allows run_task_group_create in plan mode", () => {
+    const decision = pm.check(
+      ctx("run_task_group_create", {
+        title: "Plan",
+        tasks: [{ subject: "draft" }],
+      }),
+    );
+    expect(decision.action).toBe("allow");
+  });
+
   it("allows run_read for project files", () => {
     const decision = pm.check(
       ctx("run_read", { path: resolve(PROJECT_DIR, "file.txt") }),
@@ -249,7 +271,10 @@ describe("auto mode", () => {
 
   it("allows run_write within project", () => {
     const decision = pm.check(
-      ctx("run_write", { path: resolve(PROJECT_DIR, "output.txt"), content: "x" }),
+      ctx("run_write", {
+        path: resolve(PROJECT_DIR, "output.txt"),
+        content: "x",
+      }),
     );
     expect(decision.action).toBe("allow");
   });
@@ -284,7 +309,10 @@ describe("default mode", () => {
 
   it("asks for run_write", () => {
     const decision = pm.check(
-      ctx("run_write", { path: resolve(PROJECT_DIR, "file.txt"), content: "x" }),
+      ctx("run_write", {
+        path: resolve(PROJECT_DIR, "file.txt"),
+        content: "x",
+      }),
     );
     expect(decision.action).toBe("ask");
     if (decision.action === "ask") {
@@ -363,7 +391,9 @@ describe("subagent permission inheritance", () => {
     const pm = createPermissionManager(PROJECT_DIR);
     pm.setMode("plan");
 
-    const parentDecision = pm.check(ctx("run_subagent", { task: "read files" }));
+    const parentDecision = pm.check(
+      ctx("run_subagent", { task: "read files" }),
+    );
     expect(parentDecision.action).toBe("allow");
 
     const subDecision = pm.check(ctx("run_bash", { command: "echo hi" }));
@@ -386,7 +416,9 @@ describe("memory tools", () => {
 
   it("allows run_memory_read in default mode", () => {
     const pm = createPermissionManager(PROJECT_DIR);
-    expect(pm.check(ctx("run_memory_read", { name: "test" })).action).toBe("allow");
+    expect(pm.check(ctx("run_memory_read", { name: "test" })).action).toBe(
+      "allow",
+    );
   });
 
   it("asks for run_memory_create in default mode", () => {

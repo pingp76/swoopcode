@@ -65,6 +65,7 @@ type ToolCategory =
   | "file-read"
   | "file-write"
   | "todo"
+  | "task"
   | "memory"
   | "skill"
   | "subagent"
@@ -76,6 +77,7 @@ function categorizeTool(toolName: string): ToolCategory {
   if (toolName === "run_read") return "file-read";
   if (toolName === "run_write" || toolName === "run_edit") return "file-write";
   if (toolName.startsWith("run_todo_")) return "todo";
+  if (toolName.startsWith("run_task_")) return "task";
   if (toolName.startsWith("run_memory_")) return "memory";
   if (toolName === "run_skill") return "skill";
   if (toolName === "run_subagent") return "subagent";
@@ -129,9 +131,7 @@ function isSensitivePath(rawPath: string): string | null {
  * @param projectDir - 项目根目录，路径边界以此为基准
  * @returns PermissionManager 接口的实现
  */
-export function createPermissionManager(
-  projectDir: string,
-): PermissionManager {
+export function createPermissionManager(projectDir: string): PermissionManager {
   // 当前模式，默认为 default
   let mode: PermissionMode = "default";
   // 规范化项目目录（确保末尾没有 separator）
@@ -197,12 +197,16 @@ export function createPermissionManager(
       // ── 步骤 4：白名单（无需确认） ──
       if (category === "file-read") return { action: "allow" };
       if (category === "todo") return { action: "allow" };
+      if (category === "task") return { action: "allow" };
       if (category === "skill") return { action: "allow" };
 
       // ── 步骤 4.5：memory 工具权限 ──
       // run_memory_list/read 无需确认，run_memory_create/delete 所有模式都需确认
       if (category === "memory") {
-        if (ctx.toolName === "run_memory_list" || ctx.toolName === "run_memory_read") {
+        if (
+          ctx.toolName === "run_memory_list" ||
+          ctx.toolName === "run_memory_read"
+        ) {
           return { action: "allow" };
         }
         // create 和 delete 在所有模式下都 ask（长期记忆影响未来会话）

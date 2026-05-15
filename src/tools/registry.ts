@@ -29,6 +29,7 @@ import type { TodoToolProvider } from "../todo.js";
 import type { SubagentToolProvider } from "./subagent.js";
 import type { SkillToolProvider } from "../skills.js";
 import type { MemoryToolProvider } from "./memory.js";
+import type { TaskToolProvider } from "./tasks.js";
 
 /**
  * ToolExecutor — 工具执行函数的类型
@@ -87,6 +88,7 @@ export function createToolRegistry(
   subagentProvider?: SubagentToolProvider,
   skillProvider?: SkillToolProvider,
   memoryProvider?: MemoryToolProvider,
+  taskProvider?: TaskToolProvider,
   options?: { projectRoot?: string },
 ): ToolRegistry {
   // 工具映射表：工具名 → 工具注册项
@@ -180,6 +182,14 @@ export function createToolRegistry(
   // 子智能体的注册表中不会传入此 provider，子智能体不能直接操作 memory
   if (memoryProvider) {
     for (const entry of memoryProvider.toolEntries) {
+      register(entry);
+    }
+  }
+
+  // 注册持久化 task 工具（6 个工具）
+  // Task 属于 Agent 全局运行数据，通过 TaskToolProvider 接入注册表。
+  if (taskProvider) {
+    for (const entry of taskProvider.toolEntries) {
       register(entry);
     }
   }

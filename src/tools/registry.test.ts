@@ -96,12 +96,34 @@ describe("ToolRegistry full setup", () => {
       ],
     };
 
-    const registry = createToolRegistry(todoProvider, undefined, skillProvider);
+    const taskProvider = {
+      toolEntries: [
+        {
+          definition: {
+            type: "function" as const,
+            function: {
+              name: "run_task_group_list",
+              description: "list tasks",
+            },
+          },
+          execute: async () => ({ output: "ok", error: false }),
+        },
+      ],
+    };
+
+    const registry = createToolRegistry(
+      todoProvider,
+      undefined,
+      skillProvider,
+      undefined,
+      taskProvider,
+    );
     const names = registry.getToolDefinitions().map((d) => d.function?.name);
 
     expect(names).toContain("run_bash");
     expect(names).toContain("run_read");
     expect(names).toContain("run_todo_create");
     expect(names).toContain("run_skill");
+    expect(names).toContain("run_task_group_list");
   });
 });

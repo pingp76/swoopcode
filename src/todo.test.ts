@@ -575,6 +575,22 @@ describe("TodoManager", () => {
     });
   });
 
+  describe("tool descriptions", () => {
+    it("distinguishes temporary TODO lists from persistent Task Groups", () => {
+      const manager = createTodoManager();
+      const createDef = manager.toolEntries.find(
+        (entry) => entry.definition.function.name === "run_todo_create",
+      )?.definition.function.description;
+      const updateDef = manager.toolEntries.find(
+        (entry) => entry.definition.function.name === "run_todo_update",
+      )?.definition.function.description;
+
+      expect(createDef).toContain("temporary TODO list");
+      expect(createDef).toContain("run_task_group_create");
+      expect(updateDef).toContain("run_task_update");
+    });
+  });
+
   // ================================================================
   // 格式化输出
   // ================================================================
@@ -593,7 +609,6 @@ describe("TodoManager", () => {
       const manager = createTodoManager();
       const create = getExecutor(manager, "run_todo_create");
       const update = getExecutor(manager, "run_todo_update");
-      const add = getExecutor(manager, "run_todo_add");
       const list = getExecutor(manager, "run_todo_list");
 
       await create({
