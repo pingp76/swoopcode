@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例
 
 ## 源码结构
 
@@ -23,7 +23,7 @@ src/
 ├── project-context.ts  # 项目上下文：集中解析 projectRoot、AGENTS.md、agentHome 与运行数据路径
 ├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
 ├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ LLM 日志记录
-├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 logs/llm.log，超 1MB 清空重写
+├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 <agentHome>/logs/llm.log，超 1MB 清空重写
 ├── normalize.ts        # 消息标准化：过滤元数据、补全 tool_result、合并同角色消息
 ├── history.ts          # 对话历史管理（messages + rounds 统一存储 + HistoryEntry + system prompt 支持）
 ├── message-block.ts    # 消息块：压缩的原子单位，groupToBlocks/flattenToMessages + token 估算
@@ -40,6 +40,8 @@ src/
 ├── transcript.ts       # Transcript 原始事件流：append-only 记录 user/assistant/tool/reminder/recovery 事件
 ├── task-store.ts       # 持久化 Task 存储层：groups/<group_id>/group.json + project 索引 + 读写校验
 ├── tasks.ts            # Task 业务层：Task Group 状态机、依赖校验、activeTaskGroupId、格式化输出
+├── async-runs.ts       # Async Run 核心：start/check/list/readOutput/drainNotifications/冲突检测
+├── async-runs.test.ts  # Async Run 测试（26 个测试用例）
 ├── cache-debug.ts      # Prompt Cache 调试：system/tools/prefix hash + 稳定性追踪
 ├── recovery.ts         # LLM 错误分类与恢复决策：backoff/compact/continue/fail
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
@@ -78,7 +80,9 @@ src/
     ├── memory.test.ts  # Memory 工具测试（2 个测试用例）
     ├── tasks.ts        # Task 工具提供者：run_task_group_create/list/read + run_task_add/update/delete
     ├── tasks.test.ts   # Task 工具测试
-    ├── registry.ts     # 工具注册表（顺序稳定 + 重复注册报错）
+    ├── async-runs.ts   # Async Run 工具提供者：run_async_start/check/list/output_read（4 个工具）
+    ├── async-runs.test.ts # Async Run 工具测试（14 个测试用例）
+    ├── registry.ts     # 工具注册表（顺序稳定 + 重复注册报错 + 过滤选项）
     └── registry.test.ts # 工具注册表测试（4 个测试用例）
 skills/
 ├── code-review/
@@ -132,6 +136,25 @@ skills/
 - **与 TODO 的选择边界**：稳定 system prompt 和 tool description 都明确提示：TODO 用于当前 session 临时执行步骤，Task 用于跨会话/跨项目/多 owner/有依赖图的持久化计划
 - **REPL 命令**：新增 `/task list`、`/task list --all`、`/task list --all-projects`、`/task show <group_id>`、`/task archive <group_id>`
 - **权限策略**：`run_task_*` 属于 Agent 运行数据操作，plan/default/auto 模式均允许；文件和 bash 仍由原权限边界控制
+
+### Async Run 非阻塞运行实例 (`async-runs.ts` + `tools/async-runs.ts`)
+
+- **Session-local 异步执行层**：允许 LLM 启动非阻塞的 command 或 subagent 运行，然后继续其他工作，完成后通过 notification 告知
+- **与 Task 的边界**：Task 是持久化长期计划（跨会话、跨重启）；Async Run 是 session 内的一次性异步执行单元，不持久化、不 resume
+- **命名区分**：不使用 "background task"，避免与 PDD12 Task 混淆；使用 `run_async_*` 工具名和 `ar_` 前缀的 run_id
+- **四种工具**：`run_async_start`（启动）、`run_async_check`（查询单个状态）、`run_async_list`（列表过滤）、`run_async_output_read`（读取输出）
+- **两种执行器**：`command`（shell 命令，白名单策略）和 `subagent`（委托 AI 任务，独立 history/compressor/session）
+- **并发限制**：最多 3 个同时 running 的 async run，超限拒绝启动
+- **只读约束**：第一版硬性拒绝 `write_paths` 非空；`read_paths` 必须在 projectRoot 内
+- **超时机制**：默认 120s，最大 300s；超时后状态变为 `timeout`，通过 `setTimeout` deadline 监控
+- **核心正确性 `finishRun()`**：只有 `status === "running"` 时允许进入终态；使用 `Set<string>` 防止 late result 覆盖 timeout；第一个进入终态的路径负责写 output、计算 duration、递减计数、推送 notification
+- **深拷贝**：`check()` 和 `list()` 返回 `JSON.parse(JSON.stringify(record))`，防止外部修改内部状态
+- **前台冲突检测**：`checkForegroundToolConflict()` 在 Agent 工具执行前拦截——running async run 的 readPaths 与前台 `run_write`/`run_edit` 目标路径重叠时 block；存在 running runs 时前台 `run_bash` 只允许 strict read-only command policy 通过的命令
+- **Notification 注入**：Agent 每轮 LLM 调用前 `drainNotifications()`，以 `<system-reminder source="async-run">` 形式注入，包含 `run_async_output_read` 指引
+- **权限策略**：`run_async_check/list/output_read` 所有模式 allow；`run_async_start + command` 在 plan 模式 deny、auto 模式 allow、default 模式 ask；`run_async_start + subagent` 在 plan 模式 allow、auto 模式 allow、default 模式 ask
+- **Command Policy 验证**：拒绝 shell control operators（`; && || \` $() > >> < |`）；拒绝写入命令（git add/commit/push/reset/checkout、npm run format、find -delete/-exec）；白名单允许诊断命令（git diff/status/log/show、npm run typecheck/lint/format:check/test、npx vitest/eslint/tsc、rg、sed -n、cat、head、tail、ls、pwd）
+- **输出隔离**：async run 的输出写入 `<taskOutputsDir>/async-runs/<run_id>/output.txt`，`run_async_output_read` 只能读取 async-runs 目录下的文件
+- **子智能体 registry 过滤**：async subagent 获得只读 registry（无 write/edit、无 subagent 嵌套、无 async-run 嵌套），通过 `ToolRegistryOptions` 的 `includeFileWrite`/`includeFileEdit`/`commandPolicy` 控制
 
 ### Agent 核心循环 (`agent.ts`)
 
@@ -208,7 +231,7 @@ skills/
 - **不做任何截断**：消息内容、工具参数、tool_call arguments 全部完整保留
 - **新增 Cache Debug 记录**：systemPromptHash、toolsHash、stablePrefixHash、变化标记
 - **格式化为易读结构**：角色标签对齐、JSON 美化、缩进
-- **文件策略**：固定 `logs/llm.log`，每次启动清空，超过 1MB 清空重写
+- **文件策略**：固定写入 `<agentHome>/logs/llm.log`，每次启动清空，超过 1MB 清空重写；默认路径是 `~/.learn-claude-code-ts/logs/llm.log`，不是项目根目录的 `logs/llm.log`
 - **请求-响应成对**：每组用空行 + 分隔线隔开
 
 ### 消息标准化 (`normalize.ts`)
@@ -405,16 +428,18 @@ skills/
 | `src/history.test.ts`        | 13     | 增删、返回副本、清空、add 带 meta、getEntries、getSystemPrompt                                                  |
 | `src/logger.test.ts`         | 1      | 日志级别过滤                                                                                                    |
 | `src/todo.test.ts`           | 33     | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程                                                  |
-| `src/tools/subagent.test.ts` | 13     | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表                                             |
+| `src/tools/subagent.test.ts` | 14     | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表、async run 提示                             |
 | `src/skills.test.ts`         | 25     | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量                         |
 | `src/message-block.test.ts`  | 24     | 消息块分组、还原、\_round 传递与清除、round-trip 一致性、token 估算                                             |
 | `src/compressor.test.ts`     | 21     | 衰减压缩、即时压缩（含非压缩工具通过）、全量压缩、状态管理、cleanup                                             |
-| `src/permission.test.ts`     | 47     | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory 工具权限  |
+| `src/permission.test.ts`     | 49     | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory/async-run 权限 |
 | `src/hooks.test.ts`          | 11     | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner                                             |
-| `src/agent.test.ts`          | 7      | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序                       |
+| `src/agent.test.ts`          | 15     | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序、async notification/conflict |
 | `src/memory.test.ts`         | 40     | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar |
 | `src/tools/memory.test.ts`   | 2      | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复                                                |
-| `src/tools/registry.test.ts` | 4      | 重复注册报错、工具定义顺序稳定性、完整 registry 创建                                                            |
+| `src/tools/registry.test.ts` | 4      | 重复注册报错、工具定义顺序稳定性、完整 registry 创建、过滤选项                                                    |
+| `src/async-runs.test.ts`     | 26     | start 校验、finishRun 生命周期、timeout、深拷贝、冲突检测、notification drain、readOutput                         |
+| `src/tools/async-runs.test.ts` | 14   | 4 个工具定义、参数校验、JSON 输出格式、错误传播                                                                   |
 | `src/system-prompt.test.ts`  | 17     | buildSystemPrompt 组合、AGENTS.md 项目指令头、snapshot 稳定性、refreshSnapshot、ignore memory reminder          |
 | `src/session-events.test.ts` | 5      | drain 清空、peek 不清空、顺序保持                                                                               |
 | `src/cache-debug.test.ts`    | 7      | inspect 变化检测、system prompt 不变性、formatCacheDebugLog                                                     |

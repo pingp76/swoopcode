@@ -86,22 +86,55 @@ describe("SystemPromptProvider snapshot stability", () => {
 
     const snapshot = provider.getSnapshot();
     expect(snapshot.projectInstructions).toBe("project rules");
-    expect(snapshot.taskPlanningHint).toContain("TODO vs Task Tool Choice");
+    expect(snapshot.taskPlanningHint).toContain("## Planning vs Execution");
     expect(snapshot.systemPrompt).toBe(
       `project rules\n\n${TASK_PLANNING_SYSTEM_HINT}\n\nskill hint\n\nmemory hint`,
     );
   });
 
-  it("snapshot always includes stable TODO vs Task guidance", () => {
+  it("snapshot always includes stable planning vs execution guidance", () => {
     const provider = createSystemPromptProvider({
       getSkillHint: () => null,
       getMemoryHint: () => null,
     });
 
     const snapshot = provider.getSnapshot();
-    expect(snapshot.taskPlanningHint).toContain("Use TODO tools");
-    expect(snapshot.taskPlanningHint).toContain("Use Task tools");
+    expect(snapshot.taskPlanningHint).toContain("## Planning vs Execution");
+    expect(snapshot.taskPlanningHint).toContain("## Execution Tool Routing");
+    expect(snapshot.taskPlanningHint).toContain("run_task_*");
+    expect(snapshot.taskPlanningHint).toContain("run_todo_*");
     expect(snapshot.systemPrompt).toBe(TASK_PLANNING_SYSTEM_HINT);
+  });
+
+  it("snapshot includes execution routing for all four execution paths", () => {
+    const provider = createSystemPromptProvider({
+      getSkillHint: () => null,
+      getMemoryHint: () => null,
+    });
+
+    const snapshot = provider.getSnapshot();
+    expect(snapshot.taskPlanningHint).toContain("## Execution Tool Routing");
+    expect(snapshot.taskPlanningHint).toContain("run_subagent");
+    expect(snapshot.taskPlanningHint).toContain("run_async_start");
+    expect(snapshot.taskPlanningHint).toContain('executor="command"');
+    expect(snapshot.taskPlanningHint).toContain('executor="subagent"');
+    expect(snapshot.taskPlanningHint).toContain(
+      "Async runs do not automatically update Task Groups",
+    );
+  });
+
+  it("snapshot includes Dynamic Runtime Context section", () => {
+    const provider = createSystemPromptProvider({
+      getSkillHint: () => null,
+      getMemoryHint: () => null,
+    });
+
+    const snapshot = provider.getSnapshot();
+    expect(snapshot.taskPlanningHint).toContain("## Dynamic Runtime Context");
+    expect(snapshot.taskPlanningHint).toContain("system reminders");
+    expect(snapshot.taskPlanningHint).toContain(
+      "prefer the more direct and recent evidence",
+    );
   });
 
   it("snapshot does not change when memory source changes without refresh", () => {

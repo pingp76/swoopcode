@@ -72,20 +72,152 @@ export function isDangerousCommand(command: string): boolean {
 }
 
 /**
+ * AsyncCommandPolicy — 异步命令策略接口
+ *
+ * 用于 async run 的 command executor 和前台冲突检查。
+ * 验证命令是否符合只读诊断命令白名单。
+ */
+export interface AsyncCommandPolicy {
+  maxTimeoutMs: number;
+  validate(command: string): { allowed: boolean; reason?: string };
+}
+
+/**
+ * SHELL_OPERATORS — 需要拒绝的 shell 控制字符
+ *
+ * 这些字符可以组合命令产生副作用，async run 的 command executor 必须严格拒绝。
+ */
+const SHELL_OPERATORS = /[;&&||`$()><>|]/;
+
+/**
+ * WRITE_COMMAND_PATTERNS — 写入/修改命令的正则列表
+ *
+ * 这些命令会修改文件系统或 git 历史，async run 第一版必须拒绝。
+ */
+const WRITE_COMMAND_PATTERNS: RegExp[] = [
+  /\bgit\s+add\b/,
+  /\bgit\s+commit\b/,
+  /\bgit\s+push\b/,
+  /\bgit\s+reset\b/,
+  /\bgit\s+checkout\b/,
+  /\bnpm\s+run\s+format\b/,
+  /\bfind\b.*\b-delete\b/,
+  /\bfind\b.*\b-exec\b/,
+];
+
+/**
+ * ALLOWED_ASYNC_COMMANDS — 允许在 async run 中执行的诊断命令前缀白名单
+ */
+const ALLOWED_ASYNC_COMMANDS: string[] = [
+  "git diff",
+  "git status",
+  "git log",
+  "git show",
+  "npm run typecheck",
+  "npm run lint",
+  "npm run format:check",
+  "npm test",
+  "npx vitest run",
+  "npx eslint",
+  "npx tsc",
+  "rg",
+  "sed -n",
+  "cat",
+  "head",
+  "tail",
+  "ls",
+  "pwd",
+];
+
+/**
+ * createDefaultAsyncCommandPolicy — 创建默认的异步命令策略
+ *
+ * 验证逻辑（按顺序）：
+ * 1. 先拒绝 shell control operators
+ * 2. 再拒绝写入命令（git add/commit/push 等）
+ * 3. 再拒绝裸 find
+ * 4. 最后检查白名单前缀
+ */
+export function createDefaultAsyncCommandPolicy(): AsyncCommandPolicy {
+  return {
+    maxTimeoutMs: 300_000,
+    validate(command: string): { allowed: boolean; reason?: string } {
+      // 步骤 0：复用危险命令黑名单
+      if (isDangerousCommand(command)) {
+        return {
+          allowed: false,
+          reason: "Dangerous command blocked",
+        };
+      }
+
+      // 步骤 1：拒绝 shell 控制字符（先做严格字符串检查）
+      if (SHELL_OPERATORS.test(command)) {
+        return {
+          allowed: false,
+          reason: "Shell operators are not allowed in async commands",
+        };
+      }
+
+      // 步骤 2：拒绝写入/修改命令
+      for (const pattern of WRITE_COMMAND_PATTERNS) {
+        if (pattern.test(command)) {
+          return {
+            allowed: false,
+            reason: `Write command not allowed: ${command.slice(0, 40)}`,
+          };
+        }
+      }
+
+      // 步骤 3：拒绝裸 find（不含白名单前缀的 find）
+      const trimmed = command.trim();
+      if (trimmed.startsWith("find ") || trimmed === "find") {
+        // find 命令只有在匹配白名单时才允许
+        const isAllowed = ALLOWED_ASYNC_COMMANDS.some((allowed) =>
+          trimmed.startsWith(allowed),
+        );
+        if (!isAllowed) {
+          return {
+            allowed: false,
+            reason: "Bare 'find' command is not allowed in async runs",
+          };
+        }
+        return { allowed: true };
+      }
+
+      // 步骤 4：检查白名单
+      const isAllowed = ALLOWED_ASYNC_COMMANDS.some((allowed) =>
+        trimmed.startsWith(allowed),
+      );
+      if (!isAllowed) {
+        return {
+          allowed: false,
+          reason: `Command not in allowed list: ${command.slice(0, 40)}`,
+        };
+      }
+
+      return { allowed: true };
+    },
+  };
+}
+
+/**
  * executeBash — 执行 bash 命令
  *
  * 工作流程：
  * 1. 先检查命令是否危险，如果是则直接返回拒绝信息
  * 2. 使用 Node.js 的 child_process.exec() 执行命令
- * 3. 设置了超时（30秒）和最大缓冲区（1MB）限制
+ * 3. 设置了超时（默认 30 秒）和最大缓冲区（1MB）限制
  * 4. 返回执行结果（标准输出或错误信息）
  *
  * @param command - 要执行的 bash 命令
+ * @param cwd - 可选，执行命令的工作目录
+ * @param timeout - 可选，自定义超时时间（毫秒），默认 30 秒
  * @returns Promise<ToolResult> - 命令执行的结果
  */
 export function executeBash(
   command: string,
   cwd?: string,
+  timeout?: number,
 ): Promise<ToolResult> {
   // 安全检查：危险命令直接拒绝，不执行
   if (isDangerousCommand(command)) {
@@ -101,7 +233,7 @@ export function executeBash(
       command,
       {
         cwd,
-        timeout: 30_000, // 超时时间 30 秒，防止命令无限运行
+        timeout: timeout !== undefined && timeout > 0 ? timeout : 30_000, // 超时时间，默认 30 秒
         maxBuffer: 1024 * 1024, // 最大输出 1MB，防止内存溢出
       },
       (err, stdout, stderr) => {

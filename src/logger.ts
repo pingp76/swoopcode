@@ -1,4 +1,6 @@
 import { format } from "node:util";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 /**
  * logger.ts — 日志模块
@@ -56,17 +58,28 @@ export interface Logger {
  * createLogger — 创建日志器
  *
  * @param level - 最低输出级别，低于此级别的日志会被静默忽略
+ * @param logFile - 可选的日志文件路径，提供时日志会同时追加到该文件
  * @returns Logger 实例
  *
  * 工作原理：
  * 1. 将传入的 level 字符串转换为对应的数字优先级
  * 2. 内部的 log() 函数比较消息级别与当前级别，决定是否输出
  * 3. 输出格式：[ISO时间戳] [级别] 消息内容
+ * 4. 如果提供了 logFile，同时追加到文件（目录不存在时自动创建）
  */
-export function createLogger(level: string): Logger {
+export function createLogger(level: string, logFile?: string): Logger {
   // 将字符串级别转为数字，如果传入无效值则默认使用 info 级别
   const current =
     LEVEL_ORDER[(level as LogLevel) ?? "info"] ?? LEVEL_ORDER["info"];
+
+  // 如果提供了 logFile，预创建目录
+  if (logFile) {
+    try {
+      mkdirSync(dirname(logFile), { recursive: true });
+    } catch {
+      // 目录创建失败不阻塞日志器初始化
+    }
+  }
 
   /**
    * log — 内部的通用日志输出函数
@@ -80,9 +93,42 @@ export function createLogger(level: string): Logger {
    * - warn  → console.warn（stderr，黄色显示）
    * - 其他  → console.log（stdout）
    */
+  /**
+   * formatLocalTimestamp — 格式化本地时间戳
+   *
+   * 使用系统本地时区，输出格式：YYYY-MM-DD HH:mm:ss.SSS
+   */
+  function formatLocalTimestamp(): string {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZoneName: "shortOffset",
+    }).formatToParts(now);
+
+    const get = (type: string) =>
+      parts.find((p) => p.type === type)?.value ?? "";
+
+    const y = get("year");
+    const m = get("month");
+    const d = get("day");
+    const h = get("hour");
+    const min = get("minute");
+    const s = get("second");
+    const ms = String(now.getMilliseconds()).padStart(3, "0");
+    const tz = get("timeZoneName");
+
+    return `${y}-${m}-${d} ${h}:${min}:${s}.${ms} ${tz}`;
+  }
+
   function log(lvl: LogLevel, msg: string, ...args: unknown[]): void {
     if (LEVEL_ORDER[lvl] >= current) {
-      const timestamp = new Date().toISOString();
+      const timestamp = formatLocalTimestamp();
       const prefix = `[${timestamp}] [${lvl.toUpperCase()}]`;
       // 使用 util.format 替换 %s/%d/%j 等占位符，再输出完整行
       const formatted = args.length > 0 ? format(msg, ...args) : msg;
@@ -92,6 +138,15 @@ export function createLogger(level: string): Logger {
         console.warn(prefix, formatted);
       } else {
         console.log(prefix, formatted);
+      }
+
+      // 同时写入文件（如果提供了 logFile）
+      if (logFile) {
+        try {
+          appendFileSync(logFile, `${prefix} ${formatted}\n`);
+        } catch {
+          // 文件写入失败不阻塞 console 输出
+        }
       }
     }
   }

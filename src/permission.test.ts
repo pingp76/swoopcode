@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { createPermissionManager } from "./permission.js";
+import { createPermissionManager, createScopedSubagentPermissionManager } from "./permission.js";
 import type { PermissionContext } from "./permission.js";
 import { resolve } from "node:path";
 
@@ -405,6 +405,117 @@ describe("subagent permission inheritance", () => {
 });
 
 // ---------------------------------------------------------------------------
+// async-run 工具权限
+// ---------------------------------------------------------------------------
+
+describe("async-run tools", () => {
+  it("categorizes run_async_start as async-run (default mode asks)", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    const decision = pm.check(
+      ctx("run_async_start", { executor: "command", title: "test", resources: { read_paths: [], write_paths: [] } }),
+    );
+    expect(decision.action).toBe("ask");
+  });
+
+  it("categorizes run_async_check/list/output_read as async-run (default mode allows)", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    expect(pm.check(ctx("run_async_check", { run_id: "ar_test" })).action).toBe("allow");
+    expect(pm.check(ctx("run_async_list")).action).toBe("allow");
+    expect(pm.check(ctx("run_async_output_read", { run_id: "ar_test" })).action).toBe("allow");
+  });
+
+  it("allows run_async_check in all modes", () => {
+    for (const mode of ["default", "auto", "plan"] as const) {
+      const pm = createPermissionManager(PROJECT_DIR);
+      pm.setMode(mode);
+      expect(pm.check(ctx("run_async_check", { run_id: "ar_test" })).action).toBe("allow");
+    }
+  });
+
+  it("allows run_async_list in all modes", () => {
+    for (const mode of ["default", "auto", "plan"] as const) {
+      const pm = createPermissionManager(PROJECT_DIR);
+      pm.setMode(mode);
+      expect(pm.check(ctx("run_async_list")).action).toBe("allow");
+    }
+  });
+
+  it("allows run_async_output_read in all modes", () => {
+    for (const mode of ["default", "auto", "plan"] as const) {
+      const pm = createPermissionManager(PROJECT_DIR);
+      pm.setMode(mode);
+      expect(pm.check(ctx("run_async_output_read", { run_id: "ar_test" })).action).toBe("allow");
+    }
+  });
+
+  it("plan mode: denies run_async_start with executor=command", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    pm.setMode("plan");
+    const decision = pm.check(
+      ctx("run_async_start", {
+        executor: "command",
+        title: "Typecheck",
+        command: "npm run typecheck",
+        resources: { read_paths: ["src"], write_paths: [] },
+      }),
+    );
+    expect(decision.action).toBe("deny");
+    if (decision.action === "deny") {
+      expect(decision.reason).toContain("plan mode");
+    }
+  });
+
+  it("plan mode: allows run_async_start with executor=subagent", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    pm.setMode("plan");
+    const decision = pm.check(
+      ctx("run_async_start", {
+        executor: "subagent",
+        title: "Analyze",
+        prompt: "Analyze code",
+        resources: { read_paths: ["src"], write_paths: [] },
+      }),
+    );
+    expect(decision.action).toBe("allow");
+  });
+
+  it("auto mode: allows run_async_start with executor=command", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    pm.setMode("auto");
+    const decision = pm.check(
+      ctx("run_async_start", {
+        executor: "command",
+        title: "Typecheck",
+        command: "npm run typecheck",
+        resources: { read_paths: ["src"], write_paths: [] },
+      }),
+    );
+    expect(decision.action).toBe("allow");
+  });
+
+  it("default mode: run_async_start asks with confirmation message", () => {
+    const pm = createPermissionManager(PROJECT_DIR);
+    const decision = pm.check(
+      ctx("run_async_start", {
+        executor: "command",
+        title: "Typecheck",
+        command: "npm run typecheck",
+        timeout_ms: 120000,
+        resources: { read_paths: ["src", "package.json"], write_paths: [] },
+      }),
+    );
+    expect(decision.action).toBe("ask");
+    if (decision.action === "ask") {
+      expect(decision.message).toContain("Allow async run: Typecheck");
+      expect(decision.message).toContain("executor: command");
+      expect(decision.message).toContain("timeout: 120000ms");
+      expect(decision.message).toContain("read paths: src, package.json");
+      expect(decision.message).toContain("command: npm run typecheck");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // memory 工具权限
 // ---------------------------------------------------------------------------
 
@@ -461,5 +572,200 @@ describe("memory tools", () => {
     const pm = createPermissionManager(PROJECT_DIR);
     pm.setMode("plan");
     expect(pm.check(ctx("run_memory_list")).action).toBe("allow");
+  });
+});
+
+// ============================================================================
+// Scoped Subagent Permission Manager
+// ============================================================================
+
+describe("createScopedSubagentPermissionManager", () => {
+  const PROJECT_DIR = "/tmp/test-project";
+
+  /** 创建 mock commandPolicy（允许所有命令，用于测试非 bash 分支） */
+  function createMockCommandPolicy(
+    allowed = true,
+  ): import("./tools/bash.js").AsyncCommandPolicy {
+    return {
+      maxTimeoutMs: 300_000,
+      validate: () =>
+        allowed
+          ? { allowed: true }
+          : { allowed: false, reason: "Mock policy rejected" },
+    };
+  }
+
+  it("inherits parent's hard deny (dangerous command)", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    parent.setMode("auto");
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    const decision = scoped.check({
+      toolName: "run_bash",
+      args: { command: "rm -rf /" },
+    });
+    expect(decision.action).toBe("deny");
+  });
+
+  it("inherits parent's hard deny (path outside project)", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    parent.setMode("auto");
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    const decision = scoped.check({
+      toolName: "run_read",
+      args: { path: "/etc/passwd" },
+    });
+    expect(decision.action).toBe("deny");
+  });
+
+  it("allows run_read within project", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    expect(
+      scoped.check({ toolName: "run_read", args: { path: "src/index.ts" } })
+        .action,
+    ).toBe("allow");
+  });
+
+  it("allows run_skill", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    expect(
+      scoped.check({ toolName: "run_skill", args: { name: "review" } }).action,
+    ).toBe("allow");
+  });
+
+  it("denies run_bash in plan mode", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    parent.setMode("plan");
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    const decision = scoped.check({
+      toolName: "run_bash",
+      args: { command: "ls" },
+    });
+    expect(decision.action).toBe("deny");
+    expect(decision.action === "deny" && decision.reason).toContain(
+      "plan mode",
+    );
+  });
+
+  it("allows run_bash in default mode when commandPolicy approves", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(true),
+    });
+
+    expect(
+      scoped.check({ toolName: "run_bash", args: { command: "ls" } }).action,
+    ).toBe("allow");
+  });
+
+  it("denies run_bash in default mode when commandPolicy rejects", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(false),
+    });
+
+    const decision = scoped.check({
+      toolName: "run_bash",
+      args: { command: "git push" },
+    });
+    expect(decision.action).toBe("deny");
+    expect(decision.action === "deny" && decision.reason).toContain(
+      "Mock policy rejected",
+    );
+  });
+
+  it("denies write tools inside subagent", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    parent.setMode("auto");
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    const writeTools = ["run_write", "run_edit", "run_subagent"];
+    for (const toolName of writeTools) {
+      const decision = scoped.check({ toolName, args: {} });
+      expect(decision.action).toBe("deny");
+      expect(
+        decision.action === "deny" && decision.reason,
+      ).toContain("not allowed inside a subagent");
+    }
+  });
+
+  it("denies async-run and todo tools inside subagent", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    parent.setMode("auto");
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    const forbiddenTools = [
+      "run_async_start",
+      "run_todo_add",
+      "run_todo_complete",
+      "run_todo_list",
+    ];
+    for (const toolName of forbiddenTools) {
+      const decision = scoped.check({ toolName, args: {} });
+      expect(decision.action).toBe("deny");
+    }
+  });
+
+  it("delegates getProjectDir to parent", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    expect(scoped.getProjectDir()).toBe(PROJECT_DIR);
+  });
+
+  it("delegates getMode to parent", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    parent.setMode("plan");
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    expect(scoped.getMode()).toBe("plan");
+  });
+
+  it("setMode is no-op and does not affect parent", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    parent.setMode("auto");
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createMockCommandPolicy(),
+    });
+
+    scoped.setMode("plan");
+    expect(parent.getMode()).toBe("auto");
+    expect(scoped.getMode()).toBe("auto");
   });
 });

@@ -23,6 +23,8 @@ import type { Logger } from "../logger.js";
 import type { Agent } from "../agent.js";
 import type { ContextCompressor } from "../compressor.js";
 import type { PermissionManager } from "../permission.js";
+import { createScopedSubagentPermissionManager } from "../permission.js";
+import type { AsyncCommandPolicy } from "./bash.js";
 import type { HookRunner } from "../hooks.js";
 import type { SessionManager } from "../session.js";
 import type { TranscriptStore } from "../transcript.js";
@@ -40,17 +42,22 @@ export const subagentToolDefinition: ChatCompletionTool = {
   function: {
     name: "run_subagent",
     description:
-      "Delegate a task to an independent sub-agent. The sub-agent has its own " +
-      "isolated context and can use: run_bash, run_read, run_write, run_edit, " +
-      "and run_skill. It returns a final text result — intermediate steps are " +
-      "not visible in the parent conversation.\n\n" +
+      "Delegate a read-only exploration or diagnostic task to an independent " +
+      "sub-agent. The sub-agent has its own isolated context and can use: " +
+      "run_bash (read-only diagnostic commands only), run_read, and run_skill. " +
+      "It CANNOT write or edit files, start async runs, or spawn further subagents. " +
+      "It returns a final text result — intermediate steps are not visible in " +
+      "the parent conversation.\n\n" +
       "Best practices:\n" +
+      "- Use for tasks that only need to read and analyze: code review, finding " +
+      "references, summarizing files, running diagnostic commands (typecheck, lint).\n" +
       "- The sub-agent can load skills (run_skill) on its own — no need to load " +
-      "skills in the parent before delegating. For example, delegate " +
-      '"Review src/agent.ts for code quality issues" and the sub-agent will ' +
-      "load the code-review skill internally if needed.\n" +
-      "- Use TODO tasks to track progress at the parent level, and delegate " +
-      "the actual work to sub-agents.\n" +
+      "skills in the parent before delegating.\n" +
+      "- If the sub-agent's analysis requires code changes, the parent should " +
+      "execute those changes itself after reviewing the sub-agent's report.\n" +
+      "- For non-blocking delegated work that can finish later, use run_async_start " +
+      'with executor="subagent". Use run_subagent only when you need the result ' +
+      "before continuing.\n" +
       "- IMPORTANT: Multiple tool calls in one response are executed SEQUENTIALLY, " +
       "not in parallel. Do NOT call run_subagent twice in one response. " +
       "Instead, call run_subagent for one task, wait for the result, then " +
@@ -122,8 +129,10 @@ export function createSubagentToolProvider(deps: {
     sessionId?: string;
   }) => Agent;
   createCompressorFn: () => ContextCompressor;
-  /** 权限管理器：子智能体继承父级的同一个实例 */
+  /** 权限管理器：父级 PermissionManager，用于构建 scoped subagent 权限 */
   permissionManager: PermissionManager;
+  /** 命令策略：用于验证子智能体内 bash 命令是否为只读诊断命令 */
+  commandPolicy: AsyncCommandPolicy;
   /** Hook 运行器：子智能体继承父级 Hook，工具执行前后可观察 */
   hookRunner?: HookRunner;
   /** Memory hint 摘要（可选），注入子智能体 system prompt，让它知道用户的长期偏好 */
@@ -144,6 +153,7 @@ export function createSubagentToolProvider(deps: {
     createAgentFn,
     createCompressorFn,
     permissionManager,
+    commandPolicy,
     hookRunner,
     memoryHint,
     getStableSystemPrompt,
@@ -151,6 +161,13 @@ export function createSubagentToolProvider(deps: {
     transcriptStore,
     parentSessionId,
   } = deps;
+
+  // 创建子智能体的 scoped permission manager
+  // 不继承父级的 default 模式 ask 行为，而是给子智能体一个固定的只读诊断能力范围
+  const scopedPermissionManager = createScopedSubagentPermissionManager({
+    parent: permissionManager,
+    commandPolicy,
+  });
 
   /**
    * executeSubagent — 执行子智能体任务
@@ -232,8 +249,9 @@ export function createSubagentToolProvider(deps: {
         logger,
         maxRounds,
         compressor: subCompressor,
-        permissionManager,
+        permissionManager: scopedPermissionManager,
         // 不传 askUserFn：子智能体内的 ask 决策降级为 deny
+        // 但 scopedPermissionManager 已经把需要 ask 的操作改为 allow/deny，不会走到 ask 分支
       };
       if (hookRunner) {
         subAgentDeps.hookRunner = hookRunner;

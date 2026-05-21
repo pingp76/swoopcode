@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isDangerousCommand, executeBash } from "./bash.js";
+import { isDangerousCommand, executeBash, createDefaultAsyncCommandPolicy } from "./bash.js";
 
 describe("isDangerousCommand", () => {
   it("blocks rm -rf", () => {
@@ -51,5 +51,83 @@ describe("executeBash", () => {
     const result = await executeBash("rm -rf /");
     expect(result.error).toBe(true);
     expect(result.output).toContain("blocked");
+  });
+
+  it("supports custom timeout", async () => {
+    // sleep 2 在 500ms 超时内应被终止
+    const result = await executeBash("sleep 2", undefined, 500);
+    expect(result.error).toBe(true);
+  });
+
+  it("uses default 30s timeout when timeout is not provided", async () => {
+    const result = await executeBash("echo hello");
+    expect(result.error).toBe(false);
+    expect(result.output.trim()).toBe("hello");
+  });
+});
+
+describe("createDefaultAsyncCommandPolicy", () => {
+  const policy = createDefaultAsyncCommandPolicy();
+
+  it("rejects shell operators ;", () => {
+    const result = policy.validate("git status; touch x");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Shell operators");
+  });
+
+  it("rejects shell operators &&", () => {
+    const result = policy.validate("git status && touch x");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Shell operators");
+  });
+
+  it("rejects shell operators |", () => {
+    const result = policy.validate("cat file | grep hello");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Shell operators");
+  });
+
+  it("rejects write commands like git add", () => {
+    const result = policy.validate("git add file.ts");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Write command");
+  });
+
+  it("rejects write commands like git commit", () => {
+    const result = policy.validate('git commit -m "test"');
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Write command");
+  });
+
+  it("allows whitelisted commands like git status", () => {
+    const result = policy.validate("git status");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("allows whitelisted commands like npm run typecheck", () => {
+    const result = policy.validate("npm run typecheck");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("rejects non-whitelisted bare commands", () => {
+    const result = policy.validate("echo hello");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("not in allowed list");
+  });
+
+  it("rejects bare find", () => {
+    const result = policy.validate("find . -name '*.ts'");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Bare 'find'");
+  });
+
+  it("rejects dangerous commands via isDangerousCommand", () => {
+    const result = policy.validate("rm -rf /");
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Dangerous");
+  });
+
+  it("has maxTimeoutMs of 300000", () => {
+    expect(policy.maxTimeoutMs).toBe(300_000);
   });
 });

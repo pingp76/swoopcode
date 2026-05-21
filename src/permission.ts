@@ -18,6 +18,7 @@
 import { resolve, sep, basename } from "node:path";
 import { isDangerousCommand } from "./tools/bash.js";
 import { isPathSafe } from "./tools/files.js";
+import type { AsyncCommandPolicy } from "./tools/bash.js";
 
 // ---------------------------------------------------------------------------
 // 类型定义
@@ -69,6 +70,7 @@ type ToolCategory =
   | "memory"
   | "skill"
   | "subagent"
+  | "async-run"
   | "unknown";
 
 /** 根据工具名判断类别 */
@@ -81,6 +83,7 @@ function categorizeTool(toolName: string): ToolCategory {
   if (toolName.startsWith("run_memory_")) return "memory";
   if (toolName === "run_skill") return "skill";
   if (toolName === "run_subagent") return "subagent";
+  if (toolName.startsWith("run_async_")) return "async-run";
   return "unknown";
 }
 
@@ -216,6 +219,78 @@ export function createPermissionManager(projectDir: string): PermissionManager {
         };
       }
 
+      // ── 步骤 4.6：async-run 工具权限 ──
+      if (category === "async-run") {
+        // run_async_check / list / output_read: 所有模式 allow
+        if (
+          ctx.toolName === "run_async_check" ||
+          ctx.toolName === "run_async_list" ||
+          ctx.toolName === "run_async_output_read"
+        ) {
+          return { action: "allow" };
+        }
+
+        // run_async_start: 根据 executor 和模式决定
+        if (ctx.toolName === "run_async_start") {
+          const executor = String(ctx.args["executor"] ?? "");
+          const title = String(ctx.args["title"] ?? "");
+          const timeout =
+            ctx.args["timeout_ms"] !== undefined
+              ? Number(ctx.args["timeout_ms"])
+              : 120_000;
+          const readPaths = (
+            (ctx.args["resources"] as Record<string, unknown> | undefined)?.[
+              "read_paths"
+            ] ?? []
+          ) as string[];
+          const writePaths = (
+            (ctx.args["resources"] as Record<string, unknown> | undefined)?.[
+              "write_paths"
+            ] ?? []
+          ) as string[];
+          const command = ctx.args["command"]
+            ? String(ctx.args["command"])
+            : undefined;
+          const prompt = ctx.args["prompt"]
+            ? String(ctx.args["prompt"])
+            : undefined;
+
+          // 构建确认消息
+          const parts: string[] = [`Allow async run: ${title}`];
+          parts.push(`executor: ${executor}`);
+          parts.push(`timeout: ${timeout}ms`);
+          if (readPaths.length > 0)
+            parts.push(`read paths: ${readPaths.join(", ")}`);
+          if (writePaths.length > 0)
+            parts.push(`write paths: ${writePaths.join(", ")}`);
+          if (command) parts.push(`command: ${command.slice(0, 120)}`);
+          if (prompt) parts.push(`prompt: ${prompt.slice(0, 120)}`);
+          const message = parts.join("\n");
+
+          // plan 模式：command deny，subagent allow
+          if (mode === "plan") {
+            if (executor === "command") {
+              return {
+                action: "deny",
+                reason: "Async bash commands are not allowed in plan mode",
+              };
+            }
+            return { action: "allow" };
+          }
+
+          // auto 模式：允许两种
+          if (mode === "auto") {
+            return { action: "allow" };
+          }
+
+          // default 模式：ask 两种
+          return { action: "ask", message };
+        }
+
+        // 兜底：不应到达，安全起见放行
+        return { action: "allow" };
+      }
+
       // ── 步骤 5：模式权限检查 ──
 
       // plan 模式：bash 禁止，写操作只允许 .claude/plans/
@@ -275,6 +350,114 @@ export function createPermissionManager(projectDir: string): PermissionManager {
 
       // 兜底：不应到达，安全起见放行
       return { action: "allow" };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Scoped Subagent Permission Manager
+// ---------------------------------------------------------------------------
+
+/**
+ * createScopedSubagentPermissionManager — 创建子智能体的受限权限管理器
+ *
+ * 设计目的：
+ * - 子智能体不应该继承父 Agent 的 default 模式 ask 行为（没有确认回调会降级为 deny）
+ * - 子智能体也不应该进入 auto 模式（安全边界太大）
+ * - 应该给子智能体一个"已获授权的、只读诊断能力范围"
+ *
+ * 语义：用户在启动 subagent 时已经确认了一次，子智能体内部不再弹确认框，
+ * 但也不能随意执行任意命令，只能跑白名单诊断命令。
+ *
+ * @param deps.parent - 父级 PermissionManager，用于继承硬性安全边界和项目目录
+ * @param deps.commandPolicy - 命令策略，用于验证 bash 命令是否属于只读诊断命令
+ *
+ * 权限规则：
+ * - 父级 hard deny（危险命令、越界路径、敏感路径）必须保留
+ * - run_read / run_skill: allow
+ * - run_bash: plan 模式下 deny；default/auto 模式下只允许 commandPolicy 通过的只读诊断命令
+ * - 其他工具: deny
+ */
+export function createScopedSubagentPermissionManager(deps: {
+  parent: PermissionManager;
+  commandPolicy: AsyncCommandPolicy;
+}): PermissionManager {
+  const { parent, commandPolicy } = deps;
+
+  return {
+    check(ctx: PermissionContext): PermissionDecision {
+      // 先让父级做一轮检查，继承硬性安全边界
+      const parentDecision = parent.check(ctx);
+
+      // 父级的硬拒绝必须保留（危险命令、越界路径、敏感路径）
+      if (parentDecision.action === "deny") {
+        return parentDecision;
+      }
+
+      // 文件读取和 skill 加载：子智能体需要这些能力做探索
+      if (ctx.toolName === "run_read" || ctx.toolName === "run_skill") {
+        return { action: "allow" };
+      }
+
+      // bash 命令：只允许只读诊断命令
+      if (ctx.toolName === "run_bash") {
+        const mode = parent.getMode();
+
+        // plan 模式下完全禁止 bash（plan 模式语义是只读规划，不动手）
+        if (mode === "plan") {
+          return {
+            action: "deny",
+            reason: "bash is not allowed in plan mode",
+          };
+        }
+
+        // default / auto 模式下用 commandPolicy 验证
+        const command = String(ctx.args["command"] ?? "");
+        const validation = commandPolicy.validate(command);
+        return validation.allowed
+          ? { action: "allow" }
+          : {
+              action: "deny",
+              reason: validation.reason ?? "Only read-only diagnostic commands are allowed in subagent",
+            };
+      }
+
+      // 其他工具：子智能体默认不允许
+      // 明确列出常见的不允许工具，方便调试
+      if (
+        ctx.toolName === "run_write" ||
+        ctx.toolName === "run_edit" ||
+        ctx.toolName === "run_subagent" ||
+        ctx.toolName === "run_todo_add" ||
+        ctx.toolName === "run_todo_complete" ||
+        ctx.toolName === "run_todo_list" ||
+        ctx.toolName === "run_async_start"
+      ) {
+        return {
+          action: "deny",
+          reason: `${ctx.toolName} is not allowed inside a subagent`,
+        };
+      }
+
+      return {
+        action: "deny",
+        reason: `Subagent scoped permissions do not allow ${ctx.toolName}`,
+      };
+    },
+
+    // scoped manager 不响应模式切换（模式由父级控制，但子级行为不随模式变化）
+    setMode(): void {
+      // no-op: 子智能体的权限范围是固定的，不因父级模式切换而改变
+    },
+
+    // 返回父级当前模式（用于调试和日志）
+    getMode(): PermissionMode {
+      return parent.getMode();
+    },
+
+    // 继承父级的项目目录
+    getProjectDir(): string {
+      return parent.getProjectDir();
     },
   };
 }

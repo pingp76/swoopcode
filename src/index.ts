@@ -12,6 +12,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { loadConfig } from "./config.js";
 import { createProjectContext } from "./project-context.js";
 import { createLogger } from "./logger.js";
@@ -48,6 +49,9 @@ import { createTranscriptStore } from "./transcript.js";
 import { createTaskStore } from "./task-store.js";
 import { createTaskManager } from "./tasks.js";
 import { createTaskToolProvider } from "./tools/tasks.js";
+import { createAsyncRunManager } from "./async-runs.js";
+import { createAsyncRunToolProvider } from "./tools/async-runs.js";
+import { createDefaultAsyncCommandPolicy } from "./tools/bash.js";
 
 /**
  * main — 主函数
@@ -61,8 +65,11 @@ async function main() {
   // 2. 创建项目上下文：集中管理 projectRoot 和 Agent 全局运行目录
   const projectContext = createProjectContext();
 
-  // 3. 创建日志器
-  const logger = createLogger(config.logLevel);
+  // 3. 创建日志器（同时写入 logs/agent.log，保留 console 输出便于实时观察）
+  const logger = createLogger(
+    config.logLevel,
+    resolve(projectContext.logsDir, "agent.log"),
+  );
 
   // 4. 创建终端（统一 readline，供 REPL 和权限确认共享）
   const terminal = createTerminal();
@@ -224,8 +231,86 @@ async function main() {
     logger,
   );
 
+  // 20.5. 创建 Async Run 管理器
+  //       输出目录放在 taskOutputsDir/async-runs/
+  const asyncRunManager = createAsyncRunManager({
+    projectRoot: projectContext.projectRoot,
+    taskOutputsDir: projectContext.taskOutputsDir,
+    llm,
+    logger,
+    commandPolicy: createDefaultAsyncCommandPolicy(),
+    createAgentFn: createAgent,
+    createCompressorFn: () =>
+      createContextCompressor({
+        ...config.compression,
+        outputDir: projectContext.taskOutputsDir,
+      }),
+    createReadonlyRegistryFn: (readPaths: string[]) =>
+      createToolRegistry(
+        undefined, // no todo
+        undefined, // no subagent (prevent nesting)
+        skillProvider, // allow skills
+        undefined, // no memory
+        undefined, // no task
+        undefined, // no async-run (prevent nesting)
+        {
+          projectRoot: projectContext.projectRoot,
+          commandPolicy: createDefaultAsyncCommandPolicy(),
+          includeFileWrite: false,
+          includeFileEdit: false,
+          readPolicy: {
+            validate(path: string) {
+              const resolvedPath = resolve(
+                projectContext.projectRoot,
+                path,
+              );
+              // read_paths 为空数组时禁止读取任何项目文件
+              if (readPaths.length === 0) {
+                return {
+                  allowed: false,
+                  reason:
+                    "No read paths declared for this async run",
+                };
+              }
+              // 检查路径是否落在任一 declared read_paths 内
+              for (const allowedPath of readPaths) {
+                const resolvedAllowed = resolve(
+                  projectContext.projectRoot,
+                  allowedPath,
+                );
+                if (
+                  resolvedPath === resolvedAllowed ||
+                  resolvedPath.startsWith(resolvedAllowed + sep)
+                ) {
+                  return { allowed: true };
+                }
+              }
+              return {
+                allowed: false,
+                reason: `Path "${path}" is outside declared read_paths: ${readPaths.join(", ")}`,
+              };
+            },
+          },
+        },
+      ),
+    getStableSystemPrompt: () =>
+      systemPromptProvider.getSnapshot().systemPrompt,
+    sessionManager,
+    transcriptStore,
+    parentSessionId: mainSession.id,
+    hookRunner,
+    permissionManager,
+  });
+
+  // 20.6. 创建 Async Run 工具提供者
+  const asyncRunProvider = createAsyncRunToolProvider(
+    asyncRunManager,
+    createDefaultAsyncCommandPolicy(),
+  );
+
   // 21. 创建子智能体工具提供者
-  //     注入 permissionManager（子智能体继承同一权限模式）
+  //     注入 permissionManager 和 commandPolicy，内部构建 scoped permission manager
+  //     scoped manager 不给子智能体 default 模式的 ask 行为，而是固定只读诊断能力范围
   //     注入 hookRunner（子智能体继承父级 Hook，工具执行前后可观察）
   //     复用父级的稳定 system prompt 快照，保证 cache 前缀一致
   const subagentProvider = createSubagentToolProvider({
@@ -238,6 +323,7 @@ async function main() {
         skillProvider,
         memoryProvider,
         undefined,
+        undefined,
         {
           projectRoot: projectContext.projectRoot,
         },
@@ -249,6 +335,7 @@ async function main() {
         outputDir: projectContext.taskOutputsDir,
       }),
     permissionManager,
+    commandPolicy: createDefaultAsyncCommandPolicy(),
     hookRunner,
     getStableSystemPrompt: () =>
       systemPromptProvider.getSnapshot().systemPrompt,
@@ -264,6 +351,7 @@ async function main() {
     skillProvider,
     memoryProvider,
     taskProvider,
+    asyncRunProvider,
     { projectRoot: projectContext.projectRoot },
   );
 
@@ -289,6 +377,7 @@ async function main() {
     sessionEventBuffer,
     transcriptStore,
     sessionId: mainSession.id,
+    asyncRunManager,
   });
 
   // 25. 注册 CLI 命令（接入 sessionEventBuffer）

@@ -756,3 +756,263 @@ describe("Agent transcript", () => {
     expect(history.getEntries()).toHaveLength(2);
   });
 });
+
+// ============================================================
+// Async run 集成
+// ============================================================
+
+describe("Agent async run integration", () => {
+  it("drains notifications before each LLM call", async () => {
+    const drainSpy = vi.fn().mockReturnValue([]);
+    const mockAsyncRunManager = {
+      drainNotifications: drainSpy,
+      checkForegroundToolConflict: () => ({ blocked: false }),
+    };
+    const history = createHistory();
+    const agent = createAgent({
+      llm: createMockLLM([
+        { content: "done", toolCalls: [], finishReason: "stop" },
+      ]),
+      history,
+      tools: createMockToolRegistry("run_bash", async () => ({
+        output: "ok",
+        error: false,
+      })),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+      asyncRunManager: mockAsyncRunManager,
+    });
+
+    await agent.run("hello");
+    expect(drainSpy).toHaveBeenCalled();
+  });
+
+  it("injects system-reminder when notifications exist", async () => {
+    const mockAsyncRunManager = {
+      drainNotifications: vi
+        .fn()
+        .mockReturnValueOnce([]) // 第一次：无通知
+        .mockReturnValueOnce([
+          // 第二次：有通知（在 tool call 之后）
+          {
+            id: "n1",
+            runId: "ar_test",
+            type: "async_run_finished",
+            status: "completed",
+            executor: "command",
+            title: "Typecheck",
+            preview: "ok",
+            timestamp: "2026-05-19T12:00:00.000Z",
+          },
+        ]),
+      checkForegroundToolConflict: () => ({ blocked: false }),
+    };
+    const history = createHistory();
+    const agent = createAgent({
+      llm: createMockLLM([
+        // 第一轮：返回 tool call，让循环继续到第二轮
+        {
+          content: null,
+          toolCalls: [
+            makeToolCall("call_1", "run_bash", '{"command":"echo hello"}'),
+          ],
+          finishReason: "stop",
+        },
+        // 第二轮：返回文本
+        { content: "done", toolCalls: [], finishReason: "stop" },
+      ]),
+      history,
+      tools: createMockToolRegistry("run_bash", async () => ({
+        output: "ok",
+        error: false,
+      })),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+      asyncRunManager: mockAsyncRunManager,
+    });
+
+    await agent.run("hello");
+
+    const entries = history.getEntries();
+    const reminderEntry = entries.find(
+      (e) =>
+        (e.message as { role: string }).role === "user" &&
+        typeof (e.message as { content: unknown }).content === "string" &&
+        ((e.message as { content: string }).content as string).includes(
+          '<system-reminder source="async-run">',
+        ),
+    );
+    expect(reminderEntry).toBeDefined();
+  });
+
+  it("reminder contains run_async_output_read guidance", async () => {
+    const mockAsyncRunManager = {
+      drainNotifications: vi
+        .fn()
+        .mockReturnValueOnce([])
+        .mockReturnValueOnce([
+          {
+            id: "n1",
+            runId: "ar_test",
+            type: "async_run_finished",
+            status: "completed",
+            executor: "command",
+            title: "Typecheck",
+            preview: "ok",
+            timestamp: "2026-05-19T12:00:00.000Z",
+          },
+        ]),
+      checkForegroundToolConflict: () => ({ blocked: false }),
+    };
+    const history = createHistory();
+    const agent = createAgent({
+      llm: createMockLLM([
+        {
+          content: null,
+          toolCalls: [
+            makeToolCall("call_1", "run_bash", '{"command":"echo hello"}'),
+          ],
+          finishReason: "stop",
+        },
+        { content: "done", toolCalls: [], finishReason: "stop" },
+      ]),
+      history,
+      tools: createMockToolRegistry("run_bash", async () => ({
+        output: "ok",
+        error: false,
+      })),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+      asyncRunManager: mockAsyncRunManager,
+    });
+
+    await agent.run("hello");
+
+    const entries = history.getEntries();
+    const reminderEntry = entries.find(
+      (e) =>
+        (e.message as { role: string }).role === "user" &&
+        typeof (e.message as { content: unknown }).content === "string" &&
+        ((e.message as { content: string }).content as string).includes(
+          "run_async_output_read",
+        ),
+    );
+    expect(reminderEntry).toBeDefined();
+  });
+
+  it("blocks foreground tool when async conflict detected", async () => {
+    const toolExecutor = vi.fn<ToolExecutor>().mockResolvedValue({
+      output: "should not reach",
+      error: false,
+    });
+    const mockAsyncRunManager = {
+      drainNotifications: vi.fn().mockReturnValue([]),
+      checkForegroundToolConflict: () => ({
+        blocked: true,
+        reason: "Path claimed by running async run",
+      }),
+    };
+    const history = createHistory();
+    const agent = createAgent({
+      llm: createMockLLM([
+        {
+          content: null,
+          toolCalls: [
+            makeToolCall("call_1", "run_write", '{"path":"src/file.ts","content":"x"}'),
+          ],
+          finishReason: "stop",
+        },
+        { content: "understood", toolCalls: [], finishReason: "stop" },
+      ]),
+      history,
+      tools: createMockToolRegistry("run_write", toolExecutor),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+      asyncRunManager: mockAsyncRunManager,
+    });
+
+    const result = await agent.run("write file");
+
+    // 工具不应被执行
+    expect(toolExecutor).not.toHaveBeenCalled();
+
+    // 历史中应有 blocked tool_result
+    const entries = history.getEntries();
+    const blockedEntry = entries.find(
+      (e) =>
+        (e.message as { role: string }).role === "tool" &&
+        typeof (e.message as { content: unknown }).content === "string" &&
+        ((e.message as { content: string }).content as string).includes(
+          "claimed by running async run",
+        ),
+    );
+    expect(blockedEntry).toBeDefined();
+    expect(result).toBe("understood");
+  });
+
+  it("allows foreground tool when no async conflict", async () => {
+    const toolExecutor = vi.fn<ToolExecutor>().mockResolvedValue({
+      output: "written",
+      error: false,
+    });
+    const mockAsyncRunManager = {
+      drainNotifications: vi.fn().mockReturnValue([]),
+      checkForegroundToolConflict: () => ({ blocked: false }),
+    };
+    const agent = createAgent({
+      llm: createMockLLM([
+        {
+          content: null,
+          toolCalls: [
+            makeToolCall("call_1", "run_write", '{"path":"src/file.ts","content":"x"}'),
+          ],
+          finishReason: "stop",
+        },
+        { content: "done", toolCalls: [], finishReason: "stop" },
+      ]),
+      history: createHistory(),
+      tools: createMockToolRegistry("run_write", toolExecutor),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+      asyncRunManager: mockAsyncRunManager,
+    });
+
+    await agent.run("write file");
+    expect(toolExecutor).toHaveBeenCalledTimes(1);
+  });
+});

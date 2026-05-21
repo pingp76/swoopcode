@@ -8,6 +8,7 @@ import type { LLMClient, LLMResponse } from "../llm.js";
 import type { ToolRegistry } from "./registry.js";
 import { createContextCompressor } from "../compressor.js";
 import { createPermissionManager } from "../permission.js";
+import { createDefaultAsyncCommandPolicy } from "./bash.js";
 import { createSessionManager } from "../session.js";
 import { createTranscriptStore } from "../transcript.js";
 
@@ -92,6 +93,23 @@ describe("subagentToolDefinition", () => {
       "max_rounds",
     );
   });
+
+  it("description mentions synchronous use case", () => {
+    const desc = subagentToolDefinition.function.description ?? "";
+    expect(desc).toContain("run_subagent");
+    expect(desc).toContain("need the result");
+  });
+
+  it("description mentions run_async_start for non-blocking work", () => {
+    const desc = subagentToolDefinition.function.description ?? "";
+    expect(desc).toContain("run_async_start");
+    expect(desc).toContain("non-blocking");
+  });
+
+  it("description mentions executor=subagent", () => {
+    const desc = subagentToolDefinition.function.description ?? "";
+    expect(desc).toContain('executor="subagent"');
+  });
 });
 
 // ============================================================
@@ -112,6 +130,7 @@ describe("createSubagentToolProvider", () => {
       createAgentFn: vi.fn(),
       createCompressorFn: () => createContextCompressor(),
       permissionManager: testPermissionManager,
+      commandPolicy: createDefaultAsyncCommandPolicy(),
     });
 
     expect(provider.toolEntries).toHaveLength(1);
@@ -127,6 +146,7 @@ describe("createSubagentToolProvider", () => {
       createAgentFn: vi.fn(),
       createCompressorFn: () => createContextCompressor(),
       permissionManager: testPermissionManager,
+      commandPolicy: createDefaultAsyncCommandPolicy(),
     }).toolEntries[0]!.execute;
 
     const result = await execute({ task: "" });
@@ -143,6 +163,7 @@ describe("createSubagentToolProvider", () => {
       createAgentFn: vi.fn(),
       createCompressorFn: () => createContextCompressor(),
       permissionManager: testPermissionManager,
+      commandPolicy: createDefaultAsyncCommandPolicy(),
     }).toolEntries[0]!.execute;
 
     const result = await execute({ task: "   " });
@@ -179,6 +200,7 @@ describe("createSubagentToolProvider", () => {
       },
       createCompressorFn: () => createContextCompressor(),
       permissionManager: testPermissionManager,
+      commandPolicy: createDefaultAsyncCommandPolicy(),
     });
 
     const result = await provider.toolEntries[0]!.execute({
@@ -204,6 +226,7 @@ describe("createSubagentToolProvider", () => {
       },
       createCompressorFn: () => createContextCompressor(),
       permissionManager: testPermissionManager,
+      commandPolicy: createDefaultAsyncCommandPolicy(),
     });
 
     await provider.toolEntries[0]!.execute({
@@ -240,6 +263,7 @@ describe("createSubagentToolProvider", () => {
       },
       createCompressorFn: () => createContextCompressor(),
       permissionManager: testPermissionManager,
+      commandPolicy: createDefaultAsyncCommandPolicy(),
       sessionManager,
       transcriptStore,
       parentSessionId: parent.id,
@@ -275,6 +299,7 @@ describe("createSubagentToolProvider", () => {
       createAgentFn: createAgent,
       createCompressorFn: () => createContextCompressor(),
       permissionManager,
+      commandPolicy: createDefaultAsyncCommandPolicy(),
     });
 
     const result = await provider.toolEntries[0]!.execute({
@@ -344,6 +369,7 @@ describe("sub-agent round limit", () => {
       createAgentFn: createAgent,
       createCompressorFn: () => createContextCompressor(),
       permissionManager,
+      commandPolicy: createDefaultAsyncCommandPolicy(),
     });
 
     // 设置 max_rounds = 3，子 Agent 应该在 3 轮后强制停止

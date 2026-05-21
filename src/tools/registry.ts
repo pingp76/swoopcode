@@ -30,6 +30,8 @@ import type { SubagentToolProvider } from "./subagent.js";
 import type { SkillToolProvider } from "../skills.js";
 import type { MemoryToolProvider } from "./memory.js";
 import type { TaskToolProvider } from "./tasks.js";
+import type { AsyncRunToolProvider } from "./async-runs.js";
+import type { AsyncCommandPolicy } from "./bash.js";
 
 /**
  * ToolExecutor — 工具执行函数的类型
@@ -45,6 +47,21 @@ import type { TaskToolProvider } from "./tasks.js";
 export type ToolExecutor = (
   args: Record<string, unknown>,
 ) => Promise<ToolResult>;
+
+/**
+ * ToolRegistryOptions — 工具注册表的可选配置
+ *
+ * 用于创建过滤后的注册表（如 async subagent 的只读工具集）。
+ */
+export interface ToolRegistryOptions {
+  projectRoot?: string;
+  includeFileWrite?: boolean;
+  includeFileEdit?: boolean;
+  commandPolicy?: AsyncCommandPolicy;
+  readPolicy?: {
+    validate(path: string): { allowed: boolean; reason?: string };
+  };
+}
 
 /**
  * ToolEntry — 工具注册项
@@ -89,7 +106,8 @@ export function createToolRegistry(
   skillProvider?: SkillToolProvider,
   memoryProvider?: MemoryToolProvider,
   taskProvider?: TaskToolProvider,
-  options?: { projectRoot?: string },
+  asyncRunProvider?: AsyncRunToolProvider,
+  options?: ToolRegistryOptions,
 ): ToolRegistry {
   // 工具映射表：工具名 → 工具注册项
   const tools = new Map<string, ToolEntry>();
@@ -115,41 +133,69 @@ export function createToolRegistry(
   }
 
   // 注册 bash 工具
+  // 如果提供了 commandPolicy，在执行前先做策略验证
   register({
     definition: bashToolDefinition,
-    execute: async (args) =>
-      executeBash(String(args["command"] ?? ""), options?.projectRoot),
+    execute: async (args) => {
+      const command = String(args["command"] ?? "");
+      if (options?.commandPolicy) {
+        const validation = options.commandPolicy.validate(command);
+        if (!validation.allowed) {
+          return {
+            output: `Command blocked by policy: ${validation.reason}`,
+            error: true,
+          };
+        }
+      }
+      return executeBash(command, options?.projectRoot);
+    },
   });
 
   // 注册文件读取工具
+  // 如果提供了 readPolicy，在执行前先做路径验证
   register({
     definition: runReadToolDefinition,
-    execute: async (args) =>
-      executeRead(String(args["path"] ?? ""), options?.projectRoot),
+    execute: async (args) => {
+      const path = String(args["path"] ?? "");
+      if (options?.readPolicy) {
+        const validation = options.readPolicy.validate(path);
+        if (!validation.allowed) {
+          return {
+            output: `Read blocked by policy: ${validation.reason}`,
+            error: true,
+          };
+        }
+      }
+      return executeRead(path, options?.projectRoot);
+    },
   });
 
-  // 注册文件写入工具
-  register({
-    definition: runWriteToolDefinition,
-    execute: async (args) =>
-      executeWrite(
-        String(args["path"] ?? ""),
-        String(args["content"] ?? ""),
-        options?.projectRoot,
-      ),
-  });
+  // 注册文件写入工具（可选，通过 includeFileWrite 控制）
+  if (options?.includeFileWrite !== false) {
+    register({
+      definition: runWriteToolDefinition,
+      execute: async (args) =>
+        executeWrite(
+          String(args["path"] ?? ""),
+          String(args["content"] ?? ""),
+          options?.projectRoot,
+        ),
+    });
+  }
 
-  // 注册文件编辑工具
-  register({
-    definition: runEditToolDefinition,
-    execute: async (args) =>
-      executeEdit(
-        String(args["path"] ?? ""),
-        String(args["old_string"] ?? ""),
-        String(args["new_string"] ?? ""),
-        options?.projectRoot,
-      ),
-  });
+  // 注册文件编辑工具（可选，通过 includeFileEdit 控制）
+  if (options?.includeFileEdit !== false) {
+    register({
+      definition: runEditToolDefinition,
+      execute: async (args) =>
+        executeEdit(
+          String(args["path"] ?? ""),
+          String(args["old_string"] ?? ""),
+          String(args["new_string"] ?? ""),
+          options?.projectRoot,
+        ),
+    });
+  }
 
   // 注册 todo 管理工具（6 个工具）
   // 通过 TodoToolProvider 获取定义和执行函数，与 bash/files 工具完全一致的模式
@@ -190,6 +236,14 @@ export function createToolRegistry(
   // Task 属于 Agent 全局运行数据，通过 TaskToolProvider 接入注册表。
   if (taskProvider) {
     for (const entry of taskProvider.toolEntries) {
+      register(entry);
+    }
+  }
+
+  // 注册 async run 工具（4 个工具）
+  // Async Run 是 session-local 的非阻塞运行层，通过 AsyncRunToolProvider 接入注册表。
+  if (asyncRunProvider) {
+    for (const entry of asyncRunProvider.toolEntries) {
       register(entry);
     }
   }

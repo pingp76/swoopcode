@@ -40,6 +40,7 @@ import type { HookRunner } from "./hooks.js";
 import type { SystemPromptProvider } from "./system-prompt.js";
 import type { SessionEventBuffer } from "./session-events.js";
 import type { TranscriptStore } from "./transcript.js";
+import type { AsyncRunManager } from "./async-runs.js";
 import { createNoopHookRunner } from "./hooks.js";
 import { normalizeMessages } from "./normalize.js";
 import {
@@ -110,6 +111,13 @@ export function createAgent(deps: {
   transcriptStore?: TranscriptStore;
   /** 当前 Agent 对应的 sessionId（与 transcriptStore 配套使用） */
   sessionId?: string;
+  /** Async run 管理器（可选，仅主 Agent 注入，子智能体不传递） */
+  asyncRunManager?: Pick<
+    AsyncRunManager,
+    "drainNotifications" | "checkForegroundToolConflict"
+  >;
+  /** AbortSignal（可选，用于外部取消 Agent 运行，如 async run timeout） */
+  abortSignal?: AbortSignal;
 }): Agent {
   const {
     llm,
@@ -127,6 +135,8 @@ export function createAgent(deps: {
     sessionEventBuffer,
     transcriptStore,
     sessionId,
+    asyncRunManager,
+    abortSignal,
   } = deps;
 
   // 没有传入 hookRunner 时使用空操作实现，避免所有调用处都要做 if 判断
@@ -294,6 +304,19 @@ export function createAgent(deps: {
     const pendingHookMessages: string[] = [];
 
     for (const toolCall of toolCalls) {
+      // 外部中止信号检查：timeout 后不再执行新的 tool call
+      if (abortSignal?.aborted) {
+        appendMessage(
+          {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: "Tool execution skipped: async run timed out",
+          } as ChatCompletionMessageParam,
+          roundCount,
+        );
+        continue;
+      }
+
       const fnName = toolCall.function.name;
       const executor = tools.getExecutor(fnName);
 
@@ -381,6 +404,27 @@ export function createAgent(deps: {
               role: "tool",
               tool_call_id: toolCall.id,
               content: `User denied: ${decision.message}`,
+            } as ChatCompletionMessageParam,
+            roundCount,
+          );
+          continue;
+        }
+      }
+
+      // === Async 前台冲突检查 ===
+      // 在权限检查通过后、PreToolUse Hook 之前检查前台工具是否与 running async run 冲突
+      if (asyncRunManager) {
+        const conflict = asyncRunManager.checkForegroundToolConflict({
+          toolName: fnName,
+          args,
+        });
+        if (conflict.blocked) {
+          logger.info("Async foreground conflict: %s", conflict.reason);
+          appendMessage(
+            {
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: `Blocked: ${conflict.reason}`,
             } as ChatCompletionMessageParam,
             roundCount,
           );
@@ -731,6 +775,12 @@ export function createAgent(deps: {
       for (;;) {
         roundCount++;
 
+        // 0. 外部中止信号检查（如 async run timeout）
+        if (abortSignal?.aborted) {
+          logger.info("Agent run aborted by external signal");
+          return "[Async run timed out or was cancelled]";
+        }
+
         // 1. 子智能体轮次上限检测
         const limitResponse = buildRoundLimitResponse(roundCount);
         if (limitResponse !== null) return limitResponse;
@@ -740,6 +790,37 @@ export function createAgent(deps: {
           const interruptMsg = todoManager.tickRound();
           if (interruptMsg) {
             appendMessage({ role: "user", content: interruptMsg }, roundCount);
+          }
+        }
+
+        // 2.5. async run 通知 drain（子智能体没有 asyncRunManager，跳过）
+        //      在每次 LLM 调用前 drain 通知队列，确保模型及时知道 async run 状态变化
+        if (asyncRunManager) {
+          const notifications = asyncRunManager.drainNotifications();
+          if (notifications.length > 0) {
+            const lines = ["Async run updates:"];
+            for (const n of notifications) {
+              lines.push(
+                `- run_id: ${n.runId}`,
+                `  title: ${n.title}`,
+                `  executor: ${n.executor}`,
+                `  status: ${n.status}`,
+                `  preview: ${n.preview}`,
+                `  full_output: use run_async_output_read with run_id ${n.runId}`,
+              );
+            }
+            const reminderContent = `<system-reminder source="async-run">\n${lines.join("\n")}\n</system-reminder>`;
+            logger.info(
+              "Injecting %d async run notification(s) into conversation",
+              notifications.length,
+            );
+            appendMessage(
+              {
+                role: "user",
+                content: reminderContent,
+              },
+              roundCount,
+            );
           }
         }
 

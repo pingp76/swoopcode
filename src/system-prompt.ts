@@ -83,19 +83,49 @@ export function buildSystemPrompt(parts: SystemPromptParts): string | null {
 }
 
 /**
- * TASK_PLANNING_SYSTEM_HINT — TODO 与 Task 的选择规则
+ * TASK_PLANNING_SYSTEM_HINT — Planning vs Execution 分层指引
  *
- * 这是稳定 system prompt 的固定片段，用来降低 LLM 在 run_todo_* 和 run_task_*
- * 两组工具之间的混淆概率。它不包含任何动态任务状态，因此不会破坏 prompt cache 前缀。
+ * 核心 mental model：Task Group / TODO = 规划与追踪；direct tool / subagent / async run = 执行。
+ * 这个分层一旦立住，LLM 判断会清楚很多。
+ *
+ * 这是稳定 system prompt 的固定片段，不包含任何动态任务状态，因此不会破坏 prompt cache 前缀。
  */
 export const TASK_PLANNING_SYSTEM_HINT = [
-  "## TODO vs Task Tool Choice",
+  "## Planning vs Execution",
   "",
-  "Use TODO tools (`run_todo_*`) for temporary execution steps inside the current session only. TODO lists are not durable and are appropriate when losing the list after restart is acceptable.",
+  "Task Groups and TODO lists are planning/tracking tools, not execution tools.",
   "",
-  "Use Task tools (`run_task_*`) for durable long-running work that may span sessions, restarts, projects, owners, or dependency graphs. Task groups persist under the Agent runtime directory and every modifying Task tool call must pass an explicit `group_id`.",
+  "Use `run_task_*` for durable work plans that may span sessions, restarts, projects, owners, or dependency graphs. Task Groups persist under the Agent runtime directory. Every modifying Task tool call must pass an explicit `group_id`.",
   "",
-  "A good workflow for complex durable work is: create or read a Task Group, pick one ready task, then optionally use a session TODO list for the small steps needed to complete that task.",
+  "Use `run_todo_*` for temporary execution steps inside the current session. TODO lists are not durable and are appropriate when losing the list after restart is acceptable.",
+  "",
+  "For complex current-session work, a good default workflow is:",
+  "1. Use a Task Group only if the work itself needs durable tracking.",
+  "2. Use a TODO list if the current task has multiple local steps.",
+  "3. For each TODO step, choose the appropriate execution path: direct tool call, `run_subagent`, or `run_async_start`.",
+  "",
+  "## Execution Tool Routing",
+  "",
+  "Choose execution tools by whether the work needs independent reasoning and whether the parent must wait.",
+  "",
+  "- Direct tools such as `run_bash`, `run_read`, `run_write`, and `run_edit`: use when the next action is clear and the parent Agent can do it directly.",
+  "- `run_subagent`: use for synchronous delegated read-only exploration or diagnosis that needs an independent child Agent. The parent blocks until the child returns a final text result. Use only when the next parent step depends on that result.",
+  "- `run_async_start` with `executor=\"command\"`: use for non-blocking shell commands where the exact command is already known and raw stdout/stderr is sufficient, such as typecheck, tests, lint, or `git diff`.",
+  "- `run_async_start` with `executor=\"subagent\"`: use for non-blocking delegated read-only work where the goal is clear but the exact steps require Agent reasoning. The parent does not block and can continue other useful work.",
+  "",
+  "Important rules:",
+  "- Task Groups do not run code by themselves.",
+  "- Async runs do not automatically update Task Groups or TODO lists. After checking async output, update planning state manually if needed.",
+  "- Multiple async runs may execute in parallel, up to the configured concurrency limit.",
+  "- Multiple `run_subagent` calls in one response execute sequentially. Do not use them to express parallelism.",
+  "- If the result is required before the next step, prefer `run_subagent` or a direct tool call. If useful work can continue meanwhile, prefer `run_async_start`.",
+  "",
+  "## Dynamic Runtime Context",
+  "",
+  "The stable system prompt contains durable behavior rules only.",
+  "Changes to memory, skills, async run notifications, task state summaries, TODO summaries, and other changing runtime facts are provided later as system reminders.",
+  "",
+  "Treat system reminders as current runtime context. If a reminder conflicts with user messages, observed files, or tool results, prefer the more direct and recent evidence.",
 ].join("\n");
 
 // ============================================================================
