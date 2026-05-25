@@ -19,10 +19,11 @@ src/
 ├── index.ts            # 组装根（Composition Root）：组件初始化和接线
 ├── repl.ts             # REPL 交互层：readline 循环 + Agent/命令分发
 ├── cli-commands.ts     # CLI 命令注册与分发（/skill、/mode 等斜杠命令）
-├── config.ts           # 从 .env 加载配置（含压缩配置）
+├── config.ts           # 从 .env 加载配置（含压缩配置 + provider 解析）
+├── llm-providers.ts    # LLM Provider Profile 抽象层：registry + resolver
 ├── project-context.ts  # 项目上下文：集中解析 projectRoot、AGENTS.md、agentHome 与运行数据路径
 ├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
-├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ LLM 日志记录
+├── llm.ts              # LLM 客户端（OpenAI SDK + streaming 聚合）+ LLM 日志记录
 ├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 <agentHome>/logs/llm.log，超 1MB 清空重写
 ├── normalize.ts        # 消息标准化：过滤元数据、补全 tool_result、合并同角色消息
 ├── history.ts          # 对话历史管理（messages + rounds 统一存储 + HistoryEntry + system prompt 支持）
@@ -216,10 +217,19 @@ skills/
 - **cleanup()**：清空 Agent 全局 `.task_outputs/` 目录
 - **输出目录可注入**：大工具输出目录由 `ProjectContext.taskOutputsDir` 注入，默认位于 `agentHome/.task_outputs/`
 
+### LLM Provider Profile 抽象层 (`llm-providers.ts`)
+
+- **集中 profile 表**：声明 4 个 provider（`openai_compatible`、`minimax_cn`、`kimi_platform_cn`、`kimi_code_cn`）的默认 endpoint、默认模型、key 环境变量和能力标记
+- **解析优先级**：`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` 优先于 provider 默认值，兼容现有使用方式
+- **启动时解析**：`resolveLLMProviderConfig()` 只读 env，不做网络请求，返回 `ResolvedLLMConfig`
+- **厂商差异不泄漏到 Agent 循环**：Agent、SubAgent、Async Run 只依赖 `LLMClient.chat()`
+- **真实验证**：`kimi_code_cn` 已实测通过普通聊天和 tool call 闭环（含 streaming 聚合、User-Agent 注入、thinking/reasoning_content 兼容）
+
 ### LLM 客户端 (`llm.ts`)
 
-- 使用 OpenAI SDK，通过 baseURL 接入 MiniMax API
+- 使用 OpenAI SDK，通过 `ResolvedLLMConfig` 的 `baseURL` 接入任意 OpenAI-compatible provider
 - 支持 function calling（工具调用）
+- **streaming 聚合**：若 `capabilities.prefersStreaming === true`，自动启用 `stream: true`，聚合 content delta 和 tool_calls delta，最终返回统一的 `LLMResponse`
 - 接口抽象：`LLMClient { chat(messages, tools?, cacheDebug?) }`
 - **消息由调用方标准化**：normalize 移至 agent.ts，llm.chat() 接收已处理的消息
 - **LLM 通信日志**：可选的 `LLMLogger` 参数，记录完整请求/响应到本地文件
@@ -405,9 +415,13 @@ skills/
 
 | 变量                       | 说明                                | 示例                          |
 | -------------------------- | ----------------------------------- | ----------------------------- |
-| `LLM_API_KEY`              | API 密钥                            | `sk-cp-...`                   |
-| `LLM_BASE_URL`             | API 基础 URL                        | `https://api.minimaxi.com/v1` |
-| `LLM_MODEL`                | 模型名称                            | `MiniMax-M2.5`                |
+| `LLM_PROVIDER`             | Provider 标识（可选）               | `kimi_code_cn`                |
+| `LLM_API_KEY`              | 通用 API 密钥（覆盖 provider 默认） | `sk-cp-...`                   |
+| `LLM_BASE_URL`             | API 基础 URL（覆盖 provider 默认）  | `https://api.minimaxi.com/v1` |
+| `LLM_MODEL`                | 模型名称（覆盖 provider 默认）      | `MiniMax-M2.5`                |
+| `KIMI_CODE_API_KEY`        | Kimi Code CN 专用 key               | `sk-kimi-...`                 |
+| `MOONSHOT_API_KEY`         | Kimi Platform CN 专用 key           | `sk-moonshot-...`             |
+| `MINIMAX_CN_API_KEY`       | MiniMax CN 专用 key                 | `sk-minimax-...`              |
 | `LOG_LEVEL`                | 日志级别                            | `info`                        |
 | `COMPRESS_TOOL_OUTPUT`     | 即时压缩 token 阈值                 | `2000`                        |
 | `COMPRESS_DECAY_THRESHOLD` | 衰减压缩轮次阈值                    | `3`                           |
@@ -420,30 +434,33 @@ skills/
 
 ## 测试覆盖
 
-| 测试文件                     | 测试数 | 覆盖内容                                                                                                        |
-| ---------------------------- | ------ | --------------------------------------------------------------------------------------------------------------- |
-| `src/tools/bash.test.ts`     | 9      | 危险命令拦截、正常执行、错误处理                                                                                |
-| `src/tools/files.test.ts`    | 17     | 路径安全检查、读写文件、编辑替换                                                                                |
-| `src/normalize.test.ts`      | 10     | 元数据过滤、tool_result 补全、消息合并                                                                          |
-| `src/history.test.ts`        | 13     | 增删、返回副本、清空、add 带 meta、getEntries、getSystemPrompt                                                  |
-| `src/logger.test.ts`         | 1      | 日志级别过滤                                                                                                    |
-| `src/todo.test.ts`           | 33     | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程                                                  |
-| `src/tools/subagent.test.ts` | 14     | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表、async run 提示                             |
-| `src/skills.test.ts`         | 25     | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量                         |
-| `src/message-block.test.ts`  | 24     | 消息块分组、还原、\_round 传递与清除、round-trip 一致性、token 估算                                             |
-| `src/compressor.test.ts`     | 21     | 衰减压缩、即时压缩（含非压缩工具通过）、全量压缩、状态管理、cleanup                                             |
-| `src/permission.test.ts`     | 49     | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory/async-run 权限 |
-| `src/hooks.test.ts`          | 11     | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner                                             |
-| `src/agent.test.ts`          | 15     | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序、async notification/conflict |
-| `src/memory.test.ts`         | 40     | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar |
-| `src/tools/memory.test.ts`   | 2      | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复                                                |
-| `src/tools/registry.test.ts` | 4      | 重复注册报错、工具定义顺序稳定性、完整 registry 创建、过滤选项                                                    |
-| `src/async-runs.test.ts`     | 26     | start 校验、finishRun 生命周期、timeout、深拷贝、冲突检测、notification drain、readOutput                         |
-| `src/tools/async-runs.test.ts` | 14   | 4 个工具定义、参数校验、JSON 输出格式、错误传播                                                                   |
-| `src/system-prompt.test.ts`  | 17     | buildSystemPrompt 组合、AGENTS.md 项目指令头、snapshot 稳定性、refreshSnapshot、ignore memory reminder          |
-| `src/session-events.test.ts` | 5      | drain 清空、peek 不清空、顺序保持                                                                               |
-| `src/cache-debug.test.ts`    | 7      | inspect 变化检测、system prompt 不变性、formatCacheDebugLog                                                     |
-| `src/index.test.ts`          | 1      | 占位                                                                                                            |
+| 测试文件                       | 测试数 | 覆盖内容                                                                                                               |
+| ------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `src/tools/bash.test.ts`       | 9      | 危险命令拦截、正常执行、错误处理                                                                                       |
+| `src/tools/files.test.ts`      | 17     | 路径安全检查、读写文件、编辑替换                                                                                       |
+| `src/normalize.test.ts`        | 10     | 元数据过滤、tool_result 补全、消息合并                                                                                 |
+| `src/history.test.ts`          | 13     | 增删、返回副本、清空、add 带 meta、getEntries、getSystemPrompt                                                         |
+| `src/logger.test.ts`           | 1      | 日志级别过滤                                                                                                           |
+| `src/todo.test.ts`             | 33     | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程                                                         |
+| `src/tools/subagent.test.ts`   | 14     | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表、async run 提示                                    |
+| `src/skills.test.ts`           | 25     | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量                                |
+| `src/message-block.test.ts`    | 24     | 消息块分组、还原、\_round 传递与清除、round-trip 一致性、token 估算                                                    |
+| `src/compressor.test.ts`       | 21     | 衰减压缩、即时压缩（含非压缩工具通过）、全量压缩、状态管理、cleanup                                                    |
+| `src/permission.test.ts`       | 49     | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory/async-run 权限   |
+| `src/hooks.test.ts`            | 11     | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner                                                    |
+| `src/agent.test.ts`            | 15     | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序、async notification/conflict |
+| `src/memory.test.ts`           | 40     | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar        |
+| `src/tools/memory.test.ts`     | 2      | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复                                                       |
+| `src/tools/registry.test.ts`   | 4      | 重复注册报错、工具定义顺序稳定性、完整 registry 创建、过滤选项                                                         |
+| `src/async-runs.test.ts`       | 26     | start 校验、finishRun 生命周期、timeout、深拷贝、冲突检测、notification drain、readOutput                              |
+| `src/tools/async-runs.test.ts` | 14     | 4 个工具定义、参数校验、JSON 输出格式、错误传播                                                                        |
+| `src/system-prompt.test.ts`    | 17     | buildSystemPrompt 组合、AGENTS.md 项目指令头、snapshot 稳定性、refreshSnapshot、ignore memory reminder                 |
+| `src/session-events.test.ts`   | 5      | drain 清空、peek 不清空、顺序保持                                                                                      |
+| `src/cache-debug.test.ts`      | 7      | inspect 变化检测、system prompt 不变性、formatCacheDebugLog                                                            |
+| `src/llm-providers.test.ts`    | 22     | provider 解析、默认值、覆盖优先级、错误提示、能力标记                                                                  |
+| `src/config.test.ts`           | 5      | loadConfig 解析 provider 字段、compression/logLevel 默认值、错误信息不泄漏 key                                         |
+| `src/llm.test.ts`              | 10     | non-streaming 路径、streaming content/tool_calls 聚合、llmLogger 调用                                                  |
+| `src/index.test.ts`            | 1      | 占位                                                                                                                   |
 
 ## 设计模式
 

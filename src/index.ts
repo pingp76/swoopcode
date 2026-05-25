@@ -76,7 +76,17 @@ async function main() {
 
   // 5. 创建 LLM 客户端
   const llmLogger = createLLMLogger({ logDir: projectContext.logsDir });
-  const llm = createLLMClient(config, llmLogger);
+  const llm = createLLMClient(
+    {
+      provider: config.provider,
+      displayName: config.providerDisplayName,
+      apiKey: config.apiKey,
+      baseURL: config.baseURL,
+      model: config.model,
+      capabilities: config.llmCapabilities,
+    },
+    llmLogger,
+  );
 
   // 6. 创建会话管理器和原始 transcript 存储
   const sessionManager = createSessionManager({
@@ -260,16 +270,12 @@ async function main() {
           includeFileEdit: false,
           readPolicy: {
             validate(path: string) {
-              const resolvedPath = resolve(
-                projectContext.projectRoot,
-                path,
-              );
+              const resolvedPath = resolve(projectContext.projectRoot, path);
               // read_paths 为空数组时禁止读取任何项目文件
               if (readPaths.length === 0) {
                 return {
                   allowed: false,
-                  reason:
-                    "No read paths declared for this async run",
+                  reason: "No read paths declared for this async run",
                 };
               }
               // 检查路径是否落在任一 declared read_paths 内
@@ -400,7 +406,12 @@ async function main() {
     commands: commandRegistry,
     terminal,
   });
-  logger.info("Agent started (model: %s)", config.model);
+  logger.info(
+    "Agent started (provider: %s, model: %s, project: %s)",
+    config.provider,
+    config.model,
+    projectContext.projectRoot,
+  );
   repl.start();
 }
 

@@ -1,11 +1,13 @@
 /**
  * config.ts — 配置加载模块
  *
- * 职责：从 .env 文件中读取环境变量，组装成类型安全的配置对象。
- * 这样做的目的是将敏感信息（如 API Key）与代码分离，
- * 不同环境（开发/测试/生产）可以使用不同的 .env 文件。
+ * 职责：从 .env 文件中读取环境变量，通过 llm-providers 解析为 ResolvedLLMConfig，
+ * 再与压缩、日志等本地配置组装成类型安全的 Config 对象。
  *
- * 依赖：dotenv 库，它会在 import 时自动将 .env 文件中的变量注入到 process.env 中。
+ * 这样做的好处：
+ * - 敏感信息（API Key）与代码分离
+ * - 不同环境使用不同的 .env 文件
+ * - 厂商差异集中在 llm-providers.ts，本模块只负责组装
  */
 
 // dotenv/config 是 dotenv 的副作用导入，不需要使用它的返回值
@@ -13,19 +15,31 @@
 // 把里面的键值对设置到 process.env 中
 import "dotenv/config";
 
+import {
+  resolveLLMProviderConfig,
+  type LLMProviderId,
+  type LLMProviderCapabilities,
+} from "./llm-providers.js";
+
 /**
  * Config — 应用配置的类型定义
  *
  * 通过 interface 定义配置的形状，TypeScript 会在编译时检查
  * 所有使用配置的地方是否正确访问了这些字段。
  */
-interface Config {
-  /** LLM API 的认证密钥，用于验证调用者身份 */
+export interface Config {
+  /** 当前使用的 provider id */
+  provider: LLMProviderId;
+  /** provider 的显示名称 */
+  providerDisplayName: string;
+  /** LLM API 的认证密钥 */
   apiKey: string;
-  /** LLM API 的基础 URL，MiniMax 使用 OpenAI 兼容格式 */
+  /** LLM API 的基础 URL */
   baseURL: string;
-  /** 要调用的模型名称，如 "MiniMax-M2.5" */
+  /** 要调用的模型名称 */
   model: string;
+  /** provider 能力标记，供 llm.ts 做兼容决策 */
+  llmCapabilities: LLMProviderCapabilities;
   /** 日志级别：debug < info < warn < error */
   logLevel: string;
   /** 上下文压缩配置 */
@@ -51,37 +65,25 @@ export interface CompressionConfig {
 }
 
 /**
- * getEnv — 获取必需的环境变量
- *
- * 这是一个辅助函数，封装了 "读取环境变量 + 缺失时报错" 的逻辑。
- * 使用泛型约束确保返回值一定是 string 类型（不会是 undefined）。
- *
- * @param key - 环境变量的名称
- * @returns 环境变量的值
- * @throws 如果环境变量不存在，抛出明确的错误信息
- */
-function getEnv(key: string): string {
-  const value = process.env[key];
-  if (!value) {
-    // 抛出错误而不是返回 undefined，可以尽早发现问题
-    throw new Error(`Missing required environment variable: ${key}`);
-  }
-  return value;
-}
-
-/**
  * loadConfig — 加载并返回应用配置
  *
- * 把分散的环境变量集中到一个类型安全的对象中，
- * 后续代码只需要依赖这个 Config 对象，不需要直接访问 process.env。
+ * 1. 调用 resolveLLMProviderConfig() 解析 provider、apiKey、baseURL、model
+ * 2. 保留原有 compression / logLevel 逻辑
+ * 3. 返回统一的 Config 对象
  *
- * LOG_LEVEL 是可选的，默认为 "info"。
+ * 后续代码只需要依赖这个 Config 对象，不需要直接访问 process.env。
  */
 export function loadConfig(): Config {
+  // 解析 LLM provider 配置（含优先级处理和环境变量覆盖）
+  const resolved = resolveLLMProviderConfig(process.env);
+
   return {
-    apiKey: getEnv("LLM_API_KEY"),
-    baseURL: getEnv("LLM_BASE_URL"),
-    model: getEnv("LLM_MODEL"),
+    provider: resolved.provider,
+    providerDisplayName: resolved.displayName,
+    apiKey: resolved.apiKey,
+    baseURL: resolved.baseURL,
+    model: resolved.model,
+    llmCapabilities: resolved.capabilities,
     // ?? 是空值合并运算符：只有当左边是 null 或 undefined 时才使用右边的默认值
     logLevel: process.env["LOG_LEVEL"] ?? "info",
     compression: {

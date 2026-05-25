@@ -136,9 +136,10 @@ export function classifyLLMError(error: unknown): LLMErrorKind {
     return "rate_limit";
   }
 
-  // 4. context_length：400/413 或提到上下文长度相关关键词
+  // 4. context_length：413 或明确提到上下文长度相关关键词
+  // 注意：不是所有 400 都是 context_length，Kimi 等 provider 可能用 400
+  // 返回参数校验错误（如 thinking/reasoning_content 缺失）
   if (
-    status === 400 ||
     status === 413 ||
     message.includes("context length") ||
     message.includes("maximum context") ||
@@ -254,7 +255,7 @@ export function formatFailureMessage(
 ): string {
   switch (kind) {
     case "credential":
-      return "LLM 认证配置错误，请检查 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL。";
+      return "LLM 认证配置错误，请检查 LLM_PROVIDER、API key、baseURL 和模型名。";
 
     case "quota":
       return "LLM token 额度或账户余额不足，请稍后或补充额度后再试。";

@@ -59,15 +59,15 @@ describe("classifyLLMError", () => {
   });
 
   it("413 -> context_length", () => {
-    expect(classifyLLMError({ status: 413, message: "Payload Too Large" })).toBe(
-      "context_length",
-    );
+    expect(
+      classifyLLMError({ status: 413, message: "Payload Too Large" }),
+    ).toBe("context_length");
   });
 
   it("500 -> network", () => {
-    expect(classifyLLMError({ status: 500, message: "Internal Server Error" })).toBe(
-      "network",
-    );
+    expect(
+      classifyLLMError({ status: 500, message: "Internal Server Error" }),
+    ).toBe("network");
   });
 
   it("502 -> network", () => {
@@ -77,9 +77,9 @@ describe("classifyLLMError", () => {
   });
 
   it("503 -> network", () => {
-    expect(classifyLLMError({ status: 503, message: "Service Unavailable" })).toBe(
-      "network",
-    );
+    expect(
+      classifyLLMError({ status: 503, message: "Service Unavailable" }),
+    ).toBe("network");
   });
 
   it("504 -> network", () => {
@@ -205,14 +205,22 @@ describe("formatRecoveryNotice", () => {
   });
 
   it("compact notice", () => {
-    const notice = formatRecoveryNotice("compact", "context_length", createRecoveryState());
+    const notice = formatRecoveryNotice(
+      "compact",
+      "context_length",
+      createRecoveryState(),
+    );
     expect(notice).toContain("压缩历史后重试");
   });
 
   it("continue notice includes retry count", () => {
     const state = createRecoveryState();
     state.continueRetryCount = 1;
-    const notice = formatRecoveryNotice("continue", "output_interrupted", state);
+    const notice = formatRecoveryNotice(
+      "continue",
+      "output_interrupted",
+      state,
+    );
     expect(notice).toContain("从断点继续 1/2");
   });
 
@@ -244,7 +252,9 @@ describe("formatRecoveryNotice", () => {
 
 describe("formatFailureMessage", () => {
   it("credential message", () => {
-    expect(formatFailureMessage("credential")).toContain("认证配置错误");
+    const msg = formatFailureMessage("credential");
+    expect(msg).toContain("认证配置错误");
+    expect(msg).toContain("LLM_PROVIDER");
   });
 
   it("quota message", () => {
@@ -252,7 +262,9 @@ describe("formatFailureMessage", () => {
   });
 
   it("context_length message", () => {
-    expect(formatFailureMessage("context_length")).toContain("开启新会话或减少上下文");
+    expect(formatFailureMessage("context_length")).toContain(
+      "开启新会话或减少上下文",
+    );
   });
 
   it("output_interrupted message", () => {

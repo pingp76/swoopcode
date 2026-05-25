@@ -849,6 +849,14 @@ export function createAgent(deps: {
             response = await llm.chat(finalMsgs, toolDefs, cacheState);
             break; // 成功，跳出恢复循环
           } catch (error) {
+            const rawError = error as { status?: unknown; code?: unknown };
+            // 诊断：记录原始错误信息，帮助定位真正的失败原因
+            logger.error(
+              "LLM call raw error: status=%s code=%s message=%s",
+              rawError.status ?? "N/A",
+              rawError.code ?? "N/A",
+              error instanceof Error ? error.message : String(error),
+            );
             const kind = classifyLLMError(error);
             const action = decideRecovery(kind, recoveryState);
 
