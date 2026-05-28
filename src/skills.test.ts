@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -292,7 +292,6 @@ describe("createSkillManager", () => {
       expect(result).toBe(true);
       expect(manager.listMeta()).toHaveLength(0);
       // 目录应该已被删除
-      const { existsSync } = require("node:fs");
       expect(existsSync(skillDir)).toBe(false);
     });
 

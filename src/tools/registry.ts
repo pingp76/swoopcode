@@ -31,6 +31,7 @@ import type { SkillToolProvider } from "../skills.js";
 import type { MemoryToolProvider } from "./memory.js";
 import type { TaskToolProvider } from "./tasks.js";
 import type { AsyncRunToolProvider } from "./async-runs.js";
+import type { ScheduleToolProvider } from "./schedules.js";
 import type { AsyncCommandPolicy } from "./bash.js";
 
 /**
@@ -108,6 +109,7 @@ export function createToolRegistry(
   taskProvider?: TaskToolProvider,
   asyncRunProvider?: AsyncRunToolProvider,
   options?: ToolRegistryOptions,
+  scheduleProvider?: ScheduleToolProvider,
 ): ToolRegistry {
   // 工具映射表：工具名 → 工具注册项
   const tools = new Map<string, ToolEntry>();
@@ -244,6 +246,14 @@ export function createToolRegistry(
   // Async Run 是 session-local 的非阻塞运行层，通过 AsyncRunToolProvider 接入注册表。
   if (asyncRunProvider) {
     for (const entry of asyncRunProvider.toolEntries) {
+      register(entry);
+    }
+  }
+
+  // 注册 schedule 工具（6 个工具）
+  // Schedule 是持久化定时规则，通过 ScheduleToolProvider 接入注册表。
+  if (scheduleProvider) {
+    for (const entry of scheduleProvider.toolEntries) {
       register(entry);
     }
   }

@@ -41,6 +41,7 @@ import type { SystemPromptProvider } from "./system-prompt.js";
 import type { SessionEventBuffer } from "./session-events.js";
 import type { TranscriptStore } from "./transcript.js";
 import type { AsyncRunManager } from "./async-runs.js";
+import type { ScheduleManager } from "./schedules.js";
 import { createNoopHookRunner } from "./hooks.js";
 import { normalizeMessages } from "./normalize.js";
 import {
@@ -116,6 +117,8 @@ export function createAgent(deps: {
     AsyncRunManager,
     "drainNotifications" | "checkForegroundToolConflict"
   >;
+  /** Schedule 管理器（可选，仅主 Agent 注入，子智能体不传递） */
+  scheduleManager?: Pick<ScheduleManager, "drainNotifications">;
   /** AbortSignal（可选，用于外部取消 Agent 运行，如 async run timeout） */
   abortSignal?: AbortSignal;
 }): Agent {
@@ -136,6 +139,7 @@ export function createAgent(deps: {
     transcriptStore,
     sessionId,
     asyncRunManager,
+    scheduleManager,
     abortSignal,
   } = deps;
 
@@ -812,6 +816,38 @@ export function createAgent(deps: {
             const reminderContent = `<system-reminder source="async-run">\n${lines.join("\n")}\n</system-reminder>`;
             logger.info(
               "Injecting %d async run notification(s) into conversation",
+              notifications.length,
+            );
+            appendMessage(
+              {
+                role: "user",
+                content: reminderContent,
+              },
+              roundCount,
+            );
+          }
+        }
+
+        // 2.6. schedule 通知 drain（子智能体没有 scheduleManager，跳过）
+        //      在每次 LLM 调用前 drain schedule 通知队列，确保模型及时知道定时任务状态变化
+        if (scheduleManager) {
+          const notifications = scheduleManager.drainNotifications();
+          if (notifications.length > 0) {
+            const lines = ["Schedule updates:"];
+            for (const n of notifications) {
+              lines.push(
+                `- schedule: ${n.scheduleId}`,
+                `  occurrence: ${n.occurrenceId}`,
+                `  type: ${n.type}`,
+                `  message: ${n.message}`,
+              );
+              if (n.asyncRunId) {
+                lines.push(`  async_run: ${n.asyncRunId}`);
+              }
+            }
+            const reminderContent = `<system-reminder source="schedule">\n${lines.join("\n")}\n</system-reminder>`;
+            logger.info(
+              "Injecting %d schedule notification(s) into conversation",
               notifications.length,
             );
             appendMessage(

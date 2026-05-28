@@ -158,6 +158,7 @@ export interface AsyncRunManager {
     toolName: string;
     args: Record<string, unknown>;
   }): { blocked: boolean; reason?: string };
+  setOnFinish?(handler: (record: AsyncRunRecord) => void): void;
 }
 
 /**
@@ -306,6 +307,7 @@ export function createAsyncRunManager(deps: {
   parentSessionId?: string;
   hookRunner?: HookRunner;
   permissionManager?: PermissionManager;
+  onFinish?(record: AsyncRunRecord): void;
 }): AsyncRunManager {
   const {
     projectRoot,
@@ -322,6 +324,7 @@ export function createAsyncRunManager(deps: {
     parentSessionId,
     hookRunner,
     permissionManager,
+    onFinish,
   } = deps;
 
   // 进程内 record 表：run_id → AsyncRunRecord
@@ -332,6 +335,8 @@ export function createAsyncRunManager(deps: {
   const finishedRunIds = new Set<string>();
   // 当前 running 的 async run 数量
   let runningCount = 0;
+  // 可选的 finish 生命周期回调（供 ScheduleManager 注册）
+  let onFinishRef = onFinish;
 
   // -------------------------------------------------------------------------
   // finishRun — 终态收敛（核心正确性函数）
@@ -420,6 +425,9 @@ export function createAsyncRunManager(deps: {
 
     // 更新 record 快照
     writeRecordSnapshot(record);
+
+    // 调用 lifecycle hook（如果有）
+    onFinishRef?.(record);
 
     // 推送 notification（只推一次）
     const notification: AsyncRunNotification = {
@@ -905,5 +913,8 @@ export function createAsyncRunManager(deps: {
     readOutput,
     drainNotifications,
     checkForegroundToolConflict,
+    setOnFinish(handler: (record: AsyncRunRecord) => void): void {
+      onFinishRef = handler;
+    },
   };
 }

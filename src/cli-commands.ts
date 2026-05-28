@@ -21,6 +21,7 @@ import type { MemoryManager } from "./memory.js";
 import type { SessionEventBuffer } from "./session-events.js";
 import type { TaskManager } from "./tasks.js";
 import { formatTaskGroupList, formatTaskGroupView } from "./tasks.js";
+import type { ScheduleManager } from "./schedules.js";
 
 // ---------------------------------------------------------------------------
 // 类型定义
@@ -312,6 +313,134 @@ export function createMemoryCliCommand(
         }
         default:
           console.log("Usage: /memory <list|show <name>|remove <name>|reload>");
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// /schedule 命令
+// ---------------------------------------------------------------------------
+
+/**
+ * createScheduleCliCommand — 创建 /schedule CLI 命令
+ *
+ * 直接操作 ScheduleManager，不经过 LLM：
+ * - /schedule list [--all]       列出 schedule 摘要
+ * - /schedule show <schedule_id> 显示 schedule 详情和最近 occurrences
+ * - /schedule cancel <schedule_id> 取消 schedule
+ * - /schedule delete <schedule_id> 删除未执行的 schedule
+ * - /schedule occurrences <schedule_id> 列出 occurrence 历史
+ */
+export function createScheduleCliCommand(
+  manager: ScheduleManager,
+  logger: Logger,
+): CliCommand {
+  return {
+    name: "schedule",
+    handler(args: string[]): void {
+      const subcommand = args[0];
+
+      switch (subcommand) {
+        case "list": {
+          const includeAll = args.includes("--all");
+          const schedules = manager.list({
+            includeArchived: includeAll,
+            includeCancelled: includeAll,
+          });
+          if (schedules.length === 0) {
+            console.log("No schedules found.");
+          } else {
+            console.log("Schedules:");
+            for (const s of schedules) {
+              const next = s.nextRunAt ? ` (next: ${s.nextRunAt})` : "";
+              console.log(`  - ${s.id}: ${s.title} [${s.status}]${next}`);
+            }
+          }
+          break;
+        }
+        case "show": {
+          const scheduleId = args[1];
+          if (!scheduleId) {
+            console.log("Usage: /schedule show <schedule_id>");
+            break;
+          }
+          const view = manager.read(scheduleId, { recentOccurrences: 5 });
+          if (!view) {
+            console.log(`Schedule "${scheduleId}" not found.`);
+            break;
+          }
+          console.log(`Schedule: ${view.id}`);
+          console.log(`  Title: ${view.title}`);
+          if (view.description) console.log(`  Description: ${view.description}`);
+          console.log(`  Status: ${view.status}`);
+          console.log(`  Executor: ${view.execution.executor}`);
+          console.log(`  Overlap: ${view.execution.overlapPolicy}`);
+          console.log(`  Next run: ${view.nextRunAt ?? "none"}`);
+          const occurrences = manager.listOccurrences({ scheduleId, limit: 5 });
+          if (occurrences.length > 0) {
+            console.log("  Recent occurrences:");
+            for (const occ of occurrences) {
+              console.log(`    - ${occ.id}: ${occ.status} at ${occ.scheduledAt}`);
+            }
+          }
+          break;
+        }
+        case "cancel": {
+          const scheduleId = args[1];
+          if (!scheduleId) {
+            console.log("Usage: /schedule cancel <schedule_id>");
+            break;
+          }
+          try {
+            const view = manager.cancel(scheduleId);
+            logger.info("Schedule cancelled: %s", scheduleId);
+            console.log(`Schedule "${scheduleId}" cancelled. Status: ${view.status}`);
+          } catch (error) {
+            console.log(
+              `Error: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          break;
+        }
+        case "delete": {
+          const scheduleId = args[1];
+          if (!scheduleId) {
+            console.log("Usage: /schedule delete <schedule_id>");
+            break;
+          }
+          try {
+            manager.delete(scheduleId);
+            logger.info("Schedule deleted: %s", scheduleId);
+            console.log(`Schedule "${scheduleId}" deleted.`);
+          } catch (error) {
+            console.log(
+              `Error: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          break;
+        }
+        case "occurrences": {
+          const scheduleId = args[1];
+          if (!scheduleId) {
+            console.log("Usage: /schedule occurrences <schedule_id>");
+            break;
+          }
+          const occurrences = manager.listOccurrences({ scheduleId });
+          if (occurrences.length === 0) {
+            console.log(`No occurrences found for "${scheduleId}".`);
+          } else {
+            console.log(`Occurrences for "${scheduleId}":`);
+            for (const occ of occurrences) {
+              console.log(`  - ${occ.id}: ${occ.status} (scheduled: ${occ.scheduledAt})`);
+            }
+          }
+          break;
+        }
+        default:
+          console.log(
+            "Usage: /schedule <list [--all]|show <id>|cancel <id>|delete <id>|occurrences <id>>",
+          );
       }
     },
   };

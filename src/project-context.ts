@@ -37,6 +37,8 @@ export interface ProjectContext {
   taskOutputsDir: string;
   /** 持久化 Task Group 目录，放在 Agent 全局运行根目录下 */
   tasksDir: string;
+  /** Schedule 定时规则目录，放在 Agent 全局运行根目录下 */
+  schedulesDir: string;
 }
 
 /**
@@ -73,5 +75,6 @@ export function createProjectContext(options?: {
     logsDir: resolve(agentHome, "logs"),
     taskOutputsDir: resolve(agentHome, ".task_outputs"),
     tasksDir: resolve(agentHome, "tasks"),
+    schedulesDir: resolve(agentHome, "schedules"),
   };
 }

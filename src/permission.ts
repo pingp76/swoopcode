@@ -71,6 +71,7 @@ type ToolCategory =
   | "skill"
   | "subagent"
   | "async-run"
+  | "schedule"
   | "unknown";
 
 /** 根据工具名判断类别 */
@@ -84,6 +85,7 @@ function categorizeTool(toolName: string): ToolCategory {
   if (toolName === "run_skill") return "skill";
   if (toolName === "run_subagent") return "subagent";
   if (toolName.startsWith("run_async_")) return "async-run";
+  if (toolName.startsWith("run_schedule_")) return "schedule";
   return "unknown";
 }
 
@@ -291,6 +293,97 @@ export function createPermissionManager(projectDir: string): PermissionManager {
         return { action: "allow" };
       }
 
+      // ── 步骤 4.7：schedule 工具权限 ──
+      // 必须放在 auto 模式放行之前，因为 durable schedule 变更即使在 auto 模式下也需要确认
+      if (category === "schedule") {
+        // list/read/occurrence_list 所有模式 allow
+        if (
+          ctx.toolName === "run_schedule_list" ||
+          ctx.toolName === "run_schedule_read" ||
+          ctx.toolName === "run_schedule_occurrence_list"
+        ) {
+          return { action: "allow" };
+        }
+
+        // create/cancel/delete: plan 模式 deny，default/auto 模式 ask
+        if (
+          ctx.toolName === "run_schedule_create" ||
+          ctx.toolName === "run_schedule_cancel" ||
+          ctx.toolName === "run_schedule_delete"
+        ) {
+          if (mode === "plan") {
+            return {
+              action: "deny",
+              reason: "Schedule modifications are not allowed in plan mode",
+            };
+          }
+          return {
+            action: "ask",
+            message: `Allow ${ctx.toolName}: ${String(ctx.args["title"] ?? ctx.args["schedule_id"] ?? "")}`,
+          };
+        }
+
+        // 兜底：安全起见放行
+        return { action: "allow" };
+      }
+
+      // ── 步骤 5：模式权限检查 ──
+
+      // plan 模式：bash 禁止，写操作只允许 .claude/plans/
+      if (mode === "plan") {
+        if (category === "bash") {
+          return {
+            action: "deny",
+            reason: "bash commands are not allowed in plan mode",
+          };
+        }
+        if (category === "file-write") {
+          const rawPath = getPathArg(ctx.args);
+          const plansDir = resolve(projectRoot, ".claude", "plans");
+          const resolvedPath = resolve(projectRoot, rawPath);
+          if (
+            resolvedPath !== plansDir &&
+            !resolvedPath.startsWith(plansDir + sep)
+          ) {
+            return {
+              action: "deny",
+              reason: `Write to "${rawPath}" not allowed in plan mode (only .claude/plans/)`,
+            };
+          }
+          return { action: "allow" };
+        }
+        // plan 模式下 run_subagent 允许（子智能体继承同一模式）
+        if (category === "subagent") return { action: "allow" };
+      }
+
+      // auto 模式：所有通过黑名单和路径边界的操作直接放行
+      if ((mode as string) === "auto") {
+        return { action: "allow" };
+      }
+
+      // ── 步骤 6：default 模式下的敏感操作确认 ──
+      if (category === "bash") {
+        const command = String(ctx.args["command"] ?? "");
+        return {
+          action: "ask",
+          message: `Allow bash command: ${command.slice(0, 120)}`,
+        };
+      }
+      if (category === "file-write") {
+        const rawPath = getPathArg(ctx.args);
+        return {
+          action: "ask",
+          message: `Allow ${ctx.toolName}: ${rawPath}`,
+        };
+      }
+      if (category === "subagent") {
+        const task = String(ctx.args["task"] ?? "");
+        return {
+          action: "ask",
+          message: `Allow subagent task: ${task.slice(0, 120)}`,
+        };
+      }
+
       // ── 步骤 5：模式权限检查 ──
 
       // plan 模式：bash 禁止，写操作只允许 .claude/plans/
@@ -431,7 +524,8 @@ export function createScopedSubagentPermissionManager(deps: {
         ctx.toolName === "run_todo_add" ||
         ctx.toolName === "run_todo_complete" ||
         ctx.toolName === "run_todo_list" ||
-        ctx.toolName === "run_async_start"
+        ctx.toolName === "run_async_start" ||
+        ctx.toolName.startsWith("run_schedule_")
       ) {
         return {
           action: "deny",

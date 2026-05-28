@@ -52,6 +52,10 @@ import { createTaskToolProvider } from "./tools/tasks.js";
 import { createAsyncRunManager } from "./async-runs.js";
 import { createAsyncRunToolProvider } from "./tools/async-runs.js";
 import { createDefaultAsyncCommandPolicy } from "./tools/bash.js";
+import { createScheduleStore } from "./schedule-store.js";
+import { createScheduleManager } from "./schedules.js";
+import { createScheduleToolProvider } from "./tools/schedules.js";
+import { createScheduleCliCommand } from "./cli-commands.js";
 
 /**
  * main — 主函数
@@ -241,6 +245,14 @@ async function main() {
     logger,
   );
 
+  // 20.4. 创建 Schedule 存储和管理器
+  //       Schedule 数据放在 schedulesDir/schedules/
+  const scheduleStore = createScheduleStore({
+    schedulesDir: projectContext.schedulesDir,
+    projectRoot: projectContext.projectRoot,
+    logger,
+  });
+
   // 20.5. 创建 Async Run 管理器
   //       输出目录放在 taskOutputsDir/async-runs/
   const asyncRunManager = createAsyncRunManager({
@@ -308,7 +320,26 @@ async function main() {
     permissionManager,
   });
 
-  // 20.6. 创建 Async Run 工具提供者
+  const scheduleManager = createScheduleManager({
+    store: scheduleStore,
+    asyncRunManager,
+    projectRoot: projectContext.projectRoot,
+    logger,
+    commandPolicy: createDefaultAsyncCommandPolicy(),
+  });
+
+  // 注册 ScheduleManager 的 async run 完成回调
+  // 这样当 schedule 触发的 async run 进入终态时，occurrence 状态会自动更新
+  if (asyncRunManager.setOnFinish) {
+    asyncRunManager.setOnFinish(
+      (scheduleManager as unknown as { _onAsyncRunFinish: (record: import("./async-runs.js").AsyncRunRecord) => void })._onAsyncRunFinish,
+    );
+  }
+
+  // 20.6. 创建 Schedule 工具提供者
+  const scheduleProvider = createScheduleToolProvider(scheduleManager);
+
+  // 20.7. 创建 Async Run 工具提供者
   const asyncRunProvider = createAsyncRunToolProvider(
     asyncRunManager,
     createDefaultAsyncCommandPolicy(),
@@ -359,6 +390,7 @@ async function main() {
     taskProvider,
     asyncRunProvider,
     { projectRoot: projectContext.projectRoot },
+    scheduleProvider,
   );
 
   // 23. 创建上下文压缩器
@@ -384,6 +416,7 @@ async function main() {
     transcriptStore,
     sessionId: mainSession.id,
     asyncRunManager,
+    scheduleManager,
   });
 
   // 25. 注册 CLI 命令（接入 sessionEventBuffer）
@@ -398,6 +431,7 @@ async function main() {
     createMemoryCliCommand(memoryManager, logger, sessionEventBuffer),
   );
   commandRegistry.register(createTaskCliCommand(taskManager, logger));
+  commandRegistry.register(createScheduleCliCommand(scheduleManager, logger));
 
   // 26. 创建并启动 REPL
   const repl = createRepl({
@@ -406,6 +440,20 @@ async function main() {
     commands: commandRegistry,
     terminal,
   });
+
+  // 启动 Schedule Manager（定时检查器）
+  scheduleManager.start();
+
+  // 进程退出时停止 Schedule Manager，避免遗留 timer
+  process.on("SIGINT", () => {
+    scheduleManager.stop();
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    scheduleManager.stop();
+    process.exit(0);
+  });
+
   logger.info(
     "Agent started (provider: %s, model: %s, project: %s)",
     config.provider,

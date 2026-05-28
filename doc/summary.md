@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统**
 
 ## 源码结构
 
@@ -43,6 +43,9 @@ src/
 ├── tasks.ts            # Task 业务层：Task Group 状态机、依赖校验、activeTaskGroupId、格式化输出
 ├── async-runs.ts       # Async Run 核心：start/check/list/readOutput/drainNotifications/冲突检测
 ├── async-runs.test.ts  # Async Run 测试（26 个测试用例）
+├── schedule-store.ts   # Schedule 持久化存储层：schedulesDir 布局 + JSON 校验 + 索引重建
+├── schedules.ts        # Schedule 业务层：tick 调度 + occurrence 管理 + Async Run 触发 + 通知队列
+├── schedules.test.ts   # Schedule 管理器测试（9 个测试用例）
 ├── cache-debug.ts      # Prompt Cache 调试：system/tools/prefix hash + 稳定性追踪
 ├── recovery.ts         # LLM 错误分类与恢复决策：backoff/compact/continue/fail
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
@@ -83,6 +86,7 @@ src/
     ├── tasks.test.ts   # Task 工具测试
     ├── async-runs.ts   # Async Run 工具提供者：run_async_start/check/list/output_read（4 个工具）
     ├── async-runs.test.ts # Async Run 工具测试（14 个测试用例）
+    ├── schedules.ts    # Schedule 工具提供者：create/list/read/cancel/delete/occurrence_list（6 个工具）
     ├── registry.ts     # 工具注册表（顺序稳定 + 重复注册报错 + 过滤选项）
     └── registry.test.ts # 工具注册表测试（4 个测试用例）
 skills/
@@ -527,6 +531,30 @@ skills/
 ### 跨模块状态对象必须显式约定时态
 
 当多个模块共享一个可变状态对象时，接口必须声明该状态在调用前后的预期形态。是"调用前已由调用方递增"，还是"调用后由本函数递增"？是"传入原始值，函数内部负责计数"，还是"传入已计数状态，函数只负责读取"？不能让调用方和实现方各自猜测。最安全的做法是：纯函数只读状态并返回文案，状态修改完全由调用方控制；如果纯函数需要展示"第 N 次"，则让它接收一个已经计算好的序号，而不是在内部对状态做算术。
+
+### 概括性 Review 描述必须拆解为枚举检查清单
+
+当 reviewer 给出概括性反馈（如"所有 interval 规则都要锚定 startsAt"）时，不能凭直觉选择性修复。必须先将该描述拆解为**穷举清单**（每种 rule.kind × 每个关键参数），然后逐条验证。人脑对"所有"的理解会自动过滤掉边缘分支，而边缘分支恰恰是 bug 藏身之处。检查清单应包含：每个分支是否都处理、每个新增参数是否在所有消费者中传递、每个修改的函数是否所有调用点都已同步。
+
+### 接口-实现-测试三角必须同步验证
+
+任何对外暴露的可配置参数（schema 声明、函数签名、CLI 参数），必须在三个层面同时存在且语义一致：1）接口契约层（schema/type/doc），2）实现逻辑层（代码中真正读取并使用该参数），3）测试覆盖层（至少包含默认值、边界值、非默认值三种情况）。三者中任何一处缺失都会导致"接口承诺了但实现忽略"的隐蔽缺陷。修复时应先找到该参数的所有消费点，确认每一处都使用，而不是只改最明显的那个。
+
+### 反复出现的症状必须追溯到根因代码
+
+清理现场（删除错误文件、修正数据）而不追溯到"哪一行代码在持续产生这个结果"，等于给问题装上自动续期。当同一症状第二次出现时，应立即停止"再删一次"的冲动，转而执行根因分析：搜索项目中产生该文件/状态/副作用的所有代码路径，确认源头后修复。对于测试生成的副作用，应检查测试中的 mock 和工厂函数调用，确认参数传递是否符合预期。
+
+### 文档同步是完成定义（Definition of Done）的硬性条目
+
+代码能跑、测试通过只是"技术完成"，不是"项目完成"。架构文档（如本 summary）是下一个 agent/开发者的入口，如果它停留在旧状态，后续工作会基于过时假设展开。把"更新 summary.md"写入 DoD 并与测试、lint 放在同一优先级：代码合并前必须确认文档已同步。文档更新不是"有空再做"，而是防止知识流失的保险。
+
+### 计算类功能的测试矩阵必须覆盖分支 × 参数边界
+
+实现调度、时间计算、状态转换等规则引擎时，测试不能仅覆盖"主流程通得过"。必须构建**分支 × 参数**的测试矩阵：每种规则类型（once/recurring 的每个子类型）× 每个可变参数的最小值、典型值、边界值 × startsAt 与 after 的相对位置关系（startsAt > after、startsAt < after < next、after > next）。没有矩阵覆盖的计算逻辑，其正确性只能依赖"开发者当时想对了"。
+
+### Review 修复的完整性需要在下一轮重新验证
+
+第一轮 review 修复后，第二轮 review 常常会发现第一轮修复的遗漏或新问题。这不是 reviewer"故意找茬"，而是第一轮修复改变了代码路径，暴露了之前被隐藏的问题。因此，上一轮 review 中所有概括性描述的修复项，在下一轮应**重新转化为检查清单**，逐一验证是否真正完整。不能把"上一轮修过了"当作免审金牌。
 
 ## 待实现 / 未来方向
 
