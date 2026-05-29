@@ -177,6 +177,12 @@ interface TimeParts {
 }
 
 function getPartsInTimeZone(date: Date, timeZone: string): TimeParts {
+  // Intl.DateTimeFormat 是本教学项目选择的“轻依赖”方案：
+  // 不引入 luxon/date-fns-tz 等库，也能把同一个 UTC instant 转成目标时区下的年月日时分秒。
+  //
+  // 注意这里不是格式化给用户看，而是为了后续计算本地日历规则：
+  // daily/weekly/monthly/yearly 这类规则是“当地时间”的概念，
+  // 不能只用 UTC 日期做加减，否则跨时区和 DST 时会偏移。
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",
@@ -217,6 +223,17 @@ function localToUtc(
   S: number,
   timeZone: string,
 ): Date {
+  // 这是本文件最容易踩坑的地方之一：
+  // JS Date 本身只表示 UTC timestamp，没有“某时区本地时间”这个值类型。
+  // 我们想表达的是“在 timeZone 这个地区，y-m-d H:M:S 对应哪个 UTC timestamp”。
+  //
+  // 简化做法是先用 Date.UTC 猜一个 timestamp，再反复查看这个 timestamp
+  // 在目标 timeZone 下显示成什么本地时间，然后按差值修正。
+  //
+  // corner case：
+  // - DST 跳时：某些本地时间不存在，迭代可能只能收敛到最接近的可表示时间。
+  // - DST 重复小时：同一个本地时间可能对应两个 UTC instant，本实现不做 disambiguation。
+  // - 教学取舍：不用复杂库，保留可读算法；生产系统建议使用成熟时区库并显式定义 DST 策略。
   let t = Date.UTC(y, m - 1, d, H, M, S);
   for (let i = 0; i < 6; i++) {
     const parts = getPartsInTimeZone(new Date(t), timeZone);
@@ -238,6 +255,9 @@ function localToUtc(
 }
 
 function parseTimeOfDay(timeOfDay: string): { hour: number; minute: number; second: number } {
+  // timeOfDay 来自已通过 ScheduleStore 校验的规则，正常应是 HH:mm:ss。
+  // 这里仍然给缺失字段默认 0，是为了让计算函数保持宽容；
+  // 严格格式错误应该在 validateRecurrenceRule 阶段被拦住。
   const [hour, minute, second] = timeOfDay.split(":").map((s) => parseInt(s, 10));
   return { hour: hour ?? 0, minute: minute ?? 0, second: second ?? 0 };
 }
@@ -256,8 +276,17 @@ export function computeNextRunAt(
   timeZone: string,
   after: Date,
 ): Date | null {
+  // 设计注意点：
+  // computeNextRunAt 是纯计算函数，不读写 store，也不创建 occurrence。
+  // 这让时间规则可以被单元测试独立覆盖，不依赖 AsyncRunManager 或文件系统。
+  //
+  // 语义约定：返回“严格大于 after”的下一次时间。
+  // 如果 nextRunAt 正好等于 after，说明这一刻已经到点或已被处理，
+  // 下一次应继续往后找，避免重复触发同一个 occurrence。
   if (timing.type === "once") {
     const runAt = new Date(timing.runAt);
+    // once 规则不在这里判断 runAt 是否已经过去。
+    // Manager 会根据 nextRunAt <= now 决定触发；触发后 advanceSchedule 标记 completed。
     return runAt;
   }
 
@@ -266,11 +295,16 @@ export function computeNextRunAt(
   const endsAt = timing.endsAt ? new Date(timing.endsAt) : null;
 
   // 如果 endsAt 存在且 after 已超过 endsAt，则无 future occurrence
+  // endsAt 是排他边界：candidate >= endsAt 都不再触发。
+  // 这种约定比“包含 endsAt”更容易避免边界时间重复运行。
   if (endsAt !== null && after.getTime() >= endsAt.getTime()) {
     return null;
   }
 
   // 从 startsAt 开始，按规则逐步递增，找到第一个 > after 的时间
+  // startsAt 是所有 recurring 规则的锚点。
+  // 常见错误是从 after 所在时间直接套规则，这会让 intervalDays/intervalWeeks
+  // 这类“每 N 个周期”失去原始相位。
   let candidate: Date | null = startsAt;
   if (candidate.getTime() <= after.getTime()) {
     candidate = findNextOccurrence(timing.rule, timeZone, after, startsAt);
@@ -318,6 +352,8 @@ function findNextEverySeconds(
   const intervalMs = rule.intervalSeconds * 1000;
 
   // 用算术直接跳到第一个 > after 的周期，避免线性循环
+  // every_seconds 是唯一可以安全用 UTC 毫秒差直接计算的规则：
+  // 它表达的是固定秒数间隔，不是本地日历时间。
   const elapsed = after.getTime() - startsAt.getTime();
   const steps = Math.floor(elapsed / intervalMs) + 1;
   return new Date(startsAt.getTime() + steps * intervalMs);
@@ -329,6 +365,11 @@ function findNextHourly(
   after: Date,
   startsAt: Date,
 ): Date | null {
+  // hourly 的语义是“从 startsAt 所在本地小时开始，每 N 小时一次，
+  // 并使用 rule.minute/rule.second 指定小时内的位置”。
+  //
+  // 注意：这里后续用固定毫秒 interval 推进，意味着 DST 切换附近会按绝对时间推进。
+  // 这是教学实现的简化；如果要严格表达“当地墙上时间每 N 小时”，需要更复杂的时区规则。
   const minute = rule.minute ?? 0;
   const second = rule.second ?? 0;
   const parts = getPartsInTimeZone(startsAt, timeZone);
@@ -356,6 +397,9 @@ function findNextDaily(
   after: Date,
   startsAt: Date,
 ): Date | null {
+  // daily/monthly/yearly 属于“日历规则”，不是简单秒数规则。
+  // 当前 daily 使用 intervalDays * 24h 推进，代码简单，但 DST 切换日可能导致本地时间偏移。
+  // 这是一个值得学生记住的坑：日历周期和绝对时长不是同一个概念。
   const { hour, minute, second } = parseTimeOfDay(rule.timeOfDay);
   const parts = getPartsInTimeZone(startsAt, timeZone);
 
@@ -382,6 +426,14 @@ function findNextWeekly(
   after: Date,
   startsAt: Date,
 ): Date | null {
+  // weekly 是本文件最复杂的规则：
+  // - 一周内可以有多个目标 weekday
+  // - 还要支持 intervalWeeks（每 N 周）
+  // - weekday 判断必须基于目标 timeZone 的本地日期
+  //
+  // 本实现采用有限搜索而不是复杂公式：
+  // 从 startsAt 开始最多搜索 2 年，每天构造候选本地时间。
+  // 对教学项目来说，可读性优先；生产系统可以用更高效但更难读的日历算法。
   const { hour, minute, second } = parseTimeOfDay(rule.timeOfDay);
   const targetDays = rule.daysOfWeek
     .map((d: Weekday) => WEEKDAY_INDEX[d])
@@ -412,6 +464,8 @@ function findNextWeekly(
 
     if (targetDays.includes(localDay as 0 | 1 | 2 | 3 | 4 | 5 | 6)) {
       // 计算从 startsAt 到 candidate 经过了多少个 7 天周期
+      // 注意这里用 candidate 与 startsAt 的 UTC 毫秒差近似周数。
+      // DST 周附近可能存在 23/25 小时日造成边界偏差，这是轻量实现的已知取舍。
       const daysDiff = Math.floor(
         (candidate.getTime() - startsAt.getTime()) / (24 * 60 * 60 * 1000),
       );
@@ -434,6 +488,10 @@ function findNextMonthly(
   after: Date,
   startsAt: Date,
 ): Date | null {
+  // monthly 的典型 corner case 是“每月 31 号”。
+  // 不是每个月都有 31 号，所以这里用 Math.min(dayOfMonth, daysInMonth)
+  // 把 31 号收敛到当月最后一天。这个策略要写进代码，否则不同读者会猜测：
+  // 是跳过短月份？还是报错？还是用月底？
   const { hour, minute, second } = parseTimeOfDay(rule.timeOfDay);
   const parts = getPartsInTimeZone(startsAt, timeZone);
 
@@ -441,6 +499,8 @@ function findNextMonthly(
   let month = parts.month;
 
   // 从 startsAt 的月份开始，每次增加 intervalMonths
+  // 设置 120 次上限是防御性边界：避免坏规则导致无限循环。
+  // 120 个月约等于 10 年，足够教学场景使用。
   for (let i = 0; i < 120; i++) {
     const day = Math.min(rule.dayOfMonth, daysInMonth(year, month));
     const candidate = localToUtc(year, month, day, hour, minute, second, timeZone);
@@ -465,12 +525,16 @@ function findNextYearly(
   after: Date,
   startsAt: Date,
 ): Date | null {
+  // yearly 同样要处理 2 月 29 日这类不存在日期。
+  // 当前策略和 monthly 一致：收敛到目标月份最后一天。
+  // 这是一种明确的业务选择，不是“日期库自动行为”。
   const { hour, minute, second } = parseTimeOfDay(rule.timeOfDay);
   const parts = getPartsInTimeZone(startsAt, timeZone);
 
   let year = parts.year;
 
   // 从 startsAt 的年份开始，每次增加 intervalYears
+  // 50 次上限避免无限循环，也提醒学生：任何规则搜索都应该有停止条件。
   for (let i = 0; i < 50; i++) {
     const day = Math.min(rule.dayOfMonth, daysInMonth(year, rule.month));
     const candidate = localToUtc(year, rule.month, day, hour, minute, second, timeZone);
@@ -502,17 +566,33 @@ export function createScheduleManager(deps: {
   executionPolicy?: ExecutionPolicy;
   commandPolicy?: AsyncCommandPolicy;
 }): ScheduleManager {
+  // 教学导读：
+  // ScheduleManager 是“时间触发器”，不是“执行器”。
+  // 它只负责判断某个 schedule 是否到点、创建 occurrence 审计记录、
+  // 然后把真正执行交给 AsyncRunManager。
+  //
+  // 这样设计可以避免两套执行生命周期：
+  // - Async Run 管 running/completed/failed/timeout
+  // - Schedule 管 active/cancelled/completed 和 occurrence 审计
+  //
+  // 学生读这段代码时，可以把它想成一个小型调度循环：
+  // scan/reload -> 计算 nextRunAt -> tick 到点 -> 创建 occurrence -> start async run -> finish callback 写回终态
+
   const { store, asyncRunManager, projectRoot, logger } = deps;
   const now = deps.now ?? (() => new Date());
   const currentProjectRoot = path.resolve(projectRoot);
   const executionPolicy = deps.executionPolicy ?? createExecutionPolicy();
 
   // 注册 async run 完成回调
+  // Schedule 自己不执行任务，它只负责“到点触发”；
+  // 真实执行生命周期交给 AsyncRunManager，完成后再通过这个回调写回 occurrence。
   asyncRunManager.setOnFinish?.(onAsyncRunFinish);
 
   // 内存中缓存 active schedules（由 scan/tick 维护）
+  // 只缓存当前项目的 active schedule，跨项目 schedule 不会被当前 manager 触发。
   let activeSchedules: ScheduleFile[] = [];
   // 通知队列
+  // 与 async run 通知一样，schedule 通知先排队，再由 agent.ts 注入给 LLM。
   const notificationQueue: ScheduleNotification[] = [];
   // timer handle
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -524,6 +604,8 @@ export function createScheduleManager(deps: {
   // -------------------------------------------------------------------------
 
   function reloadActiveSchedules(): void {
+    // 每次重载都先让 store 从磁盘重建缓存。
+    // 这样即使 index.json 是旧的，也能以 schedule.json 为事实来源恢复。
     store.scan();
     activeSchedules = store
       .list({
@@ -537,6 +619,8 @@ export function createScheduleManager(deps: {
       );
 
     // 先收敛上个进程遗留的 running occurrence，再检查 missed occurrences。
+    // 顺序很重要：running 代表“上个进程已触发但没等到结果”，
+    // missed 代表“到点时进程不在线所以根本没触发”。
     reconcileOrphanedOccurrences();
     checkMissedOccurrences();
 
@@ -548,6 +632,7 @@ export function createScheduleManager(deps: {
         schedule.nextRunAt = nextRunAt.toISOString();
       } else {
         // 没有 future occurrence，自动标记为 completed
+        // 这让 once 或有限规则在没有下一次运行时自然退出 active 集合。
         schedule.status = "completed";
         schedule.completedAt = now().toISOString();
         (schedule as { nextRunAt?: string | undefined }).nextRunAt = undefined;
@@ -579,6 +664,9 @@ export function createScheduleManager(deps: {
       for (const occurrence of occurrences) {
         if (occurrence.status !== "running") continue;
 
+        // Async Run 当前是 session-local，重启后无法恢复旧 run。
+        // 因此 persisted running occurrence 在新进程启动时必须收敛为 orphaned，
+        // 避免 UI/LLM 永远以为它仍在执行。
         occurrence.status = "orphaned";
         occurrence.completedAt = currentNow.toISOString();
         occurrence.updatedAt = currentNow.toISOString();
@@ -636,6 +724,7 @@ export function createScheduleManager(deps: {
             schedule.missedCount++;
             schedule.lastScheduledAt = nextRun.toISOString();
             // 重新计算 nextRunAt
+            // 当前教学实现不回补 missed run，只记录审计并推进到未来下一次。
             const next = computeNextRunAt(schedule.timing, schedule.timezone, currentNow);
             if (next) {
         schedule.nextRunAt = next.toISOString();
@@ -678,6 +767,7 @@ export function createScheduleManager(deps: {
       const occurrenceId = generateOccurrenceId(schedule.id, nextRunAt);
 
       // 检查 occurrence 是否已存在（防重复）
+      // tick 可能被定时器和测试手动调用多次；同一个 scheduledAt 只能产生一个 occurrence。
       const existingOcc = store.readOccurrence(schedule.id, occurrenceId);
       if (existingOcc) {
         // 已经处理过，只需更新 nextRunAt 并继续
@@ -686,6 +776,8 @@ export function createScheduleManager(deps: {
       }
 
       // overlap 检测
+      // overlapPolicy=skip 只看当前进程内 runningOccurrences。
+      // 重启遗留的 running 会在 reload 阶段先变成 orphaned，不参与这里的 overlap。
       const running = runningOccurrences.get(schedule.id) ?? new Set();
       if (schedule.execution.overlapPolicy === "skip" && running.size > 0) {
         // 创建 skipped_overlap occurrence
@@ -721,6 +813,8 @@ export function createScheduleManager(deps: {
       }
 
       // 创建 triggered occurrence
+      // 先写 triggered，再启动 Async Run。
+      // 如果 start() 抛错，catch 分支会把同一个 occurrence 更新成 failed，保留完整审计链。
       const triggeredOcc: ScheduleOccurrenceFile = {
         version: 1,
         kind: "schedule_occurrence",
@@ -735,6 +829,8 @@ export function createScheduleManager(deps: {
       store.saveOccurrence(triggeredOcc);
 
       // command executor 必须经过 commandPolicy 预检
+      // Schedule 是持久化对象，可能由旧版本或手工编辑留下不再安全的 command。
+      // 因此即使 create 时校验过，触发时也必须再校验一次。
       if (
         schedule.execution.executor === "command" &&
         schedule.execution.command
@@ -767,6 +863,8 @@ export function createScheduleManager(deps: {
       }
 
       // 启动 Async Run
+      // Schedule 只把触发上下文转成 Async Run input。
+      // occurrenceId 会进入 trigger，方便 onAsyncRunFinish 找回对应 occurrence。
       const asyncRunInput: StartAsyncRunInput = {
         title: schedule.title,
         executor: schedule.execution.executor,
@@ -793,6 +891,7 @@ export function createScheduleManager(deps: {
         const record = asyncRunManager.start(asyncRunInput);
 
         // 更新 occurrence 为 running
+        // 只有 Async Run 成功返回 run_id 后，occurrence 才进入 running。
         triggeredOcc.status = "running";
         triggeredOcc.asyncRunId = record.id;
         triggeredOcc.updatedAt = currentNow.toISOString();
@@ -855,6 +954,8 @@ export function createScheduleManager(deps: {
     }
 
     const next = computeNextRunAt(schedule.timing, schedule.timezone, currentNow);
+    // 递归规则每次触发后都从 currentNow 往未来找下一次。
+    // 这样不会因为进程暂停很久而尝试补跑历史所有 occurrence。
     if (next) {
       schedule.nextRunAt = next.toISOString();
     } else {
@@ -872,6 +973,8 @@ export function createScheduleManager(deps: {
     scheduledAt: Date,
   ): string {
     const lines: string[] = [
+      // 子智能体拿到的是普通 prompt，而不是新的 system prompt。
+      // 这保持父/子 stable prompt 前缀一致，同时把动态 schedule 信息放进用户消息。
       "<schedule-context>",
       `Schedule ID: ${schedule.id}`,
       `Occurrence ID: ${occurrenceId}`,
@@ -898,11 +1001,14 @@ export function createScheduleManager(deps: {
   // -------------------------------------------------------------------------
 
   function onAsyncRunFinish(record: AsyncRunRecord): void {
+    // AsyncRunManager 会通知所有完成的 run；这里只处理由 schedule 触发的 run。
     if (record.trigger.kind !== "schedule") return;
     const { scheduleId, occurrenceId } = record.trigger;
     if (!scheduleId || !occurrenceId) return;
 
     const schedule = store.read(scheduleId);
+    // 当前项目 manager 不能写其他项目的 occurrence。
+    // 即使全局 store 能读到，也要在业务层再次收窄。
     if (!schedule || !isCurrentProjectSchedule(schedule)) return;
 
     const occurrence = store.readOccurrence(scheduleId, occurrenceId);
@@ -918,6 +1024,8 @@ export function createScheduleManager(deps: {
       nextStatus = "failed";
     }
 
+    // completion callback 是 occurrence 审计从 running 进入终态的唯一正常路径。
+    // outputId/outputRef 都在这里落盘，后续工具展示和 LLM notification 才能引用完整输出。
     occurrence.status = nextStatus;
     occurrence.completedAt = currentNow.toISOString();
     if (record.outputId) {
@@ -968,6 +1076,8 @@ export function createScheduleManager(deps: {
   }
 
   function drainNotifications(): ScheduleNotification[] {
+    // 返回当前队列快照并清空。
+    // 新通知会留到下一轮 LLM 调用前再注入，避免重复提醒。
     const result = notificationQueue.slice();
     notificationQueue.length = 0;
     return result;

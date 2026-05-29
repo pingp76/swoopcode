@@ -711,6 +711,15 @@ export function createAgent(deps: {
      * @returns Agent 的最终文字回复
      */
     async run(query) {
+      // 教学导读：
+      // run() 表示“处理一次外部用户输入”，但内部可能调用 LLM 很多次。
+      // 比如用户说“修复测试”，Agent 可能先读文件、再跑测试、再编辑、再复测，
+      // 每一次“思考下一步”都会进入下面的 for(;;) 主循环。
+      //
+      // 需要区分三个时间概念：
+      // - turnIndex：第几次外部用户输入
+      // - loopRound：本次用户输入内第几轮 LLM 思考
+      // - loopIndex：该 Agent 实例从启动以来第几轮 LLM 思考
       logger.info("User query: %s", query);
       const turnIndex = ++nextTurnIndex;
       const initialTiming: MessageTimingInput = {
@@ -721,10 +730,14 @@ export function createAgent(deps: {
 
       // 收集本轮需要注入的 reminder 消息
       // 顺序：1. 用户原始 query  2. turn reminders  3. out-of-band reminders
+      // reminder 作为 user 消息进入 history，而不是修改 system prompt。
+      // 这是 prompt cache 友好的设计：稳定前缀保持不变，动态状态走普通消息。
       const reminderMessages: string[] = [];
 
       // 2. systemPromptProvider 根据 query 生成的本轮提醒
       if (systemPromptProvider) {
+        // systemPromptProvider 的 stable snapshot 在 index.ts 启动时已经写入 history。
+        // 这里调用 buildTurnReminders 只生成“本轮临时提醒”，比如用户要求忽略 memory。
         const turnReminders = systemPromptProvider.buildTurnReminders({
           query,
         });
@@ -737,6 +750,9 @@ export function createAgent(deps: {
 
       // 3. sessionEventBuffer 中积累的 out-of-band 提醒
       if (sessionEventBuffer) {
+        // sessionEventBuffer 收集的是“工具外发生的状态变化”：
+        // 例如 /mode 切换、memory 创建、task active group 更新等。
+        // drain() 之后队列清空，避免同一提醒每轮重复注入。
         const events = sessionEventBuffer.drain();
         for (const e of events) {
           reminderMessages.push(
@@ -763,6 +779,8 @@ export function createAgent(deps: {
         // exitCode 2：注入补充提示，在用户消息之后作为 user 消息追加到历史
         if (sessionResult.exitCode === 2 && sessionResult.message) {
           // 先写入用户消息，再写入 reminder 和 Hook 补充消息
+          // Hook 补充消息放在用户消息之后，是因为它是“对本次会话的附加观察”，
+          // 不应该取代用户原始 query。
           appendMessage({ role: "user", content: query }, initialTiming);
           for (const msg of reminderMessages) {
             appendMessage({ role: "user", content: msg }, initialTiming);
@@ -791,6 +809,8 @@ export function createAgent(deps: {
 
       // Agent 主循环：不断调用 LLM，直到它不再请求工具调用
       // 每次 run() 创建独立的恢复状态，避免死循环和重复执行
+      // recoveryState 不跨用户 turn 共享：
+      // 某一轮遇到 rate limit 的重试次数，不应该影响下一轮用户输入。
       const recoveryState = createRecoveryState();
       let loopRound = 0;
       // 累积因 finishReason === "length" 被截断的多段输出
@@ -817,6 +837,8 @@ export function createAgent(deps: {
 
         // 2. 父智能体的 TODO 轮次检测（子智能体没有 todoManager，跳过）
         if (todoManager) {
+          // TODO tick 是“当前 session 临时计划”的看门狗。
+          // 如果某个 in_progress 小任务执行太多轮，会插入提醒让模型决定继续/跳过/完成。
           const interruptMsg = todoManager.tickRound();
           if (interruptMsg) {
             appendMessage({ role: "user", content: interruptMsg }, timing);
@@ -828,6 +850,8 @@ export function createAgent(deps: {
         if (asyncRunManager) {
           const notifications = asyncRunManager.drainNotifications();
           if (notifications.length > 0) {
+            // async run 是后台完成的，完成时 Agent 可能正在等待用户输入或下一轮 LLM。
+            // drain 到这里后，模型才能在下一次思考时看到后台结果。
             const lines = ["Async run updates:"];
             for (const n of notifications) {
               const outputHint = n.outputRef?.outputId
@@ -862,6 +886,8 @@ export function createAgent(deps: {
         if (scheduleManager) {
           const notifications = scheduleManager.drainNotifications();
           if (notifications.length > 0) {
+            // schedule 通知与 async 通知分开 source，
+            // 让 LLM 能区分“后台任务完成”和“定时任务触发/错过/孤儿收敛”等事件。
             const lines = ["Schedule updates:"];
             for (const n of notifications) {
               lines.push(
@@ -895,6 +921,8 @@ export function createAgent(deps: {
         }
 
         // 3. 消息处理管道
+        // prepareMessages 是每轮 LLM 调用前的最后一道上下文整理：
+        // 它会标准化消息、分块、衰减旧工具输出，并在必要时全量压缩。
         let finalMsgs = prepareMessages(loopIndex);
         const toolDefs = tools.getToolDefinitions();
         logger.debug(
@@ -916,6 +944,8 @@ export function createAgent(deps: {
         // 恢复循环：根据错误类型执行 backoff / compact / fail
         for (;;) {
           try {
+            // 这里是唯一真正调用 LLM 的地方。
+            // 成功后跳出恢复循环；失败则根据错误类型决定 backoff/compact/fail。
             response = await llm.chat(finalMsgs, toolDefs, cacheState);
             break; // 成功，跳出恢复循环
           } catch (error) {
@@ -931,6 +961,8 @@ export function createAgent(deps: {
             const action = decideRecovery(kind, recoveryState);
 
             if (action === "backoff") {
+              // backoff 用于临时性错误，如网络波动或 rate limit。
+              // 它不修改 history，只等待一小段时间后用同一批消息重试。
               recoveryState.apiRetryCount++;
               logger.warn(formatRecoveryNotice(action, kind, recoveryState));
               if (transcriptStore && sessionId) {
@@ -950,6 +982,9 @@ export function createAgent(deps: {
             }
 
             if (action === "compact") {
+              // compact 用于 context_length 错误。
+              // 与 prepareMessages 的临时压缩不同，这里会把压缩结果写回 history，
+              // 因为下一次请求必须真的变短才能恢复。
               recoveryState.compactRetryCount++;
               logger.info(formatRecoveryNotice(action, kind, recoveryState));
               if (transcriptStore && sessionId) {
@@ -1005,6 +1040,8 @@ export function createAgent(deps: {
         );
 
         // 将模型的回复加入历史
+        // 即使 assistant 只返回 tool_calls、content 为 null，也必须写入 history。
+        // 后续 tool_result 需要和这条 assistant tool_calls 消息配对。
         appendMessage(
           {
             role: "assistant",
@@ -1019,6 +1056,8 @@ export function createAgent(deps: {
         //    如果响应包含 tool_calls，即使 finishReason 异常，
         //    也优先按工具调用流程处理，避免破坏 tool_call / tool_result 配对。
         if (response.toolCalls.length > 0) {
+          // 有 tool_calls 时，不把当前 response 当最终回复。
+          // Agent 执行工具，把 tool_result 加入历史，然后 continue 回到下一轮 THINK。
           await handleToolCalls(response.toolCalls, timing);
           continue;
         }
@@ -1026,6 +1065,8 @@ export function createAgent(deps: {
         // 6. 没有工具调用 → 最终回复
         //    检查输出是否因长度被截断（finishReason === "length"）
         if (response.finishReason === "length") {
+          // finishReason=length 表示模型输出被截断。
+          // 这里不要求用户重新提问，而是自动追加 reminder 让模型从断点继续。
           const action = decideRecovery("output_interrupted", recoveryState);
           if (action === "continue") {
             recoveryState.continueRetryCount++;

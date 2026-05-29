@@ -84,6 +84,9 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
 // ---------------------------------------------------------------------------
 
 export function createRecoveryState(): RecoveryState {
+  // RecoveryState 是“单次 agent.run() 的恢复计数器”，不应该跨用户 turn 复用。
+  // 如果把它做成全局状态，一个用户请求触发的 rate limit 可能导致下一个请求直接 fail。
+  // 这是错误恢复里很常见的坑：重试预算必须有明确作用域。
   return {
     apiRetryCount: 0,
     compactRetryCount: 0,
@@ -104,6 +107,13 @@ export function createRecoveryState(): RecoveryState {
  * - error.message（错误信息字符串）
  */
 export function classifyLLMError(error: unknown): LLMErrorKind {
+  // 设计套路：把 provider/SDK 方言先收敛成领域内的少数错误类型。
+  // Agent 主循环不应该到处判断 HTTP 401/429/413，也不应该依赖某个 SDK 的异常类。
+  //
+  // 注意：这是启发式分类，不是完美真理。
+  // 不同 OpenAI-compatible provider 会把相同问题放在 status/code/message 的不同位置。
+  // 因此下面的判断顺序也很重要：credential/quota 等不可恢复错误要先识别出来。
+
   // 提取可读取的字段
   const status = extractNumber(error, "status");
   const message = extractString(error, "message").toLowerCase();
@@ -117,6 +127,8 @@ export function classifyLLMError(error: unknown): LLMErrorKind {
     message.includes("forbidden") ||
     message.includes("credential")
   ) {
+    // credential 属于配置错误，重试不会修复。
+    // 如果把它误判为 network，会浪费重试时间并掩盖真正问题。
     return "credential";
   }
 
@@ -128,6 +140,8 @@ export function classifyLLMError(error: unknown): LLMErrorKind {
       message.includes("balance") ||
       message.includes("billing"))
   ) {
+    // quota 和 rate_limit 都可能是 429，但处理策略不同：
+    // rate_limit 可以等待重试；quota/billing 问题通常需要用户充值或换 key。
     return "quota";
   }
 
@@ -146,6 +160,8 @@ export function classifyLLMError(error: unknown): LLMErrorKind {
     message.includes("token limit") ||
     message.includes("too many tokens")
   ) {
+    // context_length 是可恢复错误，但恢复动作不是 backoff，而是 compact。
+    // 常见错误是对所有 400/413 盲目重试，结果每次都带同样过长的上下文再次失败。
     return "context_length";
   }
 
@@ -161,6 +177,8 @@ export function classifyLLMError(error: unknown): LLMErrorKind {
     message.includes("enotfound") ||
     message.includes("aborterror")
   ) {
+    // network 类错误通常是临时性问题，允许有限 backoff。
+    // 但仍要有上限，否则 Agent 会在无人值守时无限等待。
     return "network";
   }
 
@@ -182,6 +200,9 @@ export function decideRecovery(
   state: RecoveryState,
   config: RecoveryConfig = DEFAULT_RECOVERY_CONFIG,
 ): RecoveryAction {
+  // decideRecovery 是纯函数，故意不在内部递增 state。
+  // 这样调用方能清楚控制“什么时候消耗一次重试预算”，测试也更容易覆盖。
+  // 常见坑：在决策函数里顺手修改计数，导致日志显示次数和真实次数错位。
   switch (kind) {
     case "network":
       return state.apiRetryCount < config.maxApiRetries ? "backoff" : "fail";
@@ -202,6 +223,9 @@ export function decideRecovery(
     case "credential":
     case "quota":
     case "unknown":
+      // credential/quota/unknown 直接 fail：
+      // - credential/quota 不是等待能解决的问题
+      // - unknown 可能是协议错误或代码 bug，盲目重试会放大问题
       return "fail";
   }
 }

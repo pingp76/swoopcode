@@ -53,6 +53,7 @@ export function isPathSafe(filePath: string, baseDir?: string): boolean {
  * 相对路径会相对 baseDir 解析；绝对路径保持自身语义。
  */
 function resolveSafePath(filePath: string, baseDir?: string): string {
+  // 使用 path.resolve 将传入路径解析为绝对路径，baseDir 缺省时使用当前工作目录
   return resolve(baseDir ?? process.cwd(), filePath);
 }
 
@@ -190,6 +191,11 @@ export async function executeRead(
   filePath: string,
   baseDir?: string,
 ): Promise<ToolResult> {
+  // 教学导读：
+  // 文件工具是 LLM 改代码的基础能力，但它不能直接信任模型给出的 path。
+  // 每个文件操作都先做同一个边界检查：目标路径必须落在 baseDir/projectRoot 内。
+  // 这样即使模型尝试读取 "../" 或系统文件，也会在工具层被挡住。
+
   // 安全检查：路径必须在工作目录内
   if (!isPathSafe(filePath, baseDir)) {
     return {
@@ -199,6 +205,7 @@ export async function executeRead(
   }
 
   try {
+    // 将相对路径解析为可用于 fs 操作的绝对路径
     const targetPath = resolveSafePath(filePath, baseDir);
     // 使用 utf-8 编码读取文件，返回字符串
     const content = await readFile(targetPath, "utf-8");
@@ -236,6 +243,10 @@ export async function executeWrite(
   content: string,
   baseDir?: string,
 ): Promise<ToolResult> {
+  // executeWrite 是“覆盖写”，不是 patch。
+  // 这对教学很直观：给定完整内容，写入完整文件；
+  // 但真实使用时风险也更大，所以权限层通常会要求用户确认。
+
   // 安全检查：路径必须在工作目录内
   if (!isPathSafe(filePath, baseDir)) {
     return {
@@ -248,7 +259,9 @@ export async function executeWrite(
     // 确保父目录存在（相当于 mkdir -p）
     // 例如写入 "src/new-dir/file.ts" 时，自动创建 "src/new-dir/"
     const targetPath = resolveSafePath(filePath, baseDir);
+    // 提取文件所在目录路径，用于后续递归创建
     const dir = dirname(targetPath);
+    // 只有当目录路径非空时才创建，避免对根目录调用 mkdir
     if (dir) {
       await mkdir(dir, { recursive: true });
     }
@@ -288,6 +301,10 @@ export async function executeEdit(
   newString: string,
   baseDir?: string,
 ): Promise<ToolResult> {
+  // executeEdit 保留早期课程的简单语义：replaceAll。
+  // 它容易理解，但如果 old_string 出现多次，就会全部替换。
+  // 后续的 executeEditExact 正是为了解决这个教学阶段留下的风险。
+
   // 安全检查：路径必须在工作目录内
   if (!isPathSafe(filePath, baseDir)) {
     return {
@@ -297,11 +314,13 @@ export async function executeEdit(
   }
 
   try {
+    // 将相对路径解析为绝对路径，确保后续 fs 操作指向正确位置
     const targetPath = resolveSafePath(filePath, baseDir);
     // 先读取文件当前内容
     const content = await readFile(targetPath, "utf-8");
 
     // 检查 old_string 是否存在于文件中
+    // 若不存在则提前返回错误，避免无意义写回
     if (!content.includes(oldString)) {
       return {
         output: `Error: old_string not found in "${filePath}". No changes made.`,
@@ -309,10 +328,10 @@ export async function executeEdit(
       };
     }
 
-    // 执行全部替换
+    // 执行全部替换：将文件中所有 oldString 替换为 newString
     const newContent = content.replaceAll(oldString, newString);
 
-    // 写回文件
+    // 将修改后的内容写回文件，完成编辑
     await writeFile(targetPath, newContent, "utf-8");
 
     return {
@@ -320,6 +339,7 @@ export async function executeEdit(
       error: false,
     };
   } catch (err) {
+    // 捕获文件不存在的错误，给出明确提示
     if (err instanceof Error && "code" in err && err.code === "ENOENT") {
       return {
         output: `Error: File not found: "${filePath}"`,
@@ -347,6 +367,11 @@ export async function executeEditExact(
   expectedOccurrences: number,
   baseDir?: string,
 ): Promise<ToolResult> {
+  // 这个工具体现了“让模型先声明预期，再执行写入”的安全思路。
+  // 如果模型以为 old_string 只出现 1 次，但实际出现 3 次，工具会拒绝写入，
+  // 让模型重新读取上下文后再选择更精确的 old_string。
+
+  // 安全检查：路径必须在工作目录内，防止路径穿越
   if (!isPathSafe(filePath, baseDir)) {
     return {
       output: `Error: Path "${filePath}" is outside the working directory. File operations are restricted to the current working directory.`,
@@ -354,6 +379,7 @@ export async function executeEditExact(
     };
   }
 
+  // 校验 oldString 非空：空字符串无法定位替换位置，且会导致无限循环
   if (oldString.length === 0) {
     return {
       output: "Error: old_string must be non-empty. No changes made.",
@@ -361,6 +387,7 @@ export async function executeEditExact(
     };
   }
 
+  // 校验 expectedOccurrences 必须是正整数，确保调用方明确知道预期匹配次数
   if (
     !Number.isInteger(expectedOccurrences) ||
     expectedOccurrences <= 0
@@ -373,10 +400,14 @@ export async function executeEditExact(
   }
 
   try {
+    // 解析目标文件的绝对路径
     const targetPath = resolveSafePath(filePath, baseDir);
+    // 读取文件当前完整内容
     const content = await readFile(targetPath, "utf-8");
+    // 统计 oldString 在文件中实际出现的次数
     const actualOccurrences = countOccurrences(content, oldString);
 
+    // 只有实际出现次数与预期完全一致时才执行替换，防止误替换
     if (actualOccurrences !== expectedOccurrences) {
       return {
         output:
@@ -386,7 +417,9 @@ export async function executeEditExact(
       };
     }
 
+    // 使用 split + join 进行精确替换（效果等同于 replaceAll，但语义更清晰）
     const newContent = content.split(oldString).join(newString);
+    // 将替换后的内容写回文件
     await writeFile(targetPath, newContent, "utf-8");
 
     return {
@@ -396,6 +429,7 @@ export async function executeEditExact(
       error: false,
     };
   } catch (err) {
+    // 文件不存在时单独处理，返回友好错误
     if (err instanceof Error && "code" in err && err.code === "ENOENT") {
       return {
         output: `Error: File not found: "${filePath}"`,
@@ -409,13 +443,23 @@ export async function executeEditExact(
   }
 }
 
+/**
+ * countOccurrences — 统计子串在字符串中出现的次数
+ *
+ * 采用滑动窗口方式遍历，不重叠计数。
+ */
 function countOccurrences(content: string, needle: string): number {
   let count = 0;
   let index = 0;
+  // 无限循环，通过内部 break/return 退出
   for (;;) {
+    // 从当前 index 位置开始查找 needle
     const foundAt = content.indexOf(needle, index);
+    // 未找到则返回累计次数
     if (foundAt === -1) return count;
+    // 找到一次，计数器加一
     count++;
+    // 将搜索起点移动到已匹配片段之后，避免重叠匹配
     index = foundAt + needle.length;
   }
 }

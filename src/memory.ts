@@ -174,13 +174,15 @@ export function parseMemoryFile(
   fileName: string,
   logger: Logger,
 ): MemoryEntry | null {
+  // 复用 skills.ts 的通用 frontmatter 解析器分离 meta 和 body
   const parsed = parseFrontmatter(content);
   if (!parsed) {
+    // frontmatter 格式不合法，无法解析，记录警告后跳过
     logger.warn("Memory file %s: invalid frontmatter format", fileName);
     return null;
   }
 
-  // 校验必填字段
+  // 校验必填字段：遍历 REQUIRED_FIELDS，任何一项缺失都视为无效文件
   for (const field of REQUIRED_FIELDS) {
     if (!parsed.meta[field]) {
       logger.warn(
@@ -192,7 +194,7 @@ export function parseMemoryFile(
     }
   }
 
-  // 校验 type 合法性
+  // 校验 type 合法性：必须是四种预定义类型之一
   const type = parsed.meta["type"]!;
   if (!isValidType(type)) {
     logger.warn("Memory file %s: invalid type '%s'", fileName, type);
@@ -210,6 +212,7 @@ export function parseMemoryFile(
     return null;
   }
 
+  // 所有校验通过，组装并返回 MemoryEntry
   return {
     meta: {
       name,
@@ -283,10 +286,12 @@ function tokenizeForSimilarity(text: string): Set<string> {
  * 它非常容易讲清楚，适合教学版去重逻辑。
  */
 function calculateTokenOverlap(a: Set<string>, b: Set<string>): number {
+  // 任一空集之间无重叠
   if (a.size === 0 || b.size === 0) {
     return 0;
   }
 
+  // 遍历较小集合的 token，统计同时出现在另一个集合中的数量
   let intersection = 0;
   for (const token of a) {
     if (b.has(token)) {
@@ -294,6 +299,7 @@ function calculateTokenOverlap(a: Set<string>, b: Set<string>): number {
     }
   }
 
+  // 并集 = A + B - 交集，最后计算 Jaccard 系数
   const union = a.size + b.size - intersection;
   return union === 0 ? 0 : intersection / union;
 }
@@ -339,6 +345,7 @@ export function createMemoryManager(options: {
    * 目录不存在时自动创建。
    */
   function scan(): MemoryEntry[] {
+    // 每次扫描前清空缓存，确保结果反映磁盘最新状态
     cachedEntries = [];
 
     // 目录不存在时自动创建（mkdirSync + recursive 等价于 mkdir -p）
@@ -347,30 +354,34 @@ export function createMemoryManager(options: {
       return cachedEntries;
     }
 
+    // 读取目录下所有文件和子目录的 Dirent 信息
     let files: fs.Dirent[];
     try {
       files = fs.readdirSync(memoryDir, { withFileTypes: true });
     } catch {
+      // 目录读取失败（如权限不足），记录警告并返回空列表
       logger.warn("Failed to read memory directory: %s", memoryDir);
       return cachedEntries;
     }
 
+    // 逐个遍历目录中的文件
     for (const dirent of files) {
-      // 只处理 .md 文件
+      // 只处理 .md 文件，跳过子目录和其他类型文件
       if (!dirent.isFile() || !dirent.name.endsWith(".md")) {
         continue;
       }
-      // 跳过索引文件
+      // 跳过自动生成的索引文件，避免把索引当数据解析
       if (dirent.name === INDEX_FILE) {
         continue;
       }
 
       const filePath = path.join(memoryDir, dirent.name);
       try {
+        // 读取文件内容并解析 frontmatter
         const content = fs.readFileSync(filePath, "utf-8");
         const entry = parseMemoryFile(content, dirent.name, logger);
         if (entry) {
-          // 校验 frontmatter name 的安全格式
+          // 校验 frontmatter name 的安全格式（防止恶意或损坏数据）
           if (!isValidName(entry.meta.name)) {
             logger.warn(
               "Memory file %s: name '%s' does not match required format, skipping",
@@ -389,9 +400,11 @@ export function createMemoryManager(options: {
             );
             continue;
           }
+          // 通过所有校验，加入缓存
           cachedEntries.push(entry);
         }
       } catch (err) {
+        // 单个文件读取或解析失败，记录警告但不中断整个扫描流程
         logger.warn(
           "Failed to read memory file %s: %s",
           dirent.name,
@@ -400,7 +413,7 @@ export function createMemoryManager(options: {
       }
     }
 
-    // 稳定排序：先按 type，再按 name
+    // 稳定排序：先按 type，再按 name，保证输出顺序一致且可预测
     cachedEntries.sort((a, b) =>
       getStableSortKey(a).localeCompare(getStableSortKey(b)),
     );
@@ -421,16 +434,18 @@ export function createMemoryManager(options: {
    * @returns 完整的 MemoryEntry，找不到或 name 非法时返回 null
    */
   function read(name: string): MemoryEntry | null {
+    // 先校验 name 格式，防止路径穿越攻击
     if (!isValidName(name)) {
       return null;
     }
 
+    // 优先从内存缓存中查找，避免不必要的磁盘 I/O
     const cached = cachedEntries.find((e) => e.meta.name === name);
     if (cached) {
       return cached;
     }
 
-    // 缓存中没有，尝试从磁盘读取（可能是 scan 之后的最新状态）
+    // 缓存中没有，尝试从磁盘读取（可能是 scan 未覆盖的最新状态）
     const filePath = path.join(memoryDir, `${name}.md`);
     if (!fs.existsSync(filePath)) {
       return null;
@@ -440,6 +455,7 @@ export function createMemoryManager(options: {
       const content = fs.readFileSync(filePath, "utf-8");
       return parseMemoryFile(content, `${name}.md`, logger);
     } catch {
+      // 磁盘读取失败时静默返回 null，由调用方处理
       return null;
     }
   }
@@ -452,14 +468,14 @@ export function createMemoryManager(options: {
    * 写入后自动重建索引。
    */
   function create(input: CreateMemoryInput): MemoryEntry {
-    // 校验 name
+    // 校验 name 格式，防止非法字符和路径穿越
     if (!isValidName(input.name)) {
       throw new Error(
         `Invalid memory name: "${input.name}". Only lowercase letters, numbers, underscores, and hyphens are allowed.`,
       );
     }
 
-    // 校验 type
+    // 校验 type 是否属于预定义四种类型之一
     if (!isValidType(input.type)) {
       throw new Error(
         `Invalid memory type: "${input.type}". Must be one of: user, feedback, project, reference.`,
@@ -474,17 +490,18 @@ export function createMemoryManager(options: {
     const now = new Date().toISOString();
     const filePath = path.join(memoryDir, `${input.name}.md`);
 
-    // 检查是否已存在，保留原 createdAt
+    // 检查是否已存在同名 memory，保留原 createdAt 以维持时间线
     let createdAt = now;
     if (fs.existsSync(filePath)) {
       try {
         const existing = fs.readFileSync(filePath, "utf-8");
         const parsed = parseMemoryFile(existing, `${input.name}.md`, logger);
         if (parsed) {
+          // 复用旧记录的创建时间
           createdAt = parsed.meta.createdAt;
         }
       } catch {
-        // 读取失败时使用当前时间
+        // 读取旧文件失败时使用当前时间作为创建时间
       }
     }
 
@@ -499,15 +516,15 @@ export function createMemoryManager(options: {
       body: input.body,
     };
 
-    // 确保 memory 目录存在
+    // 确保 memory 目录存在（可能被手动删除或首次使用）
     if (!fs.existsSync(memoryDir)) {
       fs.mkdirSync(memoryDir, { recursive: true });
     }
 
-    // 写入文件
+    // 将 entry 序列化为 Markdown 并写入磁盘
     fs.writeFileSync(filePath, serializeMemory(entry), "utf-8");
 
-    // 重建索引并刷新缓存
+    // 重建索引并刷新缓存，使新数据立即对外可见
     scan();
     rebuildIndex();
 
@@ -526,17 +543,22 @@ export function createMemoryManager(options: {
    * 询问用户是否删除旧 memory，或在用户明确要求时允许保留重复。
    */
   function findSimilar(input: CreateMemoryInput): MemorySimilarity[] {
+    // 预处理输入描述，用于精确比对
     const inputDescription = normalizeForSimilarity(input.description);
+    // 拼接 type + description + body 作为相似度比较的完整文本
     const inputText = buildSimilarityText(input);
+    // 将输入文本拆分为 token 集合，供 Jaccard 计算使用
     const inputTokens = tokenizeForSimilarity(inputText);
     const similarities: MemorySimilarity[] = [];
 
+    // 遍历所有已缓存的 memory 条目
     for (const existing of cachedEntries) {
-      // 同名是有意更新，不作为重复阻塞项。
+      // 同名是有意更新，不作为重复阻塞项
       if (existing.meta.name === input.name) {
         continue;
       }
 
+      // 第一层检查：规范化后的 description 完全相同，属于高度疑似重复
       const existingDescription = normalizeForSimilarity(
         existing.meta.description,
       );
@@ -548,6 +570,7 @@ export function createMemoryManager(options: {
         continue;
       }
 
+      // 第二层检查：计算 token 集合的 Jaccard 相似度
       const existingText = buildSimilarityText({
         description: existing.meta.description,
         body: existing.body,
@@ -556,7 +579,7 @@ export function createMemoryManager(options: {
       const existingTokens = tokenizeForSimilarity(existingText);
       const overlap = calculateTokenOverlap(inputTokens, existingTokens);
 
-      // 阈值故意偏高：只拦明显重复，减少误伤相似但不同的长期记忆。
+      // 阈值故意偏高：只拦明显重复，减少误伤相似但不同的长期记忆
       if (overlap >= 0.55) {
         similarities.push({
           entry: existing,
@@ -576,22 +599,26 @@ export function createMemoryManager(options: {
    * @returns 是否成功删除
    */
   function delete_(name: string): boolean {
+    // 先校验 name 格式，防止路径穿越
     if (!isValidName(name)) {
       return false;
     }
 
     const filePath = path.join(memoryDir, `${name}.md`);
+    // 文件不存在则无需删除
     if (!fs.existsSync(filePath)) {
       return false;
     }
 
     try {
+      // 删除对应的 .md 文件
       fs.unlinkSync(filePath);
     } catch {
+      // 删除失败（如权限不足）返回 false
       return false;
     }
 
-    // 刷新缓存并重建索引
+    // 删除成功后刷新缓存并重建索引，保持数据一致性
     scan();
     rebuildIndex();
 
@@ -606,14 +633,17 @@ export function createMemoryManager(options: {
    * 没有 memory 时返回 null。
    */
   function buildPromptSection(): string | null {
+    // 没有任何记忆时返回 null，避免向 system prompt 注入空内容
     if (cachedEntries.length === 0) {
       return null;
     }
 
+    // 为每条 memory 生成一行摘要，格式为 "- [type] name: description"
     const lines = cachedEntries.map(
       (e) => `- [${e.meta.type}] ${e.meta.name}: ${e.meta.description}`,
     );
 
+    // 拼接完整 prompt 文本，包含免责声明提醒 LLM 不要过度信任旧记忆
     return [
       "Long-term memory:",
       ...lines,
@@ -630,12 +660,15 @@ export function createMemoryManager(options: {
    */
   function rebuildIndex(): void {
     const indexPath = path.join(memoryDir, INDEX_FILE);
+    // 根据当前缓存的所有 entry 生成索引文本
     const content = buildIndexContent(cachedEntries);
 
+    // 确保目录存在后再写入索引文件
     if (!fs.existsSync(memoryDir)) {
       fs.mkdirSync(memoryDir, { recursive: true });
     }
 
+    // 将索引内容写入 MEMORY.md，供人类快速浏览
     fs.writeFileSync(indexPath, content, "utf-8");
   }
 

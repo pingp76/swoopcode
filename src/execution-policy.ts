@@ -65,6 +65,8 @@ export function createExecutionPolicy(): ExecutionPolicy {
     validateCommand(input: CommandValidationInput): PolicyValidation {
       const profile = input.profile ?? "readonly";
       if (profile === "workspace_write") {
+        // workspace_write 是给后续课程预留的概念。
+        // 现在显式拒绝，比“类型上支持但运行时悄悄放行”更安全，也更适合教学。
         return {
           allowed: false,
           reason: "workspace_write execution profile is reserved for a later lesson",
@@ -84,6 +86,8 @@ export function createExecutionPolicy(): ExecutionPolicy {
       }
 
       const projectRoot = resolve(input.projectRoot);
+      // read_paths / write_paths 来自 LLM tool 参数，必须当作不可信输入处理。
+      // 先校验数组形状，再逐个校验元素类型和路径边界。
       if (!Array.isArray(input.readPaths)) {
         return { allowed: false, reason: "read_paths must be an array" };
       }
@@ -95,6 +99,7 @@ export function createExecutionPolicy(): ExecutionPolicy {
         if (typeof p !== "string") {
           return { allowed: false, reason: "read_paths must contain only strings" };
         }
+        // read path 必须落在当前 projectRoot 下，避免后台任务读取用户未授权目录。
         if (!isPathWithin(p, projectRoot)) {
           return {
             allowed: false,
@@ -110,6 +115,8 @@ export function createExecutionPolicy(): ExecutionPolicy {
       }
 
       if (input.writePaths.length > 0) {
+        // readonly/ci 在当前阶段都不允许后台写。
+        // ci 只表示允许更宽的诊断命令（如 build），不表示允许修改 workspace。
         return {
           allowed: false,
           reason: `${profile} execution profile does not allow write_paths`,
@@ -146,10 +153,14 @@ function validateCommandForProfile(
   }
 
   if (isDangerousCommand(trimmed)) {
+    // 危险命令黑名单是硬边界，优先于 allowlist。
+    // 即使命令后面看起来像只读，也不能继续解析。
     return { allowed: false, reason: "Dangerous command blocked" };
   }
 
   if (SHELL_OPERATOR_CHARS.test(trimmed)) {
+    // 这个教学实现只接受简单 argv。
+    // 管道、重定向、命令替换等 shell 语法很难可靠静态判断副作用，所以直接拒绝。
     return {
       allowed: false,
       reason: "Shell operators are not allowed in non-interactive commands",
@@ -165,6 +176,8 @@ function validateCommandForProfile(
   }
 
   if (isGitWriteCommand(argv)) {
+    // Git 写命令在后台非交互路径中全部拒绝。
+    // 代码提交、切分分支等操作应由前台 Agent 在用户可见上下文里完成。
     return {
       allowed: false,
       reason: "Write command is not allowed in non-interactive commands",
@@ -177,6 +190,8 @@ function validateCommandForProfile(
 }
 
 function validateReadonlyCommand(argv: string[]): PolicyValidation {
+  // readonly profile 只允许“观察型”命令和不会写文件的检查命令。
+  // 这里的 allowlist 故意短，便于学生逐项理解每个命令为什么安全。
   if (allowsCommonReadonlyCommand(argv)) return { allowed: true };
 
   if (isNpmRun(argv, "typecheck")) return { allowed: true };
@@ -208,6 +223,8 @@ function validateReadonlyCommand(argv: string[]): PolicyValidation {
 }
 
 function validateCiCommand(argv: string[]): PolicyValidation {
+  // ci profile 在 readonly 基础上允许更重的验证命令。
+  // 它仍然不允许修复、格式化写回或任意 shell。
   const readonly = validateReadonlyCommand(argv);
   if (readonly.allowed) return readonly;
 
@@ -221,6 +238,8 @@ function validateCiCommand(argv: string[]): PolicyValidation {
 function allowsCommonReadonlyCommand(argv: string[]): boolean {
   const [cmd, sub] = argv;
   if (!cmd) return false;
+  // 这些命令默认被视为只读观察命令。
+  // 注意 sed 只允许 -n，因为普通 sed 也可以配合 -i 写文件。
   if (cmd === "pwd" || cmd === "ls" || cmd === "rg" || cmd === "cat") {
     return true;
   }
@@ -256,6 +275,7 @@ function isNpx(argv: string[], binary: string): boolean {
 }
 
 function isPathWithin(filePath: string, baseDir: string): boolean {
+  // 统一 resolve 后再比较前缀，避免 "../" 这类路径穿越绕过字符串检查。
   const resolved = resolve(baseDir, filePath);
   return resolved === baseDir || resolved.startsWith(baseDir + sep);
 }
@@ -274,6 +294,8 @@ function parseSimpleArgv(command: string): string[] | null {
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
     if (quote) {
+      // 引号内只做字符累加，不解释转义和变量。
+      // 复杂 shell 能力已经在更前面被拒绝，这是一个“够用但保守”的解析器。
       if (ch === quote) {
         quote = null;
       } else {

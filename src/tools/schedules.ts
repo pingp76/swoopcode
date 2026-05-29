@@ -342,6 +342,7 @@ function formatScheduleView(
   schedule: import("../schedules.js").ScheduleView,
   occurrences: import("../schedule-store.js").ScheduleOccurrenceFile[],
 ): string {
+  // 将 schedule 详情和最近 occurrences 组装为结构化对象，再序列化为 JSON 字符串
   return JSON.stringify(
     {
       type: "schedule",
@@ -357,6 +358,7 @@ function formatScheduleView(
       triggered_count: schedule.triggeredCount,
       missed_count: schedule.missedCount,
       skipped_count: schedule.skippedCount,
+      // 将每个 occurrence 映射为轻量级摘要对象，减少返回体积
       recent_occurrences: occurrences.map((o) => ({
         occurrence_id: o.id,
         status: o.status,
@@ -374,6 +376,7 @@ function formatScheduleView(
 function formatScheduleList(
   schedules: import("../schedule-store.js").ScheduleSummary[],
 ): string {
+  // 将 schedule 列表摘要序列化为 JSON，只保留核心字段供 LLM 快速浏览
   return JSON.stringify(
     {
       type: "schedule_list",
@@ -394,6 +397,7 @@ function formatScheduleList(
 function formatOccurrenceList(
   occurrences: import("../schedule-store.js").ScheduleOccurrenceFile[],
 ): string {
+  // 将 occurrence 历史列表序列化为 JSON，包含执行状态和关联输出信息
   return JSON.stringify(
     {
       type: "occurrence_list",
@@ -420,26 +424,40 @@ function formatOccurrenceList(
 // ---------------------------------------------------------------------------
 
 function parseTiming(args: Record<string, unknown>): ScheduleTimingInput {
+  // 教学导读：
+  // tool schema 中的 timing 是一个带 type 的嵌套对象。
+  // 解析时先看 type，再按不同 type 读取不同字段，这是处理 tagged union 的常见方式。
+  // 这样比“把所有可能字段都读出来再猜”更清晰，也能给出更准确的错误信息。
+
+  // 从参数中提取 timing 对象，校验其类型必须为 object 且不能是数组
   const timing = args["timing"];
   if (!timing || typeof timing !== "object" || Array.isArray(timing)) {
     throw new Error("timing must be an object");
   }
   const t = timing as Record<string, unknown>;
+  // 校验 timing.type 只能是 once 或 recurring
   const type = String(t["type"] ?? "");
   if (type !== "once" && type !== "recurring") {
     throw new Error('timing.type must be "once" or "recurring"');
   }
 
+  // 一次性 schedule：必须提供 run_at 字段
   if (type === "once") {
+    // once schedule 只运行一次。
+    // schedules.ts 触发它之后会把状态推进到 completed，不再计算下一次 nextRunAt。
     const runAt = String(t["run_at"] ?? "");
     if (!runAt) throw new Error("timing.run_at is required for once schedules");
     return { type: "once", runAt };
   }
 
+  // 重复性 schedule：必须提供 starts_at，ends_at 为可选
+  // starts_at 是重复规则的锚点：hourly/daily/weekly 等规则都从这个时间往未来推。
   const startsAt = String(t["starts_at"] ?? "");
   if (!startsAt) throw new Error("timing.starts_at is required for recurring schedules");
   const endsAt = t["ends_at"] ? String(t["ends_at"]) : undefined;
 
+  // 重复性 schedule 必须携带 rule 对象，用于描述重复规则
+  // rule 里也有自己的 kind 字段，决定是 every_seconds、daily、weekly 等哪种规则。
   const ruleRaw = t["rule"];
   if (!ruleRaw || typeof ruleRaw !== "object" || Array.isArray(ruleRaw)) {
     throw new Error("timing.rule is required for recurring schedules");
@@ -447,8 +465,10 @@ function parseTiming(args: Record<string, unknown>): ScheduleTimingInput {
   const r = ruleRaw as Record<string, unknown>;
   const kind = String(r["kind"] ?? "");
 
+  // 根据 kind 分支解析具体的重复规则字段
   const rule = parseRecurrenceRule(kind, r);
 
+  // 组装重复性 timing 结果，仅在 endsAt 存在时加入该字段
   const result: ScheduleTimingInput = { type: "recurring", startsAt, rule };
   if (endsAt !== undefined) {
     (result as Record<string, unknown>).endsAt = endsAt;
@@ -457,6 +477,11 @@ function parseTiming(args: Record<string, unknown>): ScheduleTimingInput {
 }
 
 function parseRecurrenceRule(kind: string, r: Record<string, unknown>): import("../schedule-store.js").RecurrenceRule {
+  // 每种 recurrence rule 都返回一个带 kind 的对象。
+  // 这种结构的好处是：后续 computeNextRunAt 只需要 switch(rule.kind)，
+  // 就能获得 TypeScript 的类型缩窄和清晰的规则分支。
+
+  // 根据 kind 的不同，分别提取并组装对应的重复规则对象
   switch (kind) {
     case "every_seconds":
       return {
@@ -499,6 +524,7 @@ function parseRecurrenceRule(kind: string, r: Record<string, unknown>): import("
         timeOfDay: String(r["time_of_day"] ?? "00:00:00"),
       };
     default:
+      // 遇到未知的 kind，抛出异常阻止非法 schedule 创建
       throw new Error(`Unknown recurrence kind: ${kind}`);
   }
 }
@@ -522,14 +548,27 @@ type ScheduleTimingInput =
 export function createScheduleToolProvider(
   manager: ScheduleManager,
 ): ScheduleToolProvider {
+  // 教学导读：
+  // Schedule 工具参数是本项目最复杂的 tool schema 之一，因为它同时包含：
+  // - intent：到点后要做什么
+  // - timing：什么时候触发
+  // - execution：用 command 还是 subagent 执行、声明哪些资源
+  // - output_policy：结果如何通知 LLM
+  //
+  // 这个 provider 的任务是把 LLM 传入的 JSON 翻译为 CreateScheduleInput。
+  // 真正的时间计算、跨项目边界、occurrence 审计和 Async Run 触发，
+  // 都由 schedules.ts / schedule-store.ts 负责。
+
   async function executeCreate(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // 提取并校验 title，不能为空
     const title = String(args["title"] ?? "").trim();
     if (!title) {
       return { output: "Error: title is required", error: true };
     }
 
+    // 提取并校验 intent 对象，必须为 object 类型且包含非空 prompt
     const intentRaw = args["intent"];
     if (!intentRaw || typeof intentRaw !== "object" || Array.isArray(intentRaw)) {
       return { output: "Error: intent must be an object", error: true };
@@ -540,14 +579,18 @@ export function createScheduleToolProvider(
       return { output: "Error: intent.prompt is required", error: true };
     }
 
+    // 解析 timing 参数，异常时直接返回错误给 LLM
     let timing: ScheduleTimingInput;
     try {
+      // timing 是最容易出错的部分，所以单独抽成 parseTiming。
+      // 这样 create 的主流程能保持可读，错误也能明确指向时间参数。
       timing = parseTiming(args);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { output: `Error: ${message}`, error: true };
     }
 
+    // 提取并校验 execution 对象，executor 只能是 subagent 或 command
     const executionRaw = args["execution"];
     if (!executionRaw || typeof executionRaw !== "object" || Array.isArray(executionRaw)) {
       return { output: "Error: execution must be an object", error: true };
@@ -558,30 +601,39 @@ export function createScheduleToolProvider(
       return { output: "Error: execution.executor must be 'subagent' or 'command'", error: true };
     }
 
+    // 当 executor 为 command 时，必须提供 command 字符串
     const command = execution["command"] ? String(execution["command"]) : undefined;
     if (executor === "command" && !command) {
       return { output: "Error: execution.command is required when executor='command'", error: true };
     }
 
+    // 提取 resources 对象，分别处理 read_paths 和 write_paths 的默认值
     const resourcesRaw = execution["resources"];
     if (!resourcesRaw || typeof resourcesRaw !== "object" || Array.isArray(resourcesRaw)) {
       return { output: "Error: execution.resources must be an object", error: true };
     }
     const resources = resourcesRaw as Record<string, unknown>;
+    // read_paths 默认 "."，表示 schedule 触发时可以读取当前项目。
+    // write_paths 默认 []，因为当前 permissionProfile 固定 readonly。
     const readPaths = Array.isArray(resources["read_paths"]) ? resources["read_paths"].map(String) : ["."];
     const writePaths = Array.isArray(resources["write_paths"]) ? resources["write_paths"].map(String) : [];
 
+    // 提取超时、重叠策略等可选参数，未传入时使用默认值
     const timeoutSeconds = execution["timeout_seconds"] !== undefined
       ? Number(execution["timeout_seconds"])
       : 300;
     const overlapPolicy = String(execution["overlap_policy"] ?? "skip") as "allow" | "skip";
     const permissionProfile = "readonly";
+    // 第一版工具 schema 不暴露 ci/workspace_write。
+    // 这是有意裁剪：学生先理解 readonly 定时执行，再在后续课程扩展写能力。
 
+    // 解析 output_policy 对象，若未传入或类型不符则视为空对象
     const outputPolicyRaw = args["output_policy"];
     const outputPolicy = outputPolicyRaw && typeof outputPolicyRaw === "object" && !Array.isArray(outputPolicyRaw)
       ? (outputPolicyRaw as Record<string, unknown>)
       : {};
 
+    // 组装 CreateScheduleInput，将前端参数映射为内部数据结构
     const input: CreateScheduleInput = {
       title,
       intent: { prompt },
@@ -600,6 +652,9 @@ export function createScheduleToolProvider(
         linkedTaskUpdate: "never",
       },
     };
+    // 仅在参数存在时添加可选字段，避免传入 undefined
+    // 这里同样受 exactOptionalPropertyTypes 约束：
+    // 可选字段要么不存在，要么有真实值，不写 field: undefined。
     if (args["description"] !== undefined) {
       input.description = String(args["description"]);
     }
@@ -614,6 +669,8 @@ export function createScheduleToolProvider(
     }
 
     try {
+      // 调用 manager 创建 schedule，成功后返回 schedule 摘要
+      // 返回 JSON 而不是长文本，是为了让 LLM 能稳定提取 schedule_id 和 next_run_at。
       const schedule = manager.create(input);
       return {
         output: JSON.stringify(
@@ -632,6 +689,7 @@ export function createScheduleToolProvider(
         error: false,
       };
     } catch (err) {
+      // 捕获创建过程中的异常，将错误信息返回给 LLM
       const message = err instanceof Error ? err.message : String(err);
       return { output: `Error creating schedule: ${message}`, error: true };
     }
@@ -640,6 +698,8 @@ export function createScheduleToolProvider(
   async function executeList(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // 构建查询条件对象，仅当参数存在时才设置对应字段
+    // list 是只读工具，所以这里不 catch；manager.list 正常情况下不会抛业务异常。
     const query: import("../schedule-store.js").ScheduleListQuery = {};
     if (args["include_archived"] !== undefined) {
       query.includeArchived = Boolean(args["include_archived"]);
@@ -651,6 +711,7 @@ export function createScheduleToolProvider(
       query.currentProjectOnly = Boolean(args["current_project_only"]);
     }
 
+    // 调用 manager 查询 schedule 列表，并格式化为 JSON 返回
     const schedules = manager.list(query);
     return {
       output: formatScheduleList(schedules),
@@ -661,16 +722,19 @@ export function createScheduleToolProvider(
   async function executeRead(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // 提取 schedule_id 并校验其非空
     const scheduleId = String(args["schedule_id"] ?? "");
     if (!scheduleId) {
       return { output: "Error: schedule_id is required", error: true };
     }
 
+    // 通过 manager 读取 schedule 详情，若不存在则返回错误
     const schedule = manager.read(scheduleId);
     if (!schedule) {
       return { output: `Error: Schedule not found: ${scheduleId}`, error: true };
     }
 
+    // 解析 recent_occurrences 参数，默认返回最近 5 条 occurrence
     const recentOccurrences = args["recent_occurrences"] !== undefined
       ? Number(args["recent_occurrences"])
       : 5;
@@ -684,12 +748,14 @@ export function createScheduleToolProvider(
   async function executeCancel(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // 提取并校验 schedule_id
     const scheduleId = String(args["schedule_id"] ?? "");
     if (!scheduleId) {
       return { output: "Error: schedule_id is required", error: true };
     }
 
     try {
+      // 调用 manager 取消 schedule，reason 为可选参数
       const schedule = manager.cancel(scheduleId, args["reason"] ? String(args["reason"]) : undefined);
       return {
         output: JSON.stringify(
@@ -704,6 +770,7 @@ export function createScheduleToolProvider(
         error: false,
       };
     } catch (err) {
+      // 捕获取消异常并返回结构化错误信息
       const message = err instanceof Error ? err.message : String(err);
       return { output: `Error cancelling schedule: ${message}`, error: true };
     }
@@ -712,12 +779,14 @@ export function createScheduleToolProvider(
   async function executeDelete(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // 提取并校验 schedule_id
     const scheduleId = String(args["schedule_id"] ?? "");
     if (!scheduleId) {
       return { output: "Error: schedule_id is required", error: true };
     }
 
     try {
+      // 调用 manager 删除 schedule（仅允许删除从未触发过的 schedule）
       manager.delete(scheduleId);
       return {
         output: JSON.stringify(
@@ -728,6 +797,7 @@ export function createScheduleToolProvider(
         error: false,
       };
     } catch (err) {
+      // 捕获删除异常并返回错误信息
       const message = err instanceof Error ? err.message : String(err);
       return { output: `Error deleting schedule: ${message}`, error: true };
     }
@@ -736,11 +806,13 @@ export function createScheduleToolProvider(
   async function executeOccurrenceList(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // 提取并校验 schedule_id
     const scheduleId = String(args["schedule_id"] ?? "");
     if (!scheduleId) {
       return { output: "Error: schedule_id is required", error: true };
     }
 
+    // 解析 limit 参数，默认返回 20 条 occurrence 记录
     const limit = args["limit"] !== undefined ? Number(args["limit"]) : 20;
     const occurrences = manager.listOccurrences({ scheduleId, limit });
     return {

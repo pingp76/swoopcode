@@ -184,8 +184,20 @@ export function getLLMProviderProfile(id: string): LLMProviderProfile {
 export function resolveLLMProviderConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): ResolvedLLMConfig {
+  // 设计套路：用静态 Provider Profile 收敛“供应商方言”。
+  // 配置解析层负责决定 provider/baseURL/model/capabilities，
+  // llm.ts 只消费解析后的 ResolvedLLMConfig。
+  //
+  // 这样新增 provider 时不需要到处改 if/else：
+  // 1. 在 providerProfiles 里新增 profile
+  // 2. 测试 env 解析和能力标记
+  // 3. 只有确实存在传输层特殊要求时，才在 llm.ts 加小范围适配
+
   // 1. 解析 provider id
   // 优先级：显式 LLM_PROVIDER > 从 baseURL 推断 > 默认 openai_compatible
+  // 显式 LLM_PROVIDER 优先级最高，是为了避免启发式误判。
+  // 用户使用代理、自建网关或同域不同路径时，baseURL 可能看起来像某个 provider，
+  // 但真实能力并不相同。
   const explicitProvider = env["LLM_PROVIDER"] as LLMProviderId | undefined;
   const providerId =
     explicitProvider ??
@@ -226,6 +238,9 @@ export function resolveLLMProviderConfig(
 function inferProviderFromBaseURL(
   baseURL: string | undefined,
 ): LLMProviderId | null {
+  // 启发式推断只做“完全一致”的默认 endpoint 匹配。
+  // 不做 includes/startsWith 模糊匹配，是为了避免把自定义代理误判成官方 provider。
+  // 这是配置系统里常见的保守策略：宁可要求用户显式声明，也不要猜错能力标记。
   if (!baseURL) return null;
   for (const [id, profile] of Object.entries(providerProfiles)) {
     if (profile.defaultBaseURL === baseURL) {
@@ -248,6 +263,10 @@ function resolveApiKey(
   env: NodeJS.ProcessEnv,
   profile: LLMProviderProfile,
 ): string {
+  // key 解析顺序体现了“通用覆盖专用”的设计：
+  // LLM_API_KEY 方便用户用同一套变量快速切 provider；
+  // provider 专用 key 则方便在本机同时配置多个供应商。
+
   // 第一优先级：通用 LLM_API_KEY
   const genericKey = env["LLM_API_KEY"];
   if (genericKey) {
@@ -263,6 +282,8 @@ function resolveApiKey(
   }
 
   // 缺失：构造清晰的错误提示，列出候选环境变量
+  // 注意错误信息只列变量名，不打印任何已存在 key 的值。
+  // 配置错误日志泄漏 API key 是真实项目里很常见、也很危险的坑。
   const candidateNames = ["LLM_API_KEY", ...profile.apiKeyEnvNames];
   throw new Error(
     `Missing LLM API key for provider "${profile.id}". ` +
@@ -279,6 +300,9 @@ function resolveBaseURL(
   env: NodeJS.ProcessEnv,
   profile: LLMProviderProfile,
 ): string {
+  // baseURL 允许显式覆盖，是为了支持代理、私有部署和兼容网关。
+  // 但一旦用户覆盖 baseURL，provider capabilities 仍来自 LLM_PROVIDER/profile；
+  // 所以如果兼容网关能力不同，应该显式选择 openai_compatible 或新增 profile。
   const explicit = env["LLM_BASE_URL"];
   if (explicit) {
     return explicit;
@@ -303,6 +327,8 @@ function resolveModel(
   env: NodeJS.ProcessEnv,
   profile: LLMProviderProfile,
 ): string {
+  // model 解析和 baseURL 类似：用户显式设置优先。
+  // profile.defaultModel 只是教学项目的可运行默认值，不代表生产推荐模型。
   const explicit = env["LLM_MODEL"];
   if (explicit) {
     return explicit;

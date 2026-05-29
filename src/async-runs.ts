@@ -311,6 +311,18 @@ export function createAsyncRunManager(deps: {
   permissionManager?: PermissionManager;
   onFinish?(record: AsyncRunRecord): void;
 }): AsyncRunManager {
+  // 教学导读：
+  // AsyncRunManager 让 Agent 可以启动“后台执行单元”，然后立即把 run_id 返回给 LLM。
+  // 它不是持久化任务系统：进程重启后不会恢复旧 run。
+  //
+  // 它要解决的核心问题有三个：
+  // 1. 非阻塞：start() 不能 await 命令或子 Agent 完成
+  // 2. 终态幂等：命令完成、超时、异常可能竞争，只有第一个结果能生效
+  // 3. 上下文回传：后台结果不能直接插入当前 LLM 调用，只能排队成 notification
+  //
+  // 读代码时建议先看 start()，再看 launchCommandRunner/launchSubagentRunner，
+  // 最后看 finishRun()，它是所有执行路径汇合的地方。
+
   const {
     projectRoot,
     taskOutputsDir,
@@ -335,10 +347,16 @@ export function createAsyncRunManager(deps: {
     commandPolicy ?? createReadonlyCommandPolicy(executionPolicy);
 
   // 进程内 record 表：run_id → AsyncRunRecord
+  // Async Run 在当前教学阶段是 session-local 能力，不做重启恢复。
+  // 因此 Map 就是运行时事实来源；磁盘上的 record.json 只用于观察和调试。
   const records = new Map<string, AsyncRunRecord>();
   // 通知队列：等待主循环领取的已完成通知
+  // 工具执行线程不能直接把消息塞进 LLM 上下文，只能先排队，
+  // 再由 agent.ts 在下一次 LLM 调用前 drain 并注入 system-reminder。
   const notificationQueue: AsyncRunNotification[] = [];
   // 已收敛为终态的 run_id 集合：防止 late result 覆盖 timeout
+  // 同一个异步任务可能同时经历“命令完成”和“超时定时器触发”两个路径，
+  // Set 让第一个终态胜出，后来的结果只能被忽略。
   const finishedRunIds = new Set<string>();
   // 当前 running 的 async run 数量
   let runningCount = 0;
@@ -494,6 +512,8 @@ export function createAsyncRunManager(deps: {
 
   function start(input: StartAsyncRunInput): AsyncRunRecord {
     // 验证 executor
+    // 这里先校验枚举值，是为了让后续分支能被 TypeScript 缩窄；
+    // 学生可以看到：运行时校验和静态类型通常需要同时存在。
     if (input.executor !== "command" && input.executor !== "subagent") {
       throw new Error(
         `Invalid executor: "${input.executor}". Must be "command" or "subagent"`,
@@ -525,6 +545,9 @@ export function createAsyncRunManager(deps: {
     const readPaths = input.resources.read_paths ?? [];
     const writePaths = input.resources.write_paths ?? [];
 
+    // resources 是 Async Run 的“资源声明”。
+    // 前台工具冲突检测依赖这些路径判断是否会和后台只读任务互相踩踏，
+    // 所以即使当前只允许 read_paths，也要求调用方显式声明。
     if (!Array.isArray(readPaths) || !Array.isArray(writePaths)) {
       throw new Error(
         "resources.read_paths and resources.write_paths must be arrays",
@@ -549,6 +572,8 @@ export function createAsyncRunManager(deps: {
     }
 
     if (input.executor === "command" && input.command) {
+      // command executor 走更窄的一层白名单。
+      // validateResources 只说明“路径声明安全”，这里进一步说明“命令本身安全”。
       const commandValidation = readonlyCommandPolicy.validate(input.command);
       if (!commandValidation.allowed) {
         throw new Error(
@@ -636,6 +661,9 @@ export function createAsyncRunManager(deps: {
     if (input.executor === "subagent") record.maxRounds = maxRounds;
 
     // 保存到内存表
+    // 必须先写入 records/runningCount，再启动真正 executor。
+    // 否则极快完成的 runner 可能在 record 还没登记时调用 finishRun，
+    // 造成通知、并发计数或查询结果不一致。
     records.set(runId, record);
     runningCount++;
 
@@ -676,11 +704,15 @@ export function createAsyncRunManager(deps: {
     timeoutMs: number,
   ): void {
     // 设置超时监控
+    // timeout 和命令完成是竞争关系，二者都调用 finishRun。
+    // finishRun 的幂等保护负责保证只产生一个终态。
     const timeoutId = setTimeout(() => {
       finishRun(record, "timeout", undefined, `Exceeded timeout of ${timeoutMs}ms`);
     }, timeoutMs);
 
     // 异步执行命令
+    // 注意这里故意不 await：start() 必须快速返回 run_id，
+    // 让主 Agent 可以继续工作，后台结果以后通过 notification 回来。
     executeBash(command, projectRoot, timeoutMs)
       .then((result) => {
         clearTimeout(timeoutId);
@@ -720,6 +752,8 @@ export function createAsyncRunManager(deps: {
     const subCompressor = createCompressorFn();
 
     // 创建 child session
+    // child session 只用于 transcript 关联，不共享父 Agent 的 History。
+    // 这样子智能体可以拥有独立上下文，但审计时仍能追溯到父会话。
     const childSession =
       sessionManager && parentSessionId
         ? sessionManager.createChildSession(parentSessionId, record.title.slice(0, 80))
@@ -736,6 +770,8 @@ export function createAsyncRunManager(deps: {
     // 注意：不传递 asyncRunManager（防止嵌套）、不传递 askUserFn（ask 降级为 deny）
 
     // 创建 scoped permission manager：子智能体内部不 ask，只允许只读诊断命令
+    // 这里不直接复用父 permissionManager，是为了避免后台子 Agent 弹出交互确认；
+    // 非交互路径要么自动允许安全只读操作，要么明确拒绝。
     const scopedPermissionManager = permissionManager
       ? createScopedSubagentPermissionManager({
           parent: permissionManager,
@@ -767,6 +803,8 @@ export function createAsyncRunManager(deps: {
       subAgentDeps.sessionId = childSessionId;
     }
 
+    // 真正的子 Agent 直到这里才创建。
+    // 前面的 history/tools/compressor/permission 都是为这个子 Agent 准备的隔离环境。
     const subAgent = createAgentFn(subAgentDeps);
 
     // 设置超时监控：超时后先 abort child Agent，再 finishRun
@@ -776,6 +814,8 @@ export function createAsyncRunManager(deps: {
     }, timeoutMs);
 
     // 运行子 Agent
+    // 和 command runner 一样，这里不 await。
+    // Promise 的 then/catch 负责把后台结果收敛回 AsyncRunRecord。
     subAgent
       .run(prompt)
       .then((output) => {
@@ -802,6 +842,7 @@ export function createAsyncRunManager(deps: {
   function check(runId: string): AsyncRunRecord | null {
     if (!validateRunId(runId)) return null;
     const record = records.get(runId);
+    // 返回深拷贝，避免工具层或测试代码拿到内部对象后直接修改运行状态。
     return record ? deepClone(record) : null;
   }
 
@@ -848,6 +889,8 @@ export function createAsyncRunManager(deps: {
     }
 
     // 新版本优先通过 OutputStore 读取，保证输出读取走统一 output_id 边界。
+    // 这是教学项目里“裸文件路径”和“LLM 可见句柄”的分界：
+    // LLM 看到 output_id，内部代码才知道真实文件路径。
     if (record.outputId && outputStore) {
       return outputStore.read({
         outputId: record.outputId,
@@ -870,6 +913,8 @@ export function createAsyncRunManager(deps: {
     }
 
     // 限制 maxBytes
+    // 即使调用方传入极大的 maxBytes，也要在 manager 层再做一次硬上限收敛，
+    // 防止把超大输出一次性塞回上下文。
     const effectiveMaxBytes = Math.min(maxBytes, MAX_MAX_BYTES);
 
     // 读取文件内容
@@ -888,6 +933,8 @@ export function createAsyncRunManager(deps: {
   // -------------------------------------------------------------------------
 
   function drainNotifications(): AsyncRunNotification[] {
+    // slice() 先复制一份，再清空原队列。
+    // 这样调用者拿到的是本次快照，后续新完成的 run 会进入下一轮提醒。
     const result = notificationQueue.slice();
     notificationQueue.length = 0;
     return result;
@@ -914,6 +961,8 @@ export function createAsyncRunManager(deps: {
     }
 
     // run_write / run_edit / run_edit_exact：检查路径是否与 running runs 的 readPaths 重叠
+    // 背景任务声明“我要读这些路径”，前台写同一路径就可能让背景结果建立在不稳定输入上。
+    // 第一版采用保守策略：只要路径重叠，就暂时阻止前台写。
     if (
       toolName === "run_write" ||
       toolName === "run_edit" ||
@@ -935,6 +984,8 @@ export function createAsyncRunManager(deps: {
     }
 
     // run_bash：如果存在 running async runs，只允许 strict read-only command
+    // bash 的影响面很难从参数精确推导，所以在有后台任务时降级到命令白名单。
+    // 这让学生看到：当静态分析不可靠时，系统应选择更窄的能力边界。
     if (toolName === "run_bash") {
       const command = String(args["command"] ?? "");
       if (!command) return { blocked: false };

@@ -146,6 +146,7 @@ export function createSubagentToolProvider(deps: {
   /** 父 Agent 的 sessionId，用于建立 parentSessionId */
   parentSessionId?: string;
 }): SubagentToolProvider {
+  // 从 deps 中解构出所有依赖，方便后续直接使用
   const {
     llm,
     logger,
@@ -184,11 +185,12 @@ export function createSubagentToolProvider(deps: {
   async function executeSubagent(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // 从参数中提取 task，若未提供则转为空字符串
     const task = String(args["task"] ?? "");
     // max_rounds 参数：默认 20 轮，父智能体可以通过参数覆盖
     const maxRounds = Number(args["max_rounds"]) || 20;
 
-    // 参数校验：task 是必填的
+    // 参数校验：task 是必填的，trim 后为空则拒绝执行
     if (!task.trim()) {
       return {
         output: "Error: 'task' parameter is required and cannot be empty.",
@@ -196,11 +198,13 @@ export function createSubagentToolProvider(deps: {
       };
     }
 
+    // 记录子智能体启动日志，只截取前 100 个字符避免日志过长
     logger.info(
       "[SubAgent] Starting sub-agent for task: %s",
       task.slice(0, 100),
     );
 
+    // 提前声明 childSessionId，用于 try/catch 中统一清理 session
     let childSessionId: string | null = null;
     try {
       // 1. 创建独立的对话历史（不与父级共享引用）
@@ -231,7 +235,10 @@ export function createSubagentToolProvider(deps: {
       //    - 使用独立的压缩器实例（隔离压缩状态）
       //    - 共享同一个 permissionManager（继承父级权限模式）
       //    - 不传 askUserFn（子智能体内的 ask 降级为 deny）
+      // 创建独立的压缩器，避免子智能体的压缩状态污染父级
       const subCompressor = createCompressorFn();
+      // 若提供了 sessionManager 和 parentSessionId，则创建一个子 session
+      // 子 session 用于隔离记录子智能体的执行轨迹
       const childSession =
         sessionManager && parentSessionId
           ? sessionManager.createChildSession(
@@ -239,6 +246,7 @@ export function createSubagentToolProvider(deps: {
               task.slice(0, 80),
             )
           : null;
+      // 记录子 session 的 ID，用于后续结束 session 或错误清理
       childSessionId = childSession?.id ?? null;
       // 子智能体创建参数：只有 hookRunner 有值时才传入
       // exactOptionalPropertyTypes 不允许显式传 undefined 给可选属性
@@ -253,17 +261,21 @@ export function createSubagentToolProvider(deps: {
         // 不传 askUserFn：子智能体内的 ask 决策降级为 deny
         // 但 scopedPermissionManager 已经把需要 ask 的操作改为 allow/deny，不会走到 ask 分支
       };
+      // 条件注入：只有当 hookRunner 存在时才传给子 Agent，避免显式传 undefined
       if (hookRunner) {
         subAgentDeps.hookRunner = hookRunner;
       }
+      // 条件注入：只有同时存在 transcriptStore 和 childSession 时才关联子 session
       if (transcriptStore && childSession) {
         subAgentDeps.transcriptStore = transcriptStore;
         subAgentDeps.sessionId = childSession.id;
       }
+      // 调用工厂函数，组装并创建子 Agent 实例
       const subAgent = createAgentFn(subAgentDeps);
 
       // 4. 运行子 Agent（父智能体在此阻塞等待）
       const result = await subAgent.run(task);
+      // 子 Agent 正常结束后，关闭对应的 session 以释放资源
       if (childSessionId) {
         sessionManager?.endSession(childSessionId);
       }
@@ -272,6 +284,7 @@ export function createSubagentToolProvider(deps: {
       // 成功：返回子智能体的最终文本
       return { output: result, error: false };
     } catch (err) {
+      // 无论成功或异常，都要确保已创建的 session 被关闭，防止资源泄漏
       if (childSessionId) {
         sessionManager?.endSession(childSessionId);
       }

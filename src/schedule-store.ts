@@ -668,6 +668,19 @@ export function createScheduleStore(options: {
   logger: Logger;
   now?: () => Date;
 }): ScheduleStore {
+  // 教学导读：
+  // ScheduleStore 是 Schedule 系统的持久化层。
+  // 它只负责保存 schedule.json、occurrence JSON 和 index.json；
+  // 不负责判断“现在是否到点”，也不负责启动 Async Run。
+  //
+  // 物理布局：
+  //   <schedulesDir>/schedules/<schedule_id>/schedule.json
+  //   <schedulesDir>/schedules/<schedule_id>/occurrences/<occurrence_id>.json
+  //   <schedulesDir>/index.json
+  //
+  // occurrence 单独成文件，是为了保留每次触发的审计轨迹。
+  // 即使 schedule 后来被取消或完成，历史 occurrence 仍然可查询。
+
   const schedulesDir = path.resolve(options.schedulesDir);
   const schedulesSubDir = path.resolve(schedulesDir, "schedules");
   const indexPath = path.resolve(schedulesDir, "index.json");
@@ -675,9 +688,12 @@ export function createScheduleStore(options: {
   const logger = options.logger;
 
   // 内存缓存：scheduleId -> ScheduleFile
+  // Store 的读写都围绕这份 Map 展开；磁盘是持久化来源，Map 是当前进程的查询缓存。
+  // scan() 会重新从磁盘构建 Map，适合启动时或发现索引漂移时调用。
   const schedules = new Map<string, ScheduleFile>();
 
   function scheduleDir(scheduleId: string): string {
+    // 每个 schedule 独占一个目录，方便把 schedule.json 和 occurrences/ 审计记录放在一起。
     return path.resolve(schedulesSubDir, scheduleId);
   }
 
@@ -694,12 +710,15 @@ export function createScheduleStore(options: {
   }
 
   function loadOne(scheduleId: string): ScheduleFile | null {
+    // 目录名本身就是 schedule 的一部分身份。
+    // 如果目录名不符合格式，直接跳过，避免读取任意文件路径。
     if (!SCHEDULE_ID_REGEX.test(scheduleId)) return null;
     const filePath = schedulePath(scheduleId);
     if (!fs.existsSync(filePath)) return null;
 
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8")) as unknown;
+      // 读取时也传入 expectedId，让校验器确认“文件路径中的 id”和“JSON 内容中的 id”一致。
       const errors = validateScheduleFile(parsed, scheduleId);
       if (errors.length > 0) {
         logger.warn("Schedule %s skipped: %s", scheduleId, errors.join("; "));
@@ -716,6 +735,8 @@ export function createScheduleStore(options: {
     scheduleId: string,
     occurrenceId: string,
   ): ScheduleOccurrenceFile | null {
+    // occurrence 也是 append-only 审计记录的一部分，读取时宁可跳过坏文件，
+    // 也不要因为单个损坏记录导致整个 ScheduleStore 不可用。
     if (!OCCURRENCE_ID_REGEX.test(occurrenceId)) return null;
     const filePath = occurrencePath(scheduleId, occurrenceId);
     if (!fs.existsSync(filePath)) return null;
@@ -745,6 +766,8 @@ export function createScheduleStore(options: {
   }
 
   function writeIndex(): void {
+    // index.json 是派生索引，不是事实来源。
+    // 它可以随时从 schedules Map 或磁盘 schedule.json 重建，所以这里只存 id 列表。
     const allSchedules = [...schedules.values()]
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((s) => s.id);
@@ -783,6 +806,8 @@ export function createScheduleStore(options: {
 
   return {
     scan() {
+      // 启动扫描采用“能读多少读多少”的策略：
+      // 坏 schedule 会被 warn 并跳过，合法 schedule 会进入内存缓存。
       schedules.clear();
       fs.mkdirSync(schedulesSubDir, { recursive: true });
       const entries = fs.readdirSync(schedulesSubDir, { withFileTypes: true });
@@ -803,6 +828,8 @@ export function createScheduleStore(options: {
       const includeArchived = query.includeArchived ?? false;
       const includeCancelled = query.includeCancelled ?? false;
       const currentProjectOnly = query.currentProjectOnly ?? true;
+      // 默认只看当前 projectRoot，这是跨项目全局存储里的重要边界。
+      // 只有调用方显式 currentProjectOnly=false 时，才会暴露其他项目的 schedule 摘要。
       const projectRootFilter =
         query.projectRoot !== undefined
           ? path.resolve(query.projectRoot)
@@ -829,6 +856,7 @@ export function createScheduleStore(options: {
     read(scheduleId) {
       if (!SCHEDULE_ID_REGEX.test(scheduleId)) return null;
       const cached = schedules.get(scheduleId);
+      // 对外返回 clone，防止调用方修改缓存对象而绕过 save() 校验。
       if (cached) return cloneJson(cached);
       const loaded = loadOne(scheduleId);
       if (!loaded) return null;
@@ -838,6 +866,8 @@ export function createScheduleStore(options: {
     },
 
     save(schedule) {
+      // 写入前先做完整校验，让 writer 侧和 reader 侧规则对称。
+      // 这样不会把 scan() 未来会拒绝的坏数据写到磁盘。
       assertValidForSave(schedule);
       const finalPath = schedulePath(schedule.id);
 
@@ -865,6 +895,8 @@ export function createScheduleStore(options: {
     },
 
     saveOccurrence(occurrence) {
+      // occurrence 是执行审计，不进入 schedules Map；
+      // 保存时仍要校验 id/status/timestamp 等字段，保证后续 listOccurrences 可安全读取。
       assertValidOccurrence(occurrence);
       const finalPath = occurrencePath(occurrence.scheduleId, occurrence.id);
 
@@ -881,6 +913,7 @@ export function createScheduleStore(options: {
       for (const entry of entries) {
         if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
         const occurrenceId = entry.name.slice(0, -5);
+        // 单个 occurrence 文件损坏时跳过，避免影响同一 schedule 的其他审计记录。
         const occ = loadOccurrence(scheduleId, occurrenceId);
         if (occ) occurrences.push(occ);
       }

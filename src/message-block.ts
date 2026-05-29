@@ -99,6 +99,7 @@ export function estimateTokens(text: string): number {
  */
 export function estimateBlockTokens(block: MessageBlock): number {
   let total = 0;
+  // 累加块内所有消息的 token 估算值
 
   if (block.type === "text") {
     if (block.user) {
@@ -108,20 +109,24 @@ export function estimateBlockTokens(block: MessageBlock): number {
       total += estimateTokens(extractContent(block.assistant));
     }
   } else if (block.type === "tool_use") {
+    // tool_use 块：累加 user、assistant、tool_calls 参数和 tool results
     if (block.user) {
       total += estimateTokens(extractContent(block.user));
     }
     total += estimateTokens(extractContent(block.assistant));
     // tool_calls 的参数也计入
+    // 将 assistant 中每个 tool_call 的 function arguments 也计入 token
     if ("tool_calls" in block.assistant && Array.isArray(block.assistant.tool_calls)) {
       for (const tc of block.assistant.tool_calls) {
         total += estimateTokens(tc.function.arguments ?? "");
       }
     }
+    // 累加所有 tool result 消息的 content
     for (const tr of block.toolResults) {
       total += estimateTokens(extractContent(tr));
     }
   } else if (block.type === "summary") {
+    // summary 块：只累加摘要消息的 content
     total += estimateTokens(extractContent(block.user));
   }
 
@@ -138,6 +143,7 @@ export function estimateMessagesTokens(
   messages: ChatCompletionMessageParam[],
 ): number {
   let total = 0;
+  // 遍历每条消息，累加 content 和 tool_calls 参数的 token
   for (const msg of messages) {
     total += estimateTokens(extractContent(msg));
     // tool_calls 参数也计入
@@ -184,7 +190,9 @@ export function truncateToTokens(text: string, maxTokens: number): string {
  * @returns timing 字段集合
  */
 function readTiming(msg: ChatCompletionMessageParam): BlockTiming {
+  // 将消息断言为内部类型，以便读取 _ 前缀的 timing 字段
   const annotated = msg as AnnotatedMessage;
+  // 逐个检查内部字段，存在则写入 timing 对象
   const timing: BlockTiming = {};
   if (annotated._turnIndex !== undefined) timing.turnIndex = annotated._turnIndex;
   if (annotated._loopRound !== undefined) timing.loopRound = annotated._loopRound;
@@ -203,6 +211,7 @@ function readTiming(msg: ChatCompletionMessageParam): BlockTiming {
  */
 function mergeTiming(messages: ChatCompletionMessageParam[]): BlockTiming {
   const result: BlockTiming = {};
+  // 读取所有消息的 timing，取每个字段的最小值（即最早时间）
   const timings = messages.map(readTiming);
   const turnIndex = minNumber(timings.map((t) => t.turnIndex));
   const loopRound = minNumber(timings.map((t) => t.loopRound));
@@ -219,11 +228,13 @@ function mergeTiming(messages: ChatCompletionMessageParam[]): BlockTiming {
 }
 
 function minNumber(values: Array<number | undefined>): number | undefined {
+  // 过滤掉 undefined 后取最小值，无有效值则返回 undefined
   const defined = values.filter((value): value is number => value !== undefined);
   return defined.length > 0 ? Math.min(...defined) : undefined;
 }
 
 function applyTiming(block: MessageBlock, timing: BlockTiming): void {
+  // 将 timing 对象的每个字段写入消息块（如果字段存在）
   if (timing.turnIndex !== undefined) block.turnIndex = timing.turnIndex;
   if (timing.loopRound !== undefined) block.loopRound = timing.loopRound;
   if (timing.loopIndex !== undefined) block.loopIndex = timing.loopIndex;
@@ -249,51 +260,82 @@ function applyTiming(block: MessageBlock, timing: BlockTiming): void {
 export function groupToBlocks(
   messages: ChatCompletionMessageParam[],
 ): MessageBlock[] {
+  // 教学导读：
+  // LLM API 看到的是一条条扁平消息，但压缩器需要知道哪些消息属于同一个“语义单元”。
+  // 例如一次工具调用并不是三段互不相关的文本，而是：
+  //   1. 用户提出需求
+  //   2. assistant 发起 tool_calls
+  //   3. tool 返回 tool_result
+  // 这三者必须一起压缩、一起衰减，否则会出现“保留了 tool result，
+  // 却丢了它对应的 assistant tool_call”的非法上下文。
+  //
+  // 因此这里先把扁平消息分组成 MessageBlock：
+  // - text block：普通 user/assistant 对话
+  // - tool_use block：一次 assistant tool_calls 以及其紧随的 tool results
+  // - summary block：历史压缩后生成的摘要消息
   const blocks: MessageBlock[] = [];
-  // 缓冲的 user 消息，等待与 assistant 配对
+
+  // pendingUser 是一个“等待配对”的用户消息。
+  // 用户消息通常会被下一条 assistant 消息回应，所以先暂存在这里；
+  // 等看到 assistant 时，再决定它属于 text block 还是 tool_use block。
   let pendingUser: ChatCompletionMessageParam | undefined;
 
   let i = 0;
+  // 使用索引遍历而不是 for...of：
+  // 当遇到 assistant tool_calls 时，需要一次性向后吞掉多条连续 tool 消息，
+  // 所以循环步长不是固定的 1。
   while (i < messages.length) {
+    // 取出当前消息（非空断言：i 在范围内）
     const msg = messages[i]!;
 
-    // 跳过 system 消息
+    // system prompt 是稳定前缀，不参与历史压缩。
+    // prepareMessages() 会在压缩管道结束后把 system 消息重新插回最前面。
     if (msg.role === "system") {
       i++;
       continue;
     }
 
-    // user 消息：判断是否为 summary，否则缓冲
     if (msg.role === "user") {
       const content = extractContent(msg);
+      // 以 [Context Summary] 开头的 user 消息是压缩器生成的历史摘要。
+      // 它虽然 role 是 user，但语义上不是新的用户请求，而是“历史压缩后的替身”，
+      // 所以要单独做成 summary block，避免后面错误地与 assistant 配对。
       if (content.startsWith("[Context Summary]")) {
         const block: MessageBlock = {
           type: "summary",
           user: msg,
         };
+        // 将消息的内部 timing 元数据提取并写入块
         applyTiming(block, readTiming(msg));
         blocks.push(block);
       } else {
+        // 普通 user 消息先进入缓冲区。
+        // 如果连续出现多条 user，normalizeMessages() 通常已经合并过；
+        // 这里仍然使用单个 pendingUser，是为了保持分组逻辑简单。
         pendingUser = msg;
       }
       i++;
       continue;
     }
 
-    // assistant 消息
     if (msg.role === "assistant") {
+      // assistant 是否包含 tool_calls 是分组的关键分叉：
+      // 有 tool_calls 的 assistant 后面必须跟 tool 消息；
+      // 没有 tool_calls 的 assistant 只是普通文本回复。
       const hasToolCalls =
         "tool_calls" in msg &&
         Array.isArray(msg.tool_calls) &&
         msg.tool_calls.length > 0;
 
       if (hasToolCalls) {
-        // tool_use 块：[user] + assistant + 后续所有 tool 消息
-        // 如果前面有缓冲的 user 消息，一并纳入此块，避免丢失
+        // assistant 有 tool_calls → 收集后续 tool 消息组成 tool_use 块。
+        // OpenAI 协议要求 tool 消息必须紧跟对应 assistant tool_calls；
+        // 因此这里把“assistant + 紧随其后的所有 tool”视为不可拆开的整体。
         const toolResults: ChatCompletionMessageParam[] = [];
         i++; // 跳过 assistant
 
-        // 收集后续的 tool 消息
+        // 收集所有紧跟 assistant 的 tool 消息。
+        // 一条 assistant 可能一次调用多个工具，所以这里不是只取一条。
         while (i < messages.length && messages[i]!.role === "tool") {
           toolResults.push(messages[i]!);
           i++;
@@ -304,11 +346,15 @@ export function groupToBlocks(
           assistant: msg,
           toolResults,
         };
-        // 将缓冲的 user 消息纳入 tool_use 块
         if (pendingUser !== undefined) {
+          // 如果 assistant tool_calls 是为了回应刚才的用户请求，
+          // 就把那个 user 一起并入 tool_use block，保留完整因果链。
           block.user = pendingUser;
           pendingUser = undefined;
         }
+        // block 的 timing 使用块内所有消息的合并结果。
+        // 例如 user 来自 loopRound=0，而 tool result 来自 loopRound=1，
+        // mergeTiming 会保留足够信息供衰减压缩判断。
         applyTiming(
           block,
           mergeTiming([
@@ -319,7 +365,9 @@ export function groupToBlocks(
         );
         blocks.push(block);
       } else {
-        // text 块：user + assistant
+        // assistant 无 tool_calls → 普通文本回复。
+        // 如果前面有 pendingUser，就形成完整的 user/assistant text block；
+        // 如果没有，也允许单独 assistant block，兼容恢复/压缩产生的特殊上下文。
         const block: MessageBlock = {
           type: "text",
           assistant: msg,
@@ -330,20 +378,22 @@ export function groupToBlocks(
           mergeTiming([...(pendingUser ? [pendingUser] : []), msg]),
         );
         blocks.push(block);
+        // user 已配对，清空缓冲
         pendingUser = undefined;
         i++;
       }
       continue;
     }
 
+    // tool 消息未被前面的 assistant 收集（异常情况），跳过避免无限循环
     // tool 消息如果没有被 assistant tool_use 块收集到（理论上不应发生），
     // 跳过它避免无限循环
     i++;
   }
 
-  // 循环结束后，如果还有未配对的 user 消息（通常是当前轮最新的用户 query），
-  // 将其作为一个独立的 text 块加入，避免消息丢失。
   if (pendingUser !== undefined) {
+    // 循环结束后仍有未配对 user，通常表示“当前轮用户刚刚提问，
+    // assistant 还没回答”。这是正常状态，必须保留给下一次 LLM 调用。
     const block: MessageBlock = {
       type: "text",
       user: pendingUser,
@@ -368,8 +418,13 @@ export function flattenToMessages(
 ): ChatCompletionMessageParam[] {
   const result: ChatCompletionMessageParam[] = [];
 
+  // flatten 是 groupToBlocks 的反向操作。
+  // 压缩器处理的是 block，LLM API 需要的是扁平 messages；
+  // 因此在发给 LLM 前必须按协议顺序展开。
+
   for (const block of blocks) {
     if (block.type === "text") {
+      // text 块：按 user → assistant 顺序展开
       if (block.user) {
         result.push(stripTiming(block.user));
       }
@@ -377,6 +432,7 @@ export function flattenToMessages(
         result.push(stripTiming(block.assistant));
       }
     } else if (block.type === "tool_use") {
+      // tool_use 块：按 user → assistant → tool results 顺序展开
       if (block.user) {
         result.push(stripTiming(block.user));
       }
@@ -385,6 +441,7 @@ export function flattenToMessages(
         result.push(stripTiming(tr));
       }
     } else if (block.type === "summary") {
+      // summary 块：只包含 user 消息
       result.push(stripTiming(block.user));
     }
   }
@@ -407,14 +464,18 @@ export function flattenToMessages(
  * 统一转为 string 返回。
  */
 function extractContent(msg: ChatCompletionMessageParam): string {
+  // 根据 content 的不同类型，统一提取为字符串
   const content = msg.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
+    // 只保留带有 text 字段的 block（过滤掉图片等非文本内容）
     return content
       .filter((b): b is { type: "text"; text: string } =>
         typeof b === "object" && b !== null && "text" in b,
       )
+      // 提取每个文本块的 text 字段
       .map((b) => b.text)
+      // 用换行符连接多段文本
       .join("\n");
   }
   return "";
@@ -429,7 +490,9 @@ function extractContent(msg: ChatCompletionMessageParam): string {
 export function stripTiming(
   msg: ChatCompletionMessageParam,
 ): ChatCompletionMessageParam {
+  // 将消息断言为内部类型，以便访问 _ 前缀字段
   const annotated = msg as AnnotatedMessage;
+  // 检查消息是否包含任何内部 timing 字段
   if (
     !("_turnIndex" in annotated) &&
     !("_loopRound" in annotated) &&
@@ -437,9 +500,11 @@ export function stripTiming(
     !("_messageSequence" in annotated) &&
     !("_round" in annotated)
   ) {
+    // 无任何内部字段，直接返回原消息，避免不必要的对象创建
     return msg;
   }
 
+  // 存在内部字段，创建新对象排除这些字段，不修改原消息
   // 创建新对象，排除所有内部 timing 字段
   const {
     _turnIndex,
@@ -449,6 +514,7 @@ export function stripTiming(
     _round,
     ...rest
   } = annotated;
+  // 显式标记这些变量被有意忽略，避免未使用变量警告
   void _turnIndex;
   void _loopRound;
   void _loopIndex;

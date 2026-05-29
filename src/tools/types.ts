@@ -19,6 +19,15 @@
  * 统一返回类型的好处：
  * - Agent 循环不需要为每个工具写不同的处理逻辑
  * - 工具注册表的 executor 类型签名统一
+ *
+ * 设计注意点：
+ * - 普通参数错误、业务拒绝、找不到资源，应该返回 { error: true }
+ *   让 LLM 在下一轮看到错误并修正参数。
+ * - 真正的程序 bug、不可恢复初始化错误，才应该抛异常。
+ *
+ * 常见坑：工具里随手 throw 参数错误。
+ * 这样会跳出 tool_result 协议，Agent 可能无法给对应 tool_call 写回结果，
+ * 进而破坏下一次 LLM 请求的 tool_call/tool_result 配对。
  */
 export interface ToolResult {
   /** 工具执行的输出内容或错误信息 */

@@ -57,20 +57,25 @@ export interface SessionEventBuffer {
  * peek() 返回浅拷贝但不清空。
  */
 export function createSessionEventBuffer(): SessionEventBuffer {
+  // 使用内部数组保存提醒，按 push 顺序排列
   const reminders: SessionReminder[] = [];
 
   return {
     push(reminder: SessionReminder): void {
+      // 将新提醒追加到数组末尾，保持插入顺序
       reminders.push(reminder);
     },
 
     drain(): SessionReminder[] {
+      // 先通过浅拷贝取出当前所有提醒
       const result = reminders.slice();
+      // 清空原数组，确保同一条提醒不会被重复注入
       reminders.length = 0;
       return result;
     },
 
     peek(): SessionReminder[] {
+      // 返回当前数组的浅拷贝，不修改原数组，用于调试或预览
       return reminders.slice();
     },
   };

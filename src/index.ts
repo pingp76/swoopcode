@@ -68,10 +68,33 @@ import { createOutputToolProvider } from "./tools/output.js";
  * 纯组装逻辑：创建组件 → 注入依赖 → 启动 REPL。
  */
 async function main() {
+  // 架构导读：index.ts 是 Composition Root（组装根）。
+  //
+  // 组装根的职责不是写业务逻辑，而是把所有“有状态对象”和“跨模块依赖”
+  // 在一个地方创建清楚、连接清楚。学生读这个文件时应该重点看三件事：
+  //
+  // 1. 哪些实例必须全局共享？
+  //    例如 permissionManager、executionPolicy、outputStore、sessionEventBuffer。
+  //    如果在子智能体或 async run 里重新 create 一份，看似参数相同，
+  //    实际上状态、通知队列、output_id、权限模式都会断开。
+  //
+  // 2. 哪些能力要被过滤？
+  //    主 Agent 可以拿完整 registry；后台子 Agent 只能拿 readonly registry。
+  //    这体现了 agent 架构里的常见套路：不是让所有执行路径共享最大权限，
+  //    而是按执行场景注入不同能力。
+  //
+  // 3. 哪些内容属于稳定前缀，哪些属于动态提醒？
+  //    system prompt / tool definitions 在会话内保持稳定；memory 更新、task active group、
+  //    async/schedule 通知都通过普通消息 reminder 注入，避免破坏 prompt cache。
+
   // 1. 加载配置（从 .env 文件）
   const config = loadConfig();
 
   // 2. 创建项目上下文：集中管理 projectRoot 和 Agent 全局运行目录
+  // 常见坑：直接在各模块里使用 process.cwd()。
+  // 这样会让“被操作项目目录”和“Agent 自身运行数据目录”混在一起。
+  // ProjectContext 把 projectRoot、agentHome、logsDir、memoryDir、tasksDir 等一次性定好，
+  // 后续所有模块都从这里拿路径，边界才不会漂移。
   const projectContext = createProjectContext();
 
   // 3. 创建日志器（同时写入 logs/agent.log，保留 console 输出便于实时观察）
@@ -98,6 +121,10 @@ async function main() {
   );
 
   // 6. 创建会话管理器和原始 transcript 存储
+  // History 和 Transcript 是两个不同层次：
+  // - History 是 prompt working context，会被压缩、替换、整理
+  // - Transcript 是 append-only 原始事件流，用于未来审计/回放
+  // 常见错误是只保留 History，结果 compact 后再也看不到原始过程。
   const sessionManager = createSessionManager({
     projectRoot: projectContext.projectRoot,
     cwd: projectContext.projectRoot,
@@ -113,6 +140,9 @@ async function main() {
   const todoManager = createTodoManager();
 
   // 9. 创建 Skill 管理器并扫描 Agent 全局 skills/ 目录
+  // Skill 是 Agent 自身能力，不是当前项目源码的一部分。
+  // 所以它从 agentHome 派生的全局 skillsDir 读取，而不是写进 projectRoot。
+  // 这能避免 agent 在用户项目里制造隐藏状态，也方便跨项目复用技能。
   const skillManager = createSkillManager(projectContext.skillsDir);
   if (existsSync(projectContext.skillsDir)) {
     skillManager.scan();
@@ -122,12 +152,18 @@ async function main() {
   }
 
   // 10. 创建权限管理器
+  // permissionManager 必须是共享实例。
+  // /mode 命令修改的是这一份实例；主 Agent、subagent provider、async manager
+  // 都引用同一份，才能保证权限模式变化在整个进程中一致可见。
   const permissionManager = createPermissionManager(projectContext.projectRoot);
 
   // 11. 创建 skill 工具提供者
   const skillProvider = createSkillToolProvider(skillManager);
 
   // 12. 创建 Memory 管理器并扫描 Agent 全局 memory/ 目录
+  // Memory 会影响未来会话，因此它也属于 agentHome 全局运行数据。
+  // 但当前会话的 system prompt snapshot 不会因为中途创建 memory 自动改写；
+  // 新 memory 通过 sessionEventBuffer reminder 告知模型，这是 cache-friendly 的取舍。
   const memoryManager = createMemoryManager({
     memoryDir: projectContext.memoryDir,
     logger,
@@ -142,10 +178,17 @@ async function main() {
   }
 
   // 13. 创建会话事件缓冲区（用于收集 out-of-band 状态变化）
+  // sessionEventBuffer 是“动态状态 → LLM 可见提醒”的统一出口。
+  // 设计注意点：不要让工具或 CLI 命令直接改 system prompt；
+  // 它们只 push event，由 agent.run() 在下一轮统一 drain。
   const sessionEventBuffer = createSessionEventBuffer();
 
   // 14. 创建持久化 Task 系统
   //     Task 是 Agent 全局运行数据，默认放在 agentHome/tasks，不写入被操作项目目录。
+  // TaskStore 和 TaskManager 分开是一个重要教学点：
+  // - Store 负责磁盘布局与读写对称校验
+  // - Manager 负责状态机和依赖图
+  // 如果把它们混在工具层，学生会很难区分“参数错”“业务状态错”“磁盘文件坏”。
   const taskStore = createTaskStore({
     tasksDir: projectContext.tasksDir,
     projectRoot: projectContext.projectRoot,
@@ -177,6 +220,10 @@ async function main() {
 
   // 16. 创建 System Prompt Provider（组合 AGENTS.md + Skill hint + Memory hint）
   //     创建时立即生成一次稳定快照，会话内不再自动刷新
+  // 常见坑：每轮都重新拼 system prompt。
+  // 这样虽然“看起来更实时”，但会让 prompt cache 前缀频繁变化，
+  // 也会使一次会话内的行为边界不稳定。本项目选择启动时 snapshot，
+  // 中途变化走 reminder，这是一种工程上常见的稳定前缀设计。
   const systemPromptProvider = createSystemPromptProvider({
     getProjectInstructions: () => projectInstructions,
     getSkillHint: () =>
@@ -202,6 +249,9 @@ async function main() {
 
   // 20. 创建 Hook Runner（注册三个教学演示 handler，仅打印日志不修改对话）
   //     父子 Agent 共享同一个实例，确保子智能体继承父级 Hook
+  // HookRunner 放在组装根创建，而不是在 Agent 内部 new。
+  // 这样未来可以把真实的 hook 配置、测试 hook、审计 hook 注入同一个 Agent，
+  // 也能保证 subagent 使用父级同一套观察点。
   const hookRunner = createHookRunner(
     {
       // SessionStart：会话开始时记录用户输入
@@ -259,6 +309,16 @@ async function main() {
   });
   const executionPolicy = createExecutionPolicy();
   const readonlyCommandPolicy = createReadonlyCommandPolicy(executionPolicy);
+  // ExecutionPolicy 和 PermissionManager 的分工很容易混淆：
+  // - PermissionManager 面向“当前前台用户是否授权”
+  // - ExecutionPolicy 面向“非交互路径拿到授权后，还能执行哪些命令/资源”
+  // Async Run、Schedule、Subagent 都属于非交互或半非交互路径，因此必须额外收窄。
+
+  // OutputStore 是“大输出句柄”边界。
+  // Async Run、Schedule、压缩器都复用同一个实例，确保 output_id 在整个进程内一致可读。
+  // 常见坑：每个模块各自创建 OutputStore。
+  // 这样 async run 写出的 output_id 可能在主 Agent 的 run_output_read 中读不到；
+  // 共享同一实例和同一 outputDir 可以避免 handle 空转。
   const outputStore = createOutputStore({
     outputDir: projectContext.taskOutputsDir,
   });
@@ -279,7 +339,14 @@ async function main() {
         ...config.compression,
         outputDir: projectContext.taskOutputsDir,
       }),
+    // createReadonlyRegistryFn 是能力分层的关键点。
+    // 它不是简单复用主 Agent 的 tools，而是为后台 subagent 重新组装一份“窄工具集”。
+    // 设计套路：共享底层依赖（llm/logger/policy/outputStore），但不共享最大工具能力。
     createReadonlyRegistryFn: (readPaths: string[]) =>
+      // 后台子智能体使用只读 registry：
+      // - 不注册写文件/编辑文件能力
+      // - 不允许继续启动 subagent 或 async run
+      // - run_read 还要受 declared read_paths 限制
       createToolRegistry(
         undefined, // no todo
         undefined, // no subagent (prevent nesting)
@@ -296,6 +363,7 @@ async function main() {
             validate(path: string) {
               const resolvedPath = resolve(projectContext.projectRoot, path);
               // read_paths 为空数组时禁止读取任何项目文件
+              // 这是 fail-closed 设计：调用方没有声明可读范围时，不能默认读整个项目。
               if (readPaths.length === 0) {
                 return {
                   allowed: false,
@@ -303,6 +371,8 @@ async function main() {
                 };
               }
               // 检查路径是否落在任一 declared read_paths 内
+              // 注意比较前先 resolve 到 projectRoot 下。
+              // 直接做字符串前缀比较容易被 "../"、相对路径和同名前缀目录绕过。
               for (const allowedPath of readPaths) {
                 const resolvedAllowed = resolve(
                   projectContext.projectRoot,
@@ -333,6 +403,8 @@ async function main() {
   });
 
   const scheduleManager = createScheduleManager({
+    // ScheduleManager 只负责发现 due occurrence 和触发 Async Run。
+    // Async Run 完成后通过 setOnFinish 回调再写回 occurrence 终态。
     store: scheduleStore,
     asyncRunManager,
     projectRoot: projectContext.projectRoot,
@@ -363,6 +435,10 @@ async function main() {
     llm,
     logger,
     createFilteredRegistry: () =>
+      // 前台 run_subagent 的过滤策略和 async subagent 略有不同：
+      // 它允许 memoryProvider（只读/按权限），但仍不传 task/async/schedule 写类能力。
+      // 这里展示一个常见模式：同一个 createToolRegistry，根据不同 provider 参数
+      // 组装出不同“角色”的工具集。
       createToolRegistry(
         undefined,
         undefined,
@@ -391,6 +467,11 @@ async function main() {
   });
 
   // 22. 创建工具注册表
+  // 主 Agent 的 registry 是能力最完整的一份；子 Agent / async Agent 会创建过滤后的 registry。
+  // 这样“谁能用什么工具”在组装根里一眼可见。
+  // 常见坑：在工具内部临时 import 并调用其他工具。
+  // 那会绕过 registry、permission、hook、transcript 等横切逻辑。
+  // 本项目要求工具能力都通过 registry 暴露，Agent 主循环统一调度。
   const tools = createToolRegistry(
     todoManager,
     subagentProvider,
@@ -404,6 +485,9 @@ async function main() {
   );
 
   // 23. 创建上下文压缩器
+  // 主 Agent 的 compressor 注入 outputStore，表示大输出统一进入 OutputStore。
+  // 子 Agent/async Agent 会创建自己的 compressor 状态，避免 recentFiles/lastSummary
+  // 在父子上下文之间串味；但输出目录仍由 projectContext 统一派生。
   const compressor = createContextCompressor({
     ...config.compression,
     outputDir: projectContext.taskOutputsDir,
@@ -453,6 +537,8 @@ async function main() {
   });
 
   // 启动 Schedule Manager（定时检查器）
+  // scheduleManager.start() 只启动进程内 timer，不会新建额外进程。
+  // 所以退出时也只需要 stop() 清掉 interval。
   scheduleManager.start();
 
   // 进程退出时停止 Schedule Manager，避免遗留 timer

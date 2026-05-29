@@ -318,15 +318,32 @@ export function createTaskStore(options: {
   logger: Logger;
   now?: () => Date;
 }): TaskStore {
+  // 教学导读：
+  // TaskStore 是持久化层，只关心“文件怎么放、读写怎么校验、索引怎么重建”。
+  // 它不决定任务能不能从 pending 变成 completed，那是 tasks.ts 的业务规则。
+  //
+  // 这种分层很适合教学：
+  // - Store 层：保证磁盘数据格式可靠
+  // - Manager 层：保证业务状态机正确
+  // - Tool 层：把 LLM 参数适配到业务调用
+  //
+  // 物理布局：
+  //   <tasksDir>/groups/<group_id>/group.json  是事实来源
+  //   <tasksDir>/index.json                    是派生索引，可重建
+
   const tasksDir = path.resolve(options.tasksDir);
   const groupsDir = path.resolve(tasksDir, "groups");
   const indexPath = path.resolve(tasksDir, "index.json");
   const currentProjectRoot = normalizeProjectRoot(options.projectRoot);
   const logger = options.logger;
   const now = options.now ?? (() => new Date());
+  // 内存缓存保存当前进程已经扫描/读取到的 Task Group。
+  // 磁盘上的 groups/<group_id>/group.json 是真实数据源，index.json 只是派生索引。
   const groups = new Map<string, TaskGroupFile>();
 
   function groupDir(groupId: string): string {
+    // group_id 既是目录名，也是 group.json 内部的 id。
+    // 后续 validateTaskGroupFile 会检查这两个身份必须一致。
     return path.resolve(groupsDir, groupId);
   }
 
@@ -335,12 +352,15 @@ export function createTaskStore(options: {
   }
 
   function loadOne(groupId: string): TaskGroupFile | null {
+    // 读取入口先检查目录名格式，防止异常目录名被拼进路径。
     if (!TASK_GROUP_ID_REGEX.test(groupId)) return null;
     const filePath = groupPath(groupId);
     if (!fs.existsSync(filePath)) return null;
 
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8")) as unknown;
+      // 读取时传 expectedId，保证文件内容 id 与目录名一致。
+      // 这是“物理身份”和“JSON 身份”之间最关键的对称校验。
       const errors = validateTaskGroupFile(parsed, groupId);
       if (errors.length > 0) {
         logger.warn("Task group %s skipped: %s", groupId, errors.join("; "));
@@ -354,6 +374,10 @@ export function createTaskStore(options: {
   }
 
   function writeIndex(): void {
+    // index.json 只保存可重建的查询结构：
+    // - allGroups: 全部合法 group id
+    // - byProjectKey: projectRoot hash 到 group id 列表
+    // 如果 index 损坏，scan() 可以从 group.json 全量重建。
     const byProjectKey: Record<string, string[]> = {};
     const allGroups = [...groups.values()]
       .sort((a, b) => a.id.localeCompare(b.id))
@@ -384,6 +408,8 @@ export function createTaskStore(options: {
 
   return {
     scan() {
+      // scan 是启动恢复路径：清空缓存，从磁盘重新发现合法 group。
+      // 单个坏文件只记录 warn，不阻断整个 Task 系统启动。
       groups.clear();
       fs.mkdirSync(groupsDir, { recursive: true });
       const entries = fs.readdirSync(groupsDir, { withFileTypes: true });
@@ -403,6 +429,8 @@ export function createTaskStore(options: {
         .filter((group) => {
           if (!includeArchived && group.status === "archived") return false;
           if (query.status && group.status !== query.status) return false;
+          // 默认只返回当前项目相关的 group。
+          // 物理存储是 agentHome 全局的，但工具视图默认收窄到当前 projectRoot。
           if (
             currentProjectOnly &&
             !group.projectRoots.includes(currentProjectRoot)
@@ -418,6 +446,7 @@ export function createTaskStore(options: {
     read(groupId) {
       if (!TASK_GROUP_ID_REGEX.test(groupId)) return null;
       const cached = groups.get(groupId);
+      // cloneJson 让调用方只能通过 save() 写回，不能直接改缓存对象。
       if (cached) return cloneJson(cached);
       const loaded = loadOne(groupId);
       if (!loaded) return null;
@@ -427,6 +456,7 @@ export function createTaskStore(options: {
     },
 
     save(group) {
+      // 保存前再次跑完整校验，保证 writer 不会写出 reader 未来会拒绝的数据。
       assertValidForSave(group);
       const finalPath = groupPath(group.id);
 
@@ -457,6 +487,9 @@ export function createTaskStore(options: {
     },
 
     cleanupTempFiles() {
+      // 兼容早期实现遗留的 groups/<id>/.tmp/ 临时目录。
+      // 当前 atomic-write 使用同目录临时文件，不再主动创建这些目录；
+      // 但长期运行的教学项目仍需要能清掉旧版本留下的垃圾文件。
       if (!fs.existsSync(groupsDir)) return;
       const cutoff = now().getTime() - TMP_MAX_AGE_MS;
       for (const entry of fs.readdirSync(groupsDir, { withFileTypes: true })) {
@@ -486,6 +519,8 @@ export function createTaskStore(options: {
 // ============================================================================
 
 function validateTasks(tasks: unknown[], errors: string[]): void {
+  // 第一遍：校验每个 task 自己的形状，并收集所有合法 id。
+  // 依赖关系要等 id 集合收齐后才能判断是否引用缺失任务。
   const ids = new Set<string>();
   const idList: string[] = [];
   for (const rawTask of tasks) {
@@ -529,6 +564,8 @@ function validateTasks(tasks: unknown[], errors: string[]): void {
     }
   }
 
+  // 第二遍：校验 blockedBy 引用。
+  // 这一步需要依赖第一遍收集到的 ids，否则无法判断 dep 是否存在。
   for (const rawTask of tasks) {
     if (!isRecord(rawTask) || typeof rawTask["id"] !== "string") continue;
     const id = rawTask["id"];
@@ -543,11 +580,15 @@ function validateTasks(tasks: unknown[], errors: string[]): void {
     }
   }
 
+  // 第三步：检查依赖图是否成环。
+  // Task 依赖必须是 DAG，否则“等待依赖完成”会永远无法推进。
   const cycle = findCycle(tasks, idList);
   if (cycle) errors.push(`dependency cycle detected: ${cycle.join(" -> ")}`);
 }
 
 function findCycle(tasks: unknown[], ids: string[]): string[] | null {
+  // 构建 adjacency list：task id -> 它依赖的 task id 列表。
+  // blockedBy 表示“我被这些任务阻塞”，在图里就是从当前任务指向依赖任务。
   const deps = new Map<string, string[]>();
   for (const rawTask of tasks) {
     if (!isRecord(rawTask) || typeof rawTask["id"] !== "string") continue;
@@ -564,6 +605,8 @@ function findCycle(tasks: unknown[], ids: string[]): string[] | null {
   const stack: string[] = [];
 
   function visit(id: string): string[] | null {
+    // visiting 表示当前 DFS 路径上的节点。
+    // 再次遇到 visiting 节点，就说明存在环。
     if (visiting.has(id)) {
       const start = stack.indexOf(id);
       return [...stack.slice(start), id];

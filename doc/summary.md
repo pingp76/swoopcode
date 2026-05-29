@@ -10,7 +10,17 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）
+
+## 教学注释增强
+
+- **目标**：补足代码实现内部的中文解释，让学生阅读时不仅知道“函数做什么”，也能理解关键分支为什么这样写
+- **范围**：主循环、消息标准化与分块、消息压缩、权限/执行边界、工具 provider、Task/Schedule/Async Run/OutputStore 持久化与运行态路径、LLM streaming 聚合、原子写与日志轮转
+- **行为边界**：本轮只补充解释性注释，不改变工具 schema、模块接口、运行时状态机或持久化格式
+- **注释风格**：从普通提示型注释升级为讲义型注释；在关键函数开头增加“教学导读”，在状态机、跨模块边界、幂等收敛、数据格式转换、防御性校验旁解释设计原因
+- **自学目标**：学生可以按注释顺序理解“LLM 消息如何整理成合法上下文”、“工具参数如何进入业务层”、“后台任务如何从 running 收敛为终态”、“持久化文件如何保持读写对称”
+- **架构意识补充**：注释显式标出 composition root 共享实例、稳定 prompt 与动态 reminder、History 与 Transcript 分离、ToolResult 与 throw 的边界、Provider Profile 方言收敛、Schedule 与 Async Run 生命周期分离等可迁移设计套路
+- **坑点覆盖**：重点说明 prompt cache 被动态 system prompt 破坏、tool_call/tool_result 配对被插入消息破坏、output path 直接暴露给 LLM、subagent 继承过大权限、Schedule 自己实现执行生命周期、派生状态落盘、错误恢复重试预算跨 turn 复用等常见错误
 
 ## 源码结构
 

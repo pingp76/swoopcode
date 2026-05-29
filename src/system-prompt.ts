@@ -73,12 +73,15 @@ export interface SystemPromptProvider {
  * 3. AGENTS.md 项目指令在最前，然后是 Task/TODO 选择规则、Skill hint、Memory hint
  */
 export function buildSystemPrompt(parts: SystemPromptParts): string | null {
+  // 按固定优先级收集非空片段
   const segments: string[] = [];
   if (parts.projectInstructions) segments.push(parts.projectInstructions);
   if (parts.taskPlanningHint) segments.push(parts.taskPlanningHint);
   if (parts.skillHint) segments.push(parts.skillHint);
   if (parts.memoryHint) segments.push(parts.memoryHint);
+  // 没有任何有效片段时返回 null，避免发送空 system prompt
   if (segments.length === 0) return null;
+  // 用双换行分隔各片段，保证层次清晰
   return segments.join("\n\n");
 }
 
@@ -161,17 +164,19 @@ export function createSystemPromptProvider(deps: {
   getSkillHint: () => string | null;
   getMemoryHint: () => string | null;
 }): SystemPromptProvider {
-  // 内部缓存当前快照
+  // 内部缓存，避免每次 getSnapshot() 都重新组合字符串
   let cachedSnapshot: SystemPromptSnapshot;
 
   /**
    * buildCurrentSnapshot — 根据当前 Skill/Memory hint 构建快照
    */
   function buildCurrentSnapshot(): SystemPromptSnapshot {
+    // 依次获取各片段的当前值
     const projectInstructions = deps.getProjectInstructions?.() ?? null;
     const taskPlanningHint = TASK_PLANNING_SYSTEM_HINT;
     const skillHint = deps.getSkillHint();
     const memoryHint = deps.getMemoryHint();
+    // 组合成完整 system prompt，同时保留各片段用于调试
     return {
       systemPrompt: buildSystemPrompt({
         projectInstructions,
@@ -186,23 +191,26 @@ export function createSystemPromptProvider(deps: {
     };
   }
 
-  // 初始化：创建时立即生成一次快照
+  // 初始化时立即构建一次快照，确保 provider 创建后即可使用
   cachedSnapshot = buildCurrentSnapshot();
 
   return {
+    // 直接返回缓存的快照，不触发重新读取，保证 prompt cache 前缀稳定
     getSnapshot(): SystemPromptSnapshot {
       return cachedSnapshot;
     },
 
+    // 重新读取所有片段并更新缓存，通常在启动或显式 /prompt refresh 时调用
     refreshSnapshot(): SystemPromptSnapshot {
       cachedSnapshot = buildCurrentSnapshot();
       return cachedSnapshot;
     },
 
+    // 根据本轮用户 query 生成动态提醒，不改变稳定的 system prompt
     buildTurnReminders(ctx: TurnPromptContext): SessionReminder[] {
       const reminders: SessionReminder[] = [];
 
-      // 检测用户是否要求本轮忽略 memory
+      // 正则检测用户是否明确要求忽略 memory，匹配中英文多种表达
       if (IGNORE_MEMORY_PATTERN.test(ctx.query)) {
         reminders.push({
           source: "memory",

@@ -273,16 +273,29 @@ export function createAsyncRunToolProvider(
   manager: AsyncRunManager,
   commandPolicy?: AsyncCommandPolicy,
 ): AsyncRunToolProvider {
+  // 教学导读：
+  // ToolProvider 是“LLM 工具协议”和“业务 manager”之间的适配层。
+  // LLM 传进来的是 Record<string, unknown>，因为 JSON.parse 后任何字段都可能缺失、
+  // 类型错误或结构不完整；AsyncRunManager 需要的是已经初步归一化的 StartAsyncRunInput。
+  //
+  // 因此 provider 的职责是：
+  // 1. 做靠近 schema 的友好错误提示，让模型知道应该修正哪个参数；
+  // 2. 把 snake_case tool 参数转换成 TypeScript 内部的 camelCase 字段；
+  // 3. 在进入 manager 前做一层轻量预检，真正的安全边界仍由 manager / policy 再检查。
+
   async function executeStart(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // 提取 executor 和 title，这两个是后续校验的基础
     const executor = String(args["executor"] ?? "");
     const title = String(args["title"] ?? "").trim();
 
+    // title 为必填且不能为空字符串
     if (!title) {
       return { output: "Error: title is required", error: true };
     }
 
+    // executor 必须是两个合法值之一
     if (executor !== "command" && executor !== "subagent") {
       return {
         output: "Error: executor must be 'command' or 'subagent'",
@@ -290,9 +303,11 @@ export function createAsyncRunToolProvider(
       };
     }
 
+    // 根据 executor 类型提取对应的必填参数
     const command = args["command"] ? String(args["command"]) : undefined;
     const prompt = args["prompt"] ? String(args["prompt"]) : undefined;
 
+    // command executor 必须提供 command 参数
     if (executor === "command" && !command) {
       return {
         output: "Error: command is required when executor='command'",
@@ -300,6 +315,7 @@ export function createAsyncRunToolProvider(
       };
     }
 
+    // subagent executor 必须提供 prompt 参数
     if (executor === "subagent" && !prompt) {
       return {
         output: "Error: prompt is required when executor='subagent'",
@@ -307,7 +323,7 @@ export function createAsyncRunToolProvider(
       };
     }
 
-    // resources 必填校验
+    // resources 为必填对象，缺失时直接返回错误
     if (!args["resources"]) {
       return {
         output: "Error: resources is required",
@@ -328,20 +344,26 @@ export function createAsyncRunToolProvider(
       };
     }
     if (!Array.isArray((resources as Record<string, unknown>)["read_paths"])) {
+      // read_paths 是后台任务的资源声明，不只是文档字段。
+      // 前台冲突检测会依赖它判断哪些写操作应该暂时阻止。
       return {
         output: "Error: resources.read_paths must be an array",
         error: true,
       };
     }
     if (!Array.isArray((resources as Record<string, unknown>)["write_paths"])) {
+      // 当前版本 async run 是只读能力，但仍要求调用方传 write_paths。
+      // 这能让 schema 从一开始就表达“任务声明读/写资源”的完整模型。
       return {
         output: "Error: resources.write_paths must be an array",
         error: true,
       };
     }
 
-    // command executor 必须经过 commandPolicy 预检
+    // command executor 必须经过 commandPolicy 预检，拦截危险命令
     if (executor === "command" && command && commandPolicy) {
+      // 这里是用户体验层面的预检：尽早把“不允许的命令”反馈给 LLM。
+      // manager.start() 里面还会再校验一次，避免其他调用路径绕过 provider。
       const validation = commandPolicy.validate(command);
       if (!validation.allowed) {
         return {
@@ -352,10 +374,14 @@ export function createAsyncRunToolProvider(
     }
 
     try {
+      // 所有校验通过后，构建 StartAsyncRunInput 对象
       const startInput: import("../async-runs.js").StartAsyncRunInput = {
         executor: executor as "command" | "subagent",
         title,
       };
+      // 条件附加可选参数，避免传入 undefined
+      // exactOptionalPropertyTypes 开启后，“字段不存在”和“字段值为 undefined”不同。
+      // 因此可选字段都用 if 判断后再赋值，而不是直接写 command: undefined。
       if (command) startInput.command = command;
       if (prompt) startInput.prompt = prompt;
       if (args["group_id"])
@@ -367,6 +393,9 @@ export function createAsyncRunToolProvider(
           read_paths?: string[];
           write_paths?: string[];
         };
+      // timeout_ms 和 max_rounds 需要校验非负数后再传入
+      // 上限校验留给 manager.start()，provider 只做最直观的类型/非负检查；
+      // 这样业务规则集中在 manager，工具层保持薄适配。
       if (args["timeout_ms"] !== undefined) {
         const timeoutMs = Number(args["timeout_ms"]);
         if (timeoutMs < 0) {
@@ -382,6 +411,7 @@ export function createAsyncRunToolProvider(
         startInput.maxRounds = maxRounds;
       }
 
+      // 调用 manager 启动异步运行
       const record = manager.start(startInput);
 
       return {
@@ -389,6 +419,7 @@ export function createAsyncRunToolProvider(
         error: false,
       };
     } catch (err) {
+      // 捕获 manager.start 抛出的异常，统一包装为 ToolResult 返回
       const message =
         err instanceof Error ? err.message : String(err);
       return {
@@ -406,6 +437,8 @@ export function createAsyncRunToolProvider(
       return { output: "Error: run_id is required", error: true };
     }
 
+    // 查询指定 run_id 的运行记录
+    // check 返回的是 manager 的深拷贝结果，工具层可以安全格式化，不会改到内部状态。
     const record = manager.check(runId);
     if (!record) {
       return {
@@ -423,9 +456,11 @@ export function createAsyncRunToolProvider(
   async function executeList(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // status 可选，有值时转为字符串
     const status = args["status"]
       ? String(args["status"])
       : undefined;
+    // 构建查询对象，只附加有值的字段
     const query: import("../async-runs.js").AsyncRunListQuery = {};
     if (status) query.status = status as import("../async-runs.js").AsyncRunStatus;
     if (args["include_terminal"] !== undefined)
@@ -447,6 +482,7 @@ export function createAsyncRunToolProvider(
       return { output: "Error: run_id is required", error: true };
     }
 
+    // max_bytes 可选，传入时校验非负数
     const maxBytes =
       args["max_bytes"] !== undefined
         ? Number(args["max_bytes"])
@@ -456,10 +492,12 @@ export function createAsyncRunToolProvider(
     }
 
     try {
+      // 构建读取输出所需的输入对象
       const readInput: import("../async-runs.js").ReadAsyncRunOutputInput = {
         runId,
       };
       if (maxBytes !== undefined) readInput.maxBytes = maxBytes;
+      // 先读取输出内容，再查询 record 获取 output_id
       const content = manager.readOutput(readInput);
       const record = manager.check(runId);
       return {
@@ -476,6 +514,7 @@ export function createAsyncRunToolProvider(
         error: false,
       };
     } catch (err) {
+      // 读输出异常时捕获并包装为 ToolResult
       const message =
         err instanceof Error ? err.message : String(err);
       return {

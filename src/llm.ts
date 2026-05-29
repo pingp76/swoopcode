@@ -79,6 +79,15 @@ export function createLLMClient(
   config: ResolvedLLMConfig,
   llmLogger?: LLMLogger,
 ): LLMClient {
+  // 设计套路：把 provider 差异收敛在 LLMClient 边界。
+  // agent.ts 只依赖 LLMClient.chat(messages, tools)，不关心：
+  // - baseURL 是 OpenAI 还是 Kimi 兼容端点
+  // - 是否必须 streaming
+  // - 某个 provider 是否需要额外 header 或 reasoning_content
+  //
+  // 常见错误是把这些 if(provider === "...") 散落到 agent 主循环里，
+  // 结果每接一个 provider 都污染核心 Agent 逻辑。
+
   // 创建 OpenAI SDK 客户端，通过 baseURL 重定向到对应的 provider 服务器
   // Kimi Code CN 的 OpenAI 兼容端点要求特定的 User-Agent，否则返回 403
   const defaultHeaders: Record<string, string> =
@@ -94,10 +103,17 @@ export function createLLMClient(
     async chat(messages, tools, cacheDebug) {
       // 消息已由调用方（agent.ts）完成标准化和压缩处理
       // 这里直接使用传入的消息，不再做任何转换
+      //
+      // 重要边界：LLMClient 不负责修复 tool_call/tool_result 顺序。
+      // 那属于 normalize.ts / agent.ts 的协议整理职责。
+      // LLMClient 只处理 provider 传输层兼容性，避免层次混乱。
 
       // Kimi Code 兼容：当 thinking 启用时，包含 tool_calls 的 assistant 消息
       // 必须同时包含 reasoning_content，否则返回 400 错误。
       // 如果历史消息中的 assistant tool call 缺少该字段，补充空字符串占位。
+      // 这是 provider 方言适配的典型例子：
+      // 标准 OpenAI 消息不要求 reasoning_content，但某些兼容接口会要求。
+      // 适配放在这里，agent/history/normalize 都不需要知道这个特殊字段。
       const processedMessages =
         config.provider === "kimi_code_cn"
           ? messages.map((msg) => {
@@ -125,6 +141,8 @@ export function createLLMClient(
 
       // 调用参数：只有当 tools 不为空时才传入 tools 参数
       // 这是因为某些模型在不传 tools 时行为不同（不会尝试调用工具）
+      // 另一个隐藏坑：有些兼容 provider 对 tools: [] 和“不传 tools”
+      // 的处理不同。这里选择无工具时完全省略字段，减少 provider 兼容问题。
       const params =
         tools && tools.length > 0 ? { ...baseParams, tools } : baseParams;
 
@@ -133,6 +151,8 @@ export function createLLMClient(
 
       // 根据 provider 能力选择 streaming 或 non-streaming 路径
       if (config.capabilities.prefersStreaming) {
+        // 两条路径最终都返回同一个 LLMResponse 形状。
+        // 这样 agent.ts 不需要关心 provider 是流式还是非流式，只处理统一结果。
         const result = await chatStreaming(
           client,
           params,
@@ -149,6 +169,8 @@ export function createLLMClient(
       const choice = response.choices?.[0];
       if (!choice) {
         // 记录原始响应结构，帮助诊断 API 异常
+        // 空 choices 不是可恢复的正常响应。
+        // 这里抛错交给 recovery.ts 分类；同时截断日志，避免把超大响应打满终端。
         console.warn(
           "[llm] Empty choices in response: %s",
           JSON.stringify(response).slice(0, 500),
@@ -196,6 +218,14 @@ async function chatStreaming(
   llmLogger: LLMLogger | undefined,
   startTime: number,
 ): Promise<LLMResponse> {
+  // streaming 聚合是 function calling 最容易写错的地方。
+  // 文本 delta 可以简单拼接，但 tool_calls 的 function.arguments 往往被拆成很多片，
+  // 甚至一片只有 "{"，下一片才有字段内容。必须按 tool_call index 累积。
+  //
+  // 常见错误：
+  // - 每个 chunk 都 push 一个 tool_call，导致一次工具调用变成多次
+  // - 忽略 index，多个并行 tool call 的 arguments 混在一起
+  // - finish_reason 只看第一片，错过最后的 length/tool_calls/stop
   const stream = await client.chat.completions.create({
     ...params,
     stream: true,
@@ -220,6 +250,8 @@ async function chatStreaming(
 
   for await (const chunk of stream) {
     const choice = chunk.choices?.[0];
+    // 某些兼容 API 可能发送心跳 chunk 或空 choices。
+    // 空 chunk 不代表失败，只有整个 stream 都没有 choice 才在末尾抛错。
     if (!choice) continue;
     sawChoice = true;
 
@@ -234,6 +266,9 @@ async function chatStreaming(
     if (delta.tool_calls) {
       for (const tc of delta.tool_calls) {
         const idx = tc.index;
+        // OpenAI 风格 streaming 会把同一个 tool call 的字段拆成多片：
+        // 第一片可能只有 id/name，后续多片逐步追加 arguments。
+        // 所以这里必须按 index 找到累积器，而不是把每个 chunk 当成一个完整调用。
         const existing = toolCallAccumulators.get(idx) ?? { arguments: "" };
 
         if (tc.id) {
@@ -277,6 +312,11 @@ async function chatStreaming(
 
   for (const idx of sortedIndices) {
     const acc = toolCallAccumulators.get(idx)!;
+    // id/name/type 理论上应由上游提供，但兼容 provider 可能缺字段。
+    // 这里补默认值是为了让后续 tool_call / tool_result 配对流程仍有稳定结构。
+    //
+    // 注意：如果 name 为空，后续 ToolRegistry 会返回 Unknown tool。
+    // 这里不提前丢弃，是为了保留模型原始意图并让主循环生成可见错误反馈。
     toolCalls.push({
       id: acc.id ?? `call_stream_${idx}`,
       type: acc.type ?? "function",

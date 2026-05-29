@@ -22,15 +22,21 @@ import { randomBytes } from "node:crypto";
  * 失败时会尽力删除临时文件，避免长期运行后留下越来越多的写入残片。
  */
 export function atomicWriteTextFile(filePath: string, content: string): void {
+  // 先把调用方传入的路径规范成绝对路径。
+  // 后续 dirname/basename 都基于 finalPath，避免相对路径受 cwd 变化影响。
   const finalPath = path.resolve(filePath);
   const dir = path.dirname(finalPath);
   fs.mkdirSync(dir, { recursive: true });
 
   const tmpPath = createTempPath(finalPath);
   try {
+    // 先写临时文件，再 rename 到正式文件名。
+    // 在同一目录内 rename 通常是原子的：读者要么看到旧文件，要么看到新文件。
     fs.writeFileSync(tmpPath, content, "utf-8");
     fs.renameSync(tmpPath, finalPath);
   } catch (error) {
+    // 如果写入或 rename 中途失败，尽力删除临时文件。
+    // 这里不吞掉原始错误，调用方仍然需要知道保存失败。
     fs.rmSync(tmpPath, { force: true });
     throw error;
   }
@@ -51,6 +57,8 @@ export function atomicWriteJsonFile(filePath: string, value: unknown): void {
   const tmpPath = createTempPath(finalPath);
   try {
     fs.writeFileSync(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+    // 读回并 parse 一次，是为了发现“序列化结果不是合法 JSON 文件”的底层问题。
+    // 业务字段是否合理仍然由 TaskStore/ScheduleStore/OutputStore 自己检查。
     JSON.parse(fs.readFileSync(tmpPath, "utf-8")) as unknown;
     fs.renameSync(tmpPath, finalPath);
   } catch (error) {
@@ -62,6 +70,7 @@ export function atomicWriteJsonFile(filePath: string, value: unknown): void {
 function createTempPath(finalPath: string): string {
   const dir = path.dirname(finalPath);
   const base = path.basename(finalPath);
+  // pid + 随机后缀降低并发写同一文件时临时文件名碰撞概率。
   const suffix = randomBytes(4).toString("hex");
   return path.join(dir, `.tmp-${base}-${process.pid}-${suffix}`);
 }

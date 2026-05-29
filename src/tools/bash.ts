@@ -68,7 +68,14 @@ export function executeBash(
   cwd?: string,
   timeout?: number,
 ): Promise<ToolResult> {
+  // 教学导读：
+  // bash 工具是最危险、也最能体现 Agent 能力的工具。
+  // 这里实现的是“最小可用版本”：它能执行 shell 命令，但先经过硬性危险命令检查；
+  // 更细的策略（比如只读白名单）由 PermissionManager / ExecutionPolicy / ToolRegistry options
+  // 在调用这个函数之前完成。
+
   // 安全检查：危险命令直接拒绝，不执行
+  // 使用正则匹配已知危险模式，命中则立即返回错误结果，避免调用 exec
   if (isDangerousCommand(command)) {
     return Promise.resolve({
       output: `Command blocked for safety: "${command}" contains a potentially dangerous operation.`,
@@ -77,14 +84,20 @@ export function executeBash(
   }
 
   // 使用 Promise 包装 Node.js 的回调式 API
+  // child_process.exec 基于回调，包装为 Promise 便于在 async/await 流程中使用
+  // 注意：exec 会通过 shell 执行命令，这比 spawn(argv) 更灵活但也更危险。
+  // 教学项目先保留 exec 以便理解工具调用闭环，后续可演进到更严格的 argv 执行模型。
   return new Promise((resolve) => {
     exec(
       command,
       {
-        cwd,
-        timeout: timeout !== undefined && timeout > 0 ? timeout : 30_000, // 超时时间，默认 30 秒
-        maxBuffer: 1024 * 1024, // 最大输出 1MB，防止内存溢出
+        cwd, // 指定命令执行的工作目录，未指定时在 Node.js 当前进程目录执行
+        // 超时时间：如果调用方传入了合法正数则使用，否则默认 30 秒
+        timeout: timeout !== undefined && timeout > 0 ? timeout : 30_000,
+        // 最大输出缓冲区 1MB，防止子进程产生海量输出导致主进程内存溢出
+        maxBuffer: 1024 * 1024,
       },
+      // exec 的回调在命令执行完毕（无论成功或失败）后被调用
       (err, stdout, stderr) => {
         if (err) {
           // 命令执行失败（非零退出码或被信号终止）
@@ -92,6 +105,7 @@ export function executeBash(
           resolve({ output: stderr || err.message, error: true });
         } else {
           // 命令成功执行，返回标准输出
+          // stdout 可能为空字符串，属于正常情况（如无输出的命令）
           resolve({ output: stdout, error: false });
         }
       },

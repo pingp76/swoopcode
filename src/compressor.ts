@@ -150,6 +150,16 @@ interface PersistedToolOutputRef {
 export function createContextCompressor(
   config?: Partial<CompressionConfig>,
 ): ContextCompressor {
+  // 教学导读：
+  // 压缩器处理的是“上下文窗口有限”这个现实约束。
+  // 它分三层工作：
+  // - P1 即时压缩：工具刚返回大输出时，立刻保存完整输出，只把 preview 放进 history
+  // - P0 衰减压缩：旧 tool_result 随着 loopIndex 增长逐渐缩短
+  // - P2 全量压缩：上下文整体超阈值时，把旧 block 合并成 summary
+  //
+  // 这三个层次共同目标是：尽量保留用户意图和最近上下文，
+  // 同时避免把巨大工具输出反复发送给 LLM。
+
   // 合并用户配置和默认配置
   const cfg: CompressionConfig = { ...DEFAULT_CONFIG, ...config };
 
@@ -159,6 +169,8 @@ export function createContextCompressor(
   const recentFiles: string[] = [];
   const persistedPaths: Set<string> = new Set();
   // 追踪已存文件的 toolCallId → 文件相对路径，衰减压缩时用于追加路径引用
+  // 为什么用 toolCallId 做 key？
+  // 因为 tool result 消息里天然带 tool_call_id，衰减时可以从消息反查完整输出位置。
   const persistedToolOutputs: Map<string, PersistedToolOutputRef> = new Map();
 
   // 存储目录路径由组装根注入；若单独使用压缩器，默认也写入 Agent 全局目录。
@@ -173,19 +185,24 @@ export function createContextCompressor(
       toolCallId: string,
       output: string,
     ): CompressedToolResult {
-      // 工具名不在可压缩列表中，直接返回原文
+      // P1 即时压缩发生在工具执行后、tool_result 写入 history 前。
+      // 这样 history 从一开始保存的就是“preview + handle”，而不是完整大输出。
+
+      // 工具名不在可压缩列表中，直接返回原文，不做任何处理
       if (!cfg.compressibleTools.includes(toolName)) {
         return { content: output };
       }
 
+      // 估算输出内容的 token 数量
       const tokens = estimateTokens(output);
 
-      // 未超阈值，直接返回原文
+      // 未超阈值，直接返回原文，避免小题大做
       if (tokens <= cfg.thresholdToolOutput) {
         return { content: output };
       }
 
       try {
+        // 如果注入了 OutputStore，优先使用它进行规范化存储
         if (cfg.outputStore) {
           const record = cfg.outputStore.writeText({
             sourceKind: "tool_result",
@@ -195,8 +212,10 @@ export function createContextCompressor(
           });
           const filePath = resolve(outputDir, record.relativePath);
           persistedPaths.add(filePath);
+          // 追踪 toolCallId → outputId，后续可用 output_id 引用而非裸路径
           persistedToolOutputs.set(toolCallId, { outputId: record.id });
 
+          // 截取前 thresholdToolOutput 个 token 作为预览
           const preview = truncateToTokens(output, cfg.thresholdToolOutput);
           return {
             content:
@@ -211,10 +230,10 @@ export function createContextCompressor(
           };
         }
 
-        // 未注入 OutputStore 时保留旧教学行为：直接写入 outputDir 下的文件。
+        // 未注入 OutputStore 时保留旧教学行为：直接写入 outputDir 下的文件
         const relativePath = `.task_outputs/${toolCallId}.txt`;
         const filePath = resolve(outputDir, `${toolCallId}.txt`);
-        // 确保目录存在
+        // 确保目录存在，防止写入时因目录缺失报错
         if (!existsSync(outputDir)) {
           mkdirSync(outputDir, { recursive: true });
         }
@@ -223,7 +242,7 @@ export function createContextCompressor(
         // 追踪 toolCallId → 文件路径，衰减压缩时用于追加路径引用
         persistedToolOutputs.set(toolCallId, { relativePath });
 
-        // 返回带预览的格式，嵌入 toolCallId 便于 LLM 标识
+        // 返回带预览的格式，嵌入 toolCallId 便于 LLM 后续标识和引用
         const preview = truncateToTokens(output, cfg.thresholdToolOutput);
         return {
           content:
@@ -235,7 +254,7 @@ export function createContextCompressor(
           persistedPath: filePath,
         };
       } catch {
-        // 文件写入失败，降级返回原始输出
+        // 文件写入失败（磁盘满、权限不足等），降级返回原始输出，保证主流程不中断
         return { content: output };
       }
     },
@@ -247,26 +266,31 @@ export function createContextCompressor(
       blocks: MessageBlock[],
       currentLoopIndex: number,
     ): MessageBlock[] {
+      // P0 衰减压缩发生在每次 LLM 调用前。
+      // 它不会改写 history，只影响本次发给 LLM 的消息列表。
+      // 因此它是“视图级压缩”：安全、可重复、不会丢失真实历史记录。
       return blocks.map((block) => {
         // 没有时间信息的块，不处理。loopIndex 是新版年龄基准，
         // round 只作为旧测试和旧调用点的兼容 fallback。
         const blockLoopIndex = block.loopIndex ?? block.round;
         if (blockLoopIndex === undefined) return block;
 
-        // 判断是否为"旧"块：年龄表示已经经过多少次 LLM 思考循环。
+        // 计算该块距离当前循环的"年龄"，年龄越大表示越旧
         const age = currentLoopIndex - blockLoopIndex;
+        // 未达到衰减阈值的新块保持原样
         if (age <= cfg.decayThreshold) return block;
 
-        // text 块和 summary 块：不修改
+        // text 块和 summary 块：不修改，保留完整语义
         if (block.type === "text" || block.type === "summary") return block;
 
-        // tool_use 块：截断 tool result 的 content
+        // tool_use 块：对 tool result 进行截断，减少旧工具结果占用的上下文空间
         if (block.type === "tool_use") {
           const truncatedResults = block.toolResults.map((tr) => {
             const content = typeof tr.content === "string" ? tr.content : "";
+            // 将内容截断到配置的预览 token 数
             const truncated = truncateToTokens(content, cfg.decayPreviewTokens);
 
-            // 检查该 toolCallId 是否有已存文件，有则追加路径引用
+            // 检查该 toolCallId 是否有已存文件，有则追加路径引用供 LLM 读取完整内容
             const tcId =
               "tool_call_id" in tr
                 ? (tr as { tool_call_id: string }).tool_call_id
@@ -278,13 +302,14 @@ export function createContextCompressor(
               ? `${truncated}\n${formatPersistedOutputRef(persistedRef)}`
               : truncated;
 
-            // 创建新的 tool 消息，保留 tool_call_id
+            // 创建新的 tool 消息，保留原始 tool_call_id，仅替换 content
             return {
               ...tr,
               content: finalContent,
             } as ChatCompletionMessageParam;
           });
 
+          // 返回新的 block，替换 toolResults 为截断后的版本
           return {
             ...block,
             toolResults: truncatedResults,
@@ -299,13 +324,17 @@ export function createContextCompressor(
     // P2 全量压缩
     // -----------------------------------------------------------------------
     compactHistory(blocks: MessageBlock[]): CompactResult {
+      // P2 全量压缩用于上下文即将超窗的情况。
+      // 它把旧 block 合并成 summary block，只保留最近 keepCount 个 block 原文。
+      // 与 P0 不同，某些恢复路径会把 compact 后的结果写回 history，
+      // 所以这里尽量把用户意图、工具调用、文件路径等关键信息写入 summary。
       const keepCount = cfg.compactKeepRecent;
 
-      // 分离需要保留的块和需要压缩的块
+      // 分离需要保留的块和需要压缩的块：末尾 keepCount 个保留，前面的全部压缩
       const recentBlocks = blocks.slice(-keepCount);
       const oldBlocks = blocks.slice(0, Math.max(0, blocks.length - keepCount));
 
-      // 如果没有旧块需要压缩，直接返回
+      // 如果没有旧块需要压缩，直接返回原列表，避免无意义处理
       if (oldBlocks.length === 0) {
         return {
           blocks,
@@ -313,10 +342,10 @@ export function createContextCompressor(
         };
       }
 
-      // 按类型压缩旧块，构建摘要文本
+      // 按类型遍历旧块，提取关键信息构建摘要文本
       const summaryLines: string[] = [];
 
-      // 如果之前已有摘要，先加入
+      // 如果之前已有摘要，先加入，实现多层摘要的级联压缩
       if (lastSummary) {
         summaryLines.push(lastSummary);
         summaryLines.push("---");
@@ -328,11 +357,11 @@ export function createContextCompressor(
           const assistantContent = block.assistant
             ? extractText(block.assistant)
             : "";
-          // user 消息全文保留（意图不可丢失）
+          // user 消息全文保留（用户意图不可丢失）
           if (userContent) {
             summaryLines.push(`User: ${userContent}`);
           }
-          // assistant 回复保留最后一条（简短）
+          // assistant 回复保留最后一条（简短），控制摘要长度
           if (assistantContent) {
             summaryLines.push(
               `Assistant: ${truncateToTokens(assistantContent, 200)}`,
@@ -341,7 +370,7 @@ export function createContextCompressor(
         } else if (block.type === "tool_use") {
           // 从 assistant 的 tool_calls 提取工具名和参数概要
           const callSummaries = extractToolCallSummaries(block.assistant);
-          // 从 tool results 提取结果概要
+          // 从 tool results 提取结果概要，每个结果截断到 100 token
           const resultSummaries = block.toolResults.map((tr) => {
             const content = extractText(tr);
             return `[${truncateToTokens(content, 100)}]`;
@@ -350,22 +379,22 @@ export function createContextCompressor(
             `Tool: ${callSummaries.join(", ")} → ${resultSummaries.join(", ")}`,
           );
 
-          // 追踪文件路径（从 run_read/run_write/run_edit 工具调用中提取）
+          // 追踪文件路径（从 run_read/run_write/run_edit 工具调用中提取），用于后续提示
           extractFilePaths(block.assistant).forEach((f) => {
             if (!recentFiles.includes(f)) {
               recentFiles.push(f);
             }
           });
         } else if (block.type === "summary") {
-          // 之前的 summary 块：保留文本
+          // 之前的 summary 块：保留其文本，纳入新摘要
           summaryLines.push(extractText(block.user));
         }
       }
 
-      // 构建摘要消息
+      // 将所有摘要行拼接为一段文本，加上标识头便于识别
       const summaryText = `[Context Summary]\n${summaryLines.join("\n")}`;
 
-      // 创建 summary 消息块
+      // 创建 summary 消息块，继承第一个旧块的时间/序列属性以保持排序稳定
       const firstOldBlock = oldBlocks[0];
       const firstRound = firstOldBlock?.round;
       const firstTurnIndex = firstOldBlock?.turnIndex;
@@ -390,6 +419,7 @@ export function createContextCompressor(
               } as ChatCompletionMessageParam,
             };
 
+      // 如果原 block 有扩展字段，也复制到 summaryBlock 上，防止后续逻辑丢失信息
       if (firstTurnIndex !== undefined) summaryBlock.turnIndex = firstTurnIndex;
       if (firstLoopRound !== undefined) summaryBlock.loopRound = firstLoopRound;
       if (firstLoopIndex !== undefined) summaryBlock.loopIndex = firstLoopIndex;
@@ -397,10 +427,11 @@ export function createContextCompressor(
         summaryBlock.messageSequence = firstMessageSequence;
       }
 
-      // 更新内部状态
+      // 更新内部状态，标记已完成过全量压缩并保存最新摘要
       hasCompacted = true;
       lastSummary = summaryText;
 
+      // 返回压缩后的消息列表：summary 块 + 保留的最近块
       return {
         blocks: [summaryBlock, ...recentBlocks],
         summary: summaryText,
@@ -411,10 +442,12 @@ export function createContextCompressor(
     // 状态访问
     // -----------------------------------------------------------------------
     getState(): CompressorState {
+      // 组装当前压缩器状态，recentFiles 用展开运算符做浅拷贝防止外部修改
       const state: CompressorState = {
         hasCompacted,
         recentFiles: [...recentFiles],
       };
+      // 只有存在摘要时才加入字段，保持返回对象简洁
       if (lastSummary !== undefined) {
         state.lastSummary = lastSummary;
       }
@@ -429,11 +462,13 @@ export function createContextCompressor(
       // 注入 OutputStore 后，输出是登记过的 Agent artifact，不能由 compressor cleanup 删除。
       if (!cfg.outputStore && existsSync(outputDir)) {
         try {
+          // 递归强制删除临时输出目录及其所有内容
           rmSync(outputDir, { recursive: true, force: true });
         } catch {
-          // 清理失败不影响主流程
+          // 清理失败不影响主流程，静默吞掉异常
         }
       }
+      // 清空内部追踪集合，防止后续调用引用已删除的文件
       persistedPaths.clear();
       persistedToolOutputs.clear();
     },
@@ -456,7 +491,9 @@ function formatPersistedOutputRef(ref: PersistedToolOutputRef): string {
  */
 function extractText(msg: ChatCompletionMessageParam): string {
   const content = msg.content;
+  // content 为字符串时直接返回
   if (typeof content === "string") return content;
+  // content 为数组时（如多模态消息），过滤出 text 类型的块并拼接
   if (Array.isArray(content)) {
     return content
       .filter(
@@ -466,6 +503,7 @@ function extractText(msg: ChatCompletionMessageParam): string {
       .map((b) => b.text)
       .join("\n");
   }
+  // 其他情况（如 null 或不存在）返回空字符串
   return "";
 }
 
@@ -477,22 +515,23 @@ function extractText(msg: ChatCompletionMessageParam): string {
 function extractToolCallSummaries(
   assistant: ChatCompletionMessageParam,
 ): string[] {
+  // 该消息不含 tool_calls 时返回空数组
   if (!("tool_calls" in assistant) || !Array.isArray(assistant.tool_calls)) {
     return [];
   }
   return assistant.tool_calls.map((tc) => {
     const name = tc.function.name;
-    // 从参数中提取简短概要
+    // 尝试解析参数 JSON，提取第一个参数作为摘要内容
     try {
       const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-      // 取第一个参数的值作为概要
+      // 取第一个参数的值作为概要（通常是路径或关键输入）
       const firstValue = Object.values(args)[0];
       if (firstValue !== undefined && firstValue !== null) {
         const short = truncateToTokens(String(firstValue), 50);
         return `${name}(${short})`;
       }
     } catch {
-      // JSON 解析失败，直接用原始字符串
+      // JSON 解析失败（如参数不合法），回退为省略号格式
     }
     return `${name}(...)`;
   });
@@ -505,17 +544,19 @@ function extractToolCallSummaries(
  */
 function extractFilePaths(assistant: ChatCompletionMessageParam): string[] {
   const paths: string[] = [];
+  // 该消息不含 tool_calls 时直接返回
   if (!("tool_calls" in assistant) || !Array.isArray(assistant.tool_calls)) {
     return paths;
   }
+  // 遍历每个 tool_call，尝试从参数中提取文件路径
   for (const tc of assistant.tool_calls) {
     try {
       const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-      // 常见的文件路径参数名
+      // 常见的文件路径参数名：path 和 filePath
       if (typeof args["path"] === "string") paths.push(args["path"]);
       if (typeof args["filePath"] === "string") paths.push(args["filePath"]);
     } catch {
-      // 忽略解析失败
+      // 参数 JSON 解析失败，跳过该 tool_call
     }
   }
   return paths;

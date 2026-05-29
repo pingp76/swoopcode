@@ -46,7 +46,7 @@ const memoryCreateDef: ChatCompletionTool = {
   function: {
     name: "run_memory_create",
     description:
-      "Create or update a long-term memory. Use when the user explicitly asks to " +
+      'Create or update a long-term memory. Use when the user explicitly asks to ' +
       '"remember" something, or when the user confirms a suggested memory. ' +
       "Memory persists across sessions, so only store information that will be " +
       "valuable in many future conversations. Before creating a new memory, check " +
@@ -153,6 +153,16 @@ export function createMemoryToolProvider(
     sessionEventBuffer?: SessionEventBuffer;
   },
 ): MemoryToolProvider {
+  // 设计导读：
+  // Memory 工具操作的是“会影响未来会话的长期知识”，比 TODO/Task 更敏感。
+  // 因此工具层做了更严格的参数校验和重复检测：
+  // - name 只能是安全文件名字符，避免路径穿越
+  // - description 必须单行，避免索引格式混乱
+  // - create 前先 findSimilar，避免模型反复写入语义重复记忆
+  //
+  // 注意：Memory 创建/删除不会立即重写当前会话的 stable system prompt。
+  // 它通过 sessionEventBuffer 告知后续轮次，这是 prompt cache 稳定性与实时性的取舍。
+
   const sessionEventBuffer = options?.sessionEventBuffer;
   /**
    * executeMemoryCreate — run_memory_create 的执行函数
@@ -163,13 +173,15 @@ export function createMemoryToolProvider(
   async function executeMemoryCreate(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
+    // 从 LLM 传入的参数中提取各字段，缺失时默认转为空字符串
     const name = String(args["name"] ?? "");
     const description = String(args["description"] ?? "");
     const type = String(args["type"] ?? "");
     const body = String(args["body"] ?? "");
+    // allow_duplicate 只接受显式 true，其他值视为 false
     const allowDuplicate = args["allow_duplicate"] === true;
 
-    // 参数校验
+    // 参数校验：必填字段不能为空
     if (!name.trim()) {
       return { output: "Error: 'name' is required.", error: true };
     }
@@ -179,6 +191,7 @@ export function createMemoryToolProvider(
     if (!body.trim()) {
       return { output: "Error: 'body' is required.", error: true };
     }
+    // description 必须是单行，换行会导致格式混乱
     if (description.includes("\n")) {
       return {
         output: "Error: 'description' must be a single line.",
@@ -186,7 +199,7 @@ export function createMemoryToolProvider(
       };
     }
 
-    // name 格式校验（防止路径穿越）
+    // name 格式校验（防止路径穿越）：只允许小写字母、数字、下划线和连字符
     if (!/^[a-z0-9_-]+$/.test(name)) {
       return {
         output:
@@ -195,7 +208,7 @@ export function createMemoryToolProvider(
       };
     }
 
-    // type 合法性校验
+    // type 合法性校验：必须是预定义的四个枚举值之一
     const validTypes = ["user", "feedback", "project", "reference"];
     if (!validTypes.includes(type)) {
       return {
@@ -211,8 +224,13 @@ export function createMemoryToolProvider(
         type: type as "user" | "feedback" | "project" | "reference",
         body,
       };
+      // 先查找是否已有语义相似的 memory，避免无意义的重复创建
+      // 这是一个教学上很有价值的策略：长期记忆不是 append-only 垃圾桶。
+      // 模型很容易把同一条偏好换个说法写很多遍，后续 prompt 会越来越嘈杂。
+      // 先阻止疑似重复，让模型或用户决定是否真的需要新条目。
       const similar = manager.findSimilar(input);
       if (similar.length > 0 && !allowDuplicate) {
+        // 发现潜在重复时，列出所有相似项供 LLM 决策
         const lines = similar.map(
           (item) =>
             `  - [${item.entry.meta.type}] ${item.entry.meta.name}: ${item.entry.meta.description} (${item.reason})`,
@@ -229,11 +247,15 @@ export function createMemoryToolProvider(
         };
       }
 
+      // 通过所有校验后，调用 manager 真正创建 memory
       const entry = manager.create(input);
       const outputLines = [
         `Memory saved: [${entry.meta.type}] ${entry.meta.name}: ${entry.meta.description}`,
         "Note: the stable system prompt memory snapshot is unchanged for cache stability. Use run_memory_list/read for the latest memory if needed.",
       ];
+      // 如果有会话事件缓冲区，推送提醒，让后续轮次知道 memory 已变更
+      // 这里不直接修改 system prompt，也不强制重新 scan。
+      // 当前轮模型已经拿到了旧 prompt 前缀；强行替换会破坏 cache 和可解释性。
       if (sessionEventBuffer) {
         sessionEventBuffer.push({
           source: "memory",
@@ -246,6 +268,7 @@ export function createMemoryToolProvider(
         error: false,
       };
     } catch (err) {
+      // 捕获 manager 抛出的异常，统一包装为 ToolResult 错误返回
       return {
         output: `Error: ${err instanceof Error ? err.message : String(err)}`,
         error: true,
@@ -259,11 +282,14 @@ export function createMemoryToolProvider(
    * 返回索引风格的列表，不返回完整正文。
    */
   async function executeMemoryList(): Promise<ToolResult> {
+    // 获取所有 memory 的元数据列表
     const metas = manager.list();
+    // 空列表时给出明确提示
     if (metas.length === 0) {
       return { output: "No memories stored.", error: false };
     }
 
+    // 将每个 memory 的元数据格式化为 "- [type] name: description" 的行
     const lines = metas.map(
       (m) => `  - [${m.type}] ${m.name}: ${m.description}`,
     );
@@ -286,6 +312,7 @@ export function createMemoryToolProvider(
       return { output: "Error: 'name' is required.", error: true };
     }
 
+    // 从 manager 读取指定 name 的 memory
     const entry = manager.read(name);
     if (!entry) {
       return { output: `Error: Memory "${name}" not found.`, error: true };
@@ -317,7 +344,7 @@ export function createMemoryToolProvider(
       return { output: "Error: 'name' is required.", error: true };
     }
 
-    // 防止路径穿越
+    // 删除前同样校验 name 格式，防止路径穿越攻击
     if (!/^[a-z0-9_-]+$/.test(name)) {
       return {
         output: "Error: Invalid name format.",
@@ -325,12 +352,16 @@ export function createMemoryToolProvider(
       };
     }
 
+    // 调用 manager.delete，返回是否成功删除
     const deleted = manager.delete(name);
     if (deleted) {
       const outputLines = [
         `Memory "${name}" deleted.`,
         "Note: the stable system prompt memory snapshot may still mention it until prompt snapshot refresh.",
       ];
+      // 删除成功时同样推送事件提醒，告知后续轮次快照尚未刷新
+      // corner case：当前 system prompt 可能仍包含刚删除的 memory。
+      // 所以工具输出和 reminder 都明确告诉模型“snapshot 可能还没刷新”。
       if (sessionEventBuffer) {
         sessionEventBuffer.push({
           source: "memory",
@@ -339,6 +370,7 @@ export function createMemoryToolProvider(
       }
       return { output: outputLines.join("\n"), error: false };
     }
+    // name 不存在时返回错误
     return { output: `Error: Memory "${name}" not found.`, error: true };
   }
 
