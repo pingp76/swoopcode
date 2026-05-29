@@ -171,9 +171,9 @@ const runScheduleCreateDefinition: ChatCompletionTool = {
             },
             permission_profile: {
               type: "string",
-              enum: ["readonly", "ci"],
+              enum: ["readonly"],
               description:
-                "Permission boundary: 'readonly' for read-only checks, 'ci' for test/build/lint commands.",
+                "Permission boundary. The current implementation exposes only 'readonly'; broader profiles are reserved for a later ExecutionPolicy lesson.",
               default: "readonly",
             },
             resources: {
@@ -197,12 +197,9 @@ const runScheduleCreateDefinition: ChatCompletionTool = {
         },
         output_policy: {
           type: "object",
-          description: "What to do with the output after execution",
+          description:
+            "What to do with the output after execution. Raw-output suppression and linked Task updates are reserved for a later lesson and are not configurable in the current implementation.",
           properties: {
-            save_raw_output: {
-              type: "boolean",
-              default: true,
-            },
             notify_llm: {
               type: "boolean",
               default: true,
@@ -210,11 +207,6 @@ const runScheduleCreateDefinition: ChatCompletionTool = {
             summary_prompt: {
               type: "string",
               description: "Optional prompt for summarizing results",
-            },
-            linked_task_update: {
-              type: "string",
-              enum: ["never", "append_note", "mark_failed_on_failure"],
-              default: "never",
             },
           },
         },
@@ -228,7 +220,8 @@ const runScheduleListDefinition: ChatCompletionTool = {
   type: "function",
   function: {
     name: "run_schedule_list",
-    description: "List schedules. Default shows active and completed schedules for the current project.",
+    description:
+      "List schedules. Default shows active and completed schedules for the current project only. Set current_project_only=false only when the user explicitly asks for a cross-project summary.",
     parameters: {
       type: "object",
       properties: {
@@ -241,6 +234,12 @@ const runScheduleListDefinition: ChatCompletionTool = {
           type: "boolean",
           description: "Include cancelled schedules (default false)",
           default: false,
+        },
+        current_project_only: {
+          type: "boolean",
+          description:
+            "When true or omitted, list only schedules for the current project. Set false for an explicit cross-project summary.",
+          default: true,
         },
       },
     },
@@ -363,6 +362,8 @@ function formatScheduleView(
         status: o.status,
         scheduled_at: o.scheduledAt,
         async_run_id: o.asyncRunId ?? null,
+        output_id: o.outputId ?? null,
+        output_ref: o.outputRef ?? null,
       })),
     },
     null,
@@ -404,6 +405,8 @@ function formatOccurrenceList(
         fired_at: o.firedAt ?? null,
         completed_at: o.completedAt ?? null,
         async_run_id: o.asyncRunId ?? null,
+        output_id: o.outputId ?? null,
+        output_ref: o.outputRef ?? null,
         reason: o.reason ?? null,
       })),
     },
@@ -572,7 +575,7 @@ export function createScheduleToolProvider(
       ? Number(execution["timeout_seconds"])
       : 300;
     const overlapPolicy = String(execution["overlap_policy"] ?? "skip") as "allow" | "skip";
-    const permissionProfile = String(execution["permission_profile"] ?? "readonly") as "readonly" | "ci";
+    const permissionProfile = "readonly";
 
     const outputPolicyRaw = args["output_policy"];
     const outputPolicy = outputPolicyRaw && typeof outputPolicyRaw === "object" && !Array.isArray(outputPolicyRaw)
@@ -592,9 +595,9 @@ export function createScheduleToolProvider(
         resources: { readPaths, writePaths },
       },
       outputPolicy: {
-        saveRawOutput: outputPolicy["save_raw_output"] !== false,
+        saveRawOutput: true,
         notifyLlm: outputPolicy["notify_llm"] !== false,
-        linkedTaskUpdate: (outputPolicy["linked_task_update"] as "never" | "append_note" | "mark_failed_on_failure") ?? "never",
+        linkedTaskUpdate: "never",
       },
     };
     if (args["description"] !== undefined) {
@@ -643,6 +646,9 @@ export function createScheduleToolProvider(
     }
     if (args["include_cancelled"] !== undefined) {
       query.includeCancelled = Boolean(args["include_cancelled"]);
+    }
+    if (args["current_project_only"] !== undefined) {
+      query.currentProjectOnly = Boolean(args["current_project_only"]);
     }
 
     const schedules = manager.list(query);

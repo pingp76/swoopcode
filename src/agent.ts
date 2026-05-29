@@ -21,17 +21,17 @@
  * - 第 3 轮：LLM 看到运行结果，生成最终的文字回复给用户
  *
  * 内部步骤函数（从 run() 主循环中提取，各自职责明确）：
- * - appendMessage(): 向 history 添加消息（round 元信息由 history 统一管理）
- * - prepareMessages(): 消息处理管道（从 history 读取带 round 的条目 → normalize → group → decay → compact → flatten）
+ * - appendMessage(): 向 history 添加消息（timing 元信息由 history 统一管理）
+ * - prepareMessages(): 消息处理管道（从 history 读取带 timing 的条目 → normalize → group → decay → compact → flatten）
  * - handleToolCalls(): 工具调用循环（解析参数 → 执行 → P1 压缩 → 回写历史）
- * - buildRoundLimitResponse(): 子智能体轮次上限检测与截断响应
+ * - buildLoopRoundLimitResponse(): 子智能体 turn 内轮次上限检测与截断响应
  */
 
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { Logger } from "./logger.js";
 import type { LLMClient } from "./llm.js";
-import type { History, HistoryEntry } from "./history.js";
+import type { History, HistoryEntry, HistoryEntryInput } from "./history.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import type { TodoManager } from "./todo.js";
 import type { ContextCompressor } from "./compressor.js";
@@ -42,6 +42,7 @@ import type { SessionEventBuffer } from "./session-events.js";
 import type { TranscriptStore } from "./transcript.js";
 import type { AsyncRunManager } from "./async-runs.js";
 import type { ScheduleManager } from "./schedules.js";
+import type { MessageTimingInput } from "./timeline.js";
 import { createNoopHookRunner } from "./hooks.js";
 import { normalizeMessages } from "./normalize.js";
 import {
@@ -159,41 +160,51 @@ export function createAgent(deps: {
   // 它们共享 createAgent 闭包中的 history、tools、compressor 等变量，
   // 不改变外部行为。
   //
-  // 注意：round 元信息由 history 统一管理，不再需要 agent 维护平行数组。
+  // 注意：timing 元信息由 history 统一管理，不再需要 agent 维护平行数组。
   // =====================================================================
+
+  // turnIndex：第几次外部用户输入。loopIndex：Agent 实例内第几次 LLM 调用。
+  // 两者都放在 createAgent 闭包中，保证同一个 Agent 实例内单调递增。
+  let nextTurnIndex = 0;
+  let nextLoopIndex = 0;
 
   /**
    * appendMessage — 向 history 添加消息
    *
-   * 封装 history.add(message, { round }) 调用。
-   * round 元信息由 history 内部统一管理，无需额外维护平行数组。
+   * 封装 history.add(message, timing) 调用。
+   * timing 元信息由 history 内部统一管理，无需额外维护平行数组。
    */
   function appendMessage(
     message: ChatCompletionMessageParam,
-    round: number,
+    timing: MessageTimingInput,
   ): void {
-    history.add(message, { round });
+    const entry = history.add(message, timing);
     // transcript 是 append-only 原始事件流，专门服务未来搜索/回放/分析。
     // 它不参与 prepareMessages，也不会因为 compact 而被改写。
     if (transcriptStore && sessionId) {
-      transcriptStore.appendMessage({ sessionId, round, message });
+      transcriptStore.appendMessage({
+        sessionId,
+        timing,
+        historySequence: entry.messageSequence,
+        message,
+      });
     }
   }
 
   /**
    * prepareMessages — 消息处理管道
    *
-   * 完整流程：从 history 读取带 round 的条目 → 标注 _round → normalize → group → decay → [compact] → flatten。
+   * 完整流程：从 history 读取带 timing 的条目 → 标注内部字段 → normalize → group → decay → [compact] → flatten。
    * 如果压缩过程中任何环节出错，降级使用标准化后的消息。
    *
    * system prompt 独立于压缩管道：在最后拼接到消息列表头部。
    * 因为 groupToBlocks 会跳过 system 消息，放入管道会导致丢失。
    *
-   * @param roundCount - 当前 agent loop 轮次，用于衰减压缩判断
+   * @param currentLoopIndex - 当前 Agent 实例内全局 LLM loop 序号，用于衰减压缩判断
    * @returns 最终给 LLM 的消息列表
    */
-  function prepareMessages(roundCount: number): ChatCompletionMessageParam[] {
-    // 从 history 获取带 round 元信息的条目（不含 system prompt）
+  function prepareMessages(currentLoopIndex: number): ChatCompletionMessageParam[] {
+    // 从 history 获取带 timing 元信息的条目（不含 system prompt）
     const entries = history.getEntries();
 
     // system prompt 独立于压缩管道处理：
@@ -215,7 +226,7 @@ export function createAgent(deps: {
       const blocks = groupToBlocks(normalized);
 
       // P0 衰减压缩：缩短旧的工具结果
-      const decayed = compressor.decayOldBlocks(blocks, roundCount);
+      const decayed = compressor.decayOldBlocks(blocks, currentLoopIndex);
 
       // P2 全量压缩：上下文超过阈值时触发
       let finalBlocks = decayed;
@@ -258,28 +269,28 @@ export function createAgent(deps: {
   }
 
   /**
-   * annotateEntries — 将 HistoryEntry[] 转换为带 _round 元数据的消息列表
+   * annotateEntries — 将 HistoryEntry[] 转换为带内部 timing 元数据的消息列表
    *
    * 替代之前的 annotateWithRounds()：
-   * - round 信息来自 history 内部，不再需要 agent 维护平行数组
+   * - timing 信息来自 history 内部，不再需要 agent 维护平行数组
    * - system prompt 在 prepareMessages 中独立处理，不再插入此列表
-   * - 每个 entry 自带 round，无对齐风险
+   * - 每个 entry 自带 messageSequence 和 timing，无对齐风险
    */
   function annotateEntries(
     entries: HistoryEntry[],
   ): ChatCompletionMessageParam[] {
     const result: ChatCompletionMessageParam[] = [];
 
-    // 将 entry 转换为带 _round 的消息
+    // 将 entry 转换为带内部 timing 字段的消息
     for (const entry of entries) {
-      if (entry.round !== undefined) {
-        result.push({
-          ...entry.message,
-          _round: entry.round,
-        } as unknown as ChatCompletionMessageParam);
-      } else {
-        result.push(entry.message);
-      }
+      result.push({
+        ...entry.message,
+        ...(entry.turnIndex !== undefined ? { _turnIndex: entry.turnIndex } : {}),
+        ...(entry.loopRound !== undefined ? { _loopRound: entry.loopRound } : {}),
+        ...(entry.loopIndex !== undefined ? { _loopIndex: entry.loopIndex } : {}),
+        _messageSequence: entry.messageSequence,
+        ...(entry.round !== undefined ? { _round: entry.round } : {}),
+      } as unknown as ChatCompletionMessageParam);
     }
 
     return result;
@@ -296,11 +307,11 @@ export function createAgent(deps: {
    * 5. 通过 appendMessage() 回写历史
    *
    * @param toolCalls - LLM 返回的工具调用列表
-   * @param roundCount - 当前轮次
+   * @param timing - 当前 turn / loop timing
    */
   async function handleToolCalls(
     toolCalls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[],
-    roundCount: number,
+    timing: MessageTimingInput,
   ): Promise<void> {
     // 延迟注入缓冲区：Hook 的 exitCode 2 消息不能在 tool_result 之间插入，
     // 否则会破坏 OpenAI API 的 tool_call / tool_result 配对规则。
@@ -316,7 +327,7 @@ export function createAgent(deps: {
             tool_call_id: toolCall.id,
             content: "Tool execution skipped: async run timed out",
           } as ChatCompletionMessageParam,
-          roundCount,
+          timing,
         );
         continue;
       }
@@ -332,7 +343,7 @@ export function createAgent(deps: {
             tool_call_id: toolCall.id,
             content: `Error: Unknown tool "${fnName}"`,
           } as ChatCompletionMessageParam,
-          roundCount,
+          timing,
         );
         continue;
       }
@@ -357,7 +368,7 @@ export function createAgent(deps: {
             tool_call_id: toolCall.id,
             content: `Error: Invalid JSON in tool arguments: ${toolCall.function.arguments}`,
           } as ChatCompletionMessageParam,
-          roundCount,
+          timing,
         );
         continue;
       }
@@ -376,7 +387,7 @@ export function createAgent(deps: {
             tool_call_id: toolCall.id,
             content: `Permission denied: ${decision.reason}`,
           } as ChatCompletionMessageParam,
-          roundCount,
+          timing,
         );
         continue;
       }
@@ -395,7 +406,7 @@ export function createAgent(deps: {
               content:
                 "Permission denied: confirmation is required but unavailable.",
             } as ChatCompletionMessageParam,
-            roundCount,
+            timing,
           );
           continue;
         }
@@ -409,7 +420,7 @@ export function createAgent(deps: {
               tool_call_id: toolCall.id,
               content: `User denied: ${decision.message}`,
             } as ChatCompletionMessageParam,
-            roundCount,
+            timing,
           );
           continue;
         }
@@ -430,7 +441,7 @@ export function createAgent(deps: {
               tool_call_id: toolCall.id,
               content: `Blocked: ${conflict.reason}`,
             } as ChatCompletionMessageParam,
-            roundCount,
+            timing,
           );
           continue;
         }
@@ -444,7 +455,7 @@ export function createAgent(deps: {
           toolCallId: toolCall.id,
           toolName: fnName,
           args,
-          round: roundCount,
+          round: timing.loopRound ?? timing.round ?? 0,
         },
       });
 
@@ -462,7 +473,7 @@ export function createAgent(deps: {
             tool_call_id: toolCall.id,
             content: `Blocked by PreToolUse hook: ${preResult.message ?? "no reason"}`,
           } as ChatCompletionMessageParam,
-          roundCount,
+          timing,
         );
         continue;
       }
@@ -497,7 +508,7 @@ export function createAgent(deps: {
           tool_call_id: toolCall.id,
           content: toolOutput,
         } as ChatCompletionMessageParam,
-        roundCount,
+        timing,
       );
 
       // PostToolUse Hook：工具执行、P1 压缩、tool_result 写入后触发
@@ -508,7 +519,7 @@ export function createAgent(deps: {
           toolCallId: toolCall.id,
           toolName: fnName,
           args,
-          round: roundCount,
+          round: timing.loopRound ?? timing.round ?? 0,
           output: toolOutput,
           error: result.error,
         },
@@ -535,21 +546,21 @@ export function createAgent(deps: {
     //         (2) Hook 补充内容能被下一轮 LLM 看到
     //         (3) 多工具调用时，不会在 tool_result 之间插入 user 消息
     for (const msg of pendingHookMessages) {
-      appendMessage({ role: "user", content: msg }, roundCount);
+      appendMessage({ role: "user", content: msg }, timing);
     }
   }
 
   /**
-   * buildRoundLimitResponse — 子智能体轮次上限检测
+   * buildLoopRoundLimitResponse — 子智能体 turn 内轮次上限检测
    *
    * 当超过 maxRounds 时，从历史中倒找最后一条 assistant 文本消息
    * 生成截断摘要。仅子智能体使用（maxRounds 由调用方设定）。
    *
-   * @param roundCount - 当前轮次
+   * @param loopRound - 当前 turn 内 LLM 调用轮次
    * @returns 截断响应字符串，或 null（未超限）
    */
-  function buildRoundLimitResponse(roundCount: number): string | null {
-    if (maxRounds === undefined || roundCount <= maxRounds) {
+  function buildLoopRoundLimitResponse(loopRound: number): string | null {
+    if (maxRounds === undefined || loopRound <= maxRounds) {
       return null;
     }
 
@@ -574,12 +585,15 @@ export function createAgent(deps: {
    * 确保下一次请求携带的上下文真的变短。
    * system prompt 不参与此流程，仍由 history 独立维护。
    */
-  function compactCurrentHistoryForRecovery(roundCount: number): void {
+  function compactCurrentHistoryForRecovery(timing: MessageTimingInput): void {
     const entries = history.getEntries();
     const annotated = annotateEntries(entries);
     const normalized = normalizeMessages(annotated);
     const blocks = groupToBlocks(normalized);
-    const decayed = compressor.decayOldBlocks(blocks, roundCount);
+    const decayed = compressor.decayOldBlocks(
+      blocks,
+      timing.loopIndex ?? timing.round ?? 0,
+    );
     const compacted = compressor.compactHistory(decayed);
     const newEntries = blocksToEntries(compacted.blocks);
     history.replaceEntries(newEntries);
@@ -587,7 +601,7 @@ export function createAgent(deps: {
       transcriptStore.append({
         sessionId,
         type: "history_replaced",
-        round: roundCount,
+        timing,
         payload: {
           reason: "context_length_recovery",
           beforeEntryCount: entries.length,
@@ -601,64 +615,64 @@ export function createAgent(deps: {
   /**
    * blocksToEntries — 将 MessageBlock[] 转换为 HistoryEntry[]
    *
-   * 与 flattenToMessages 对应，但保留 round 元信息并清除 _round 内部字段。
+   * 与 flattenToMessages 对应，但保留 timing 元信息并清除内部字段。
    *
-   * 优先读取每条消息自己的 _round，缺失时才 fallback 到 block.round。
-   * 避免 compact 写回时把一个 block 内所有消息的 round 统一覆盖。
+   * 优先读取每条消息自己的内部 timing，缺失时才 fallback 到 block 聚合字段。
+   * 避免 compact 写回时把一个 block 内所有消息的 timing 统一覆盖。
    */
-  function blocksToEntries(blocks: MessageBlock[]): HistoryEntry[] {
-    const entries: HistoryEntry[] = [];
+  function blocksToEntries(blocks: MessageBlock[]): HistoryEntryInput[] {
+    const entries: HistoryEntryInput[] = [];
     for (const block of blocks) {
       if (block.type === "text") {
         if (block.user) {
-          const r = readRoundFromMessage(block.user) ?? block.round;
-          const entry: HistoryEntry = { message: stripRound(block.user) };
-          if (r !== undefined) entry.round = r;
-          entries.push(entry);
+          entries.push(createEntryFromMessage(block.user, block));
         }
         if (block.assistant) {
-          const r = readRoundFromMessage(block.assistant) ?? block.round;
-          const entry: HistoryEntry = { message: stripRound(block.assistant) };
-          if (r !== undefined) entry.round = r;
-          entries.push(entry);
+          entries.push(createEntryFromMessage(block.assistant, block));
         }
       } else if (block.type === "tool_use") {
         if (block.user) {
-          const r = readRoundFromMessage(block.user) ?? block.round;
-          const entry: HistoryEntry = { message: stripRound(block.user) };
-          if (r !== undefined) entry.round = r;
-          entries.push(entry);
+          entries.push(createEntryFromMessage(block.user, block));
         }
-        const rAssistant = readRoundFromMessage(block.assistant) ?? block.round;
-        const assistantEntry: HistoryEntry = {
-          message: stripRound(block.assistant),
-        };
-        if (rAssistant !== undefined) assistantEntry.round = rAssistant;
-        entries.push(assistantEntry);
+        entries.push(createEntryFromMessage(block.assistant, block));
         for (const tr of block.toolResults) {
-          const r = readRoundFromMessage(tr) ?? block.round;
-          const entry: HistoryEntry = { message: stripRound(tr) };
-          if (r !== undefined) entry.round = r;
-          entries.push(entry);
+          entries.push(createEntryFromMessage(tr, block));
         }
       } else if (block.type === "summary") {
-        const r = readRoundFromMessage(block.user) ?? block.round;
-        const entry: HistoryEntry = { message: stripRound(block.user) };
-        if (r !== undefined) entry.round = r;
-        entries.push(entry);
+        entries.push(createEntryFromMessage(block.user, block));
       }
     }
     return entries;
   }
 
   /**
-   * readRoundFromMessage — 从消息的 _round 内部字段读取轮次
+   * createEntryFromMessage — 从消息内部 timing 和 block fallback 构造 HistoryEntry
    */
-  function readRoundFromMessage(
+  function createEntryFromMessage(
     msg: ChatCompletionMessageParam,
-  ): number | undefined {
-    const annotated = msg as ChatCompletionMessageParam & { _round?: number };
-    return annotated._round;
+    block: MessageBlock,
+  ): HistoryEntryInput {
+    const annotated = msg as ChatCompletionMessageParam & {
+      _turnIndex?: number;
+      _loopRound?: number;
+      _loopIndex?: number;
+      _messageSequence?: number;
+      _round?: number;
+    };
+    const entry: HistoryEntryInput = { message: stripRound(msg) };
+    const turnIndex = annotated._turnIndex ?? block.turnIndex;
+    const loopRound = annotated._loopRound ?? block.loopRound;
+    const loopIndex = annotated._loopIndex ?? block.loopIndex;
+    const messageSequence =
+      annotated._messageSequence ?? block.messageSequence;
+    const round = annotated._round ?? block.round ?? loopRound;
+
+    if (messageSequence !== undefined) entry.messageSequence = messageSequence;
+    if (turnIndex !== undefined) entry.turnIndex = turnIndex;
+    if (loopRound !== undefined) entry.loopRound = loopRound;
+    if (loopIndex !== undefined) entry.loopIndex = loopIndex;
+    if (round !== undefined) entry.round = round;
+    return entry;
   }
 
   /**
@@ -667,13 +681,13 @@ export function createAgent(deps: {
    * 作为普通 user 消息注入，不修改 system prompt。
    * 必须在已经保存 assistant 部分输出之后追加。
    */
-  function appendContinuationReminder(roundCount: number): void {
+  function appendContinuationReminder(timing: MessageTimingInput): void {
     appendMessage(
       {
         role: "user",
         content: `<system-reminder source="recovery">\n你的上一次输出因为长度限制中断了。请从断点继续输出，不要从头重写，也不要重复已经完成的工具调用。\n</system-reminder>`,
       },
-      roundCount,
+      timing,
     );
   }
 
@@ -698,6 +712,12 @@ export function createAgent(deps: {
      */
     async run(query) {
       logger.info("User query: %s", query);
+      const turnIndex = ++nextTurnIndex;
+      const initialTiming: MessageTimingInput = {
+        turnIndex,
+        loopRound: 0,
+        loopIndex: nextLoopIndex + 1,
+      };
 
       // 收集本轮需要注入的 reminder 消息
       // 顺序：1. 用户原始 query  2. turn reminders  3. out-of-band reminders
@@ -743,41 +763,47 @@ export function createAgent(deps: {
         // exitCode 2：注入补充提示，在用户消息之后作为 user 消息追加到历史
         if (sessionResult.exitCode === 2 && sessionResult.message) {
           // 先写入用户消息，再写入 reminder 和 Hook 补充消息
-          appendMessage({ role: "user", content: query }, 0);
+          appendMessage({ role: "user", content: query }, initialTiming);
           for (const msg of reminderMessages) {
-            appendMessage({ role: "user", content: msg }, 0);
+            appendMessage({ role: "user", content: msg }, initialTiming);
           }
           appendMessage(
             {
               role: "user",
               content: `[Hook: SessionStart]\n${sessionResult.message}`,
             },
-            0,
+            initialTiming,
           );
         } else {
           // exitCode 0：正常写入用户消息 + reminders
-          appendMessage({ role: "user", content: query }, 0);
+          appendMessage({ role: "user", content: query }, initialTiming);
           for (const msg of reminderMessages) {
-            appendMessage({ role: "user", content: msg }, 0);
+            appendMessage({ role: "user", content: msg }, initialTiming);
           }
         }
       } else {
         // 后续 run() 调用：写入用户消息 + reminders
-        appendMessage({ role: "user", content: query }, 0);
+        appendMessage({ role: "user", content: query }, initialTiming);
         for (const msg of reminderMessages) {
-          appendMessage({ role: "user", content: msg }, 0);
+          appendMessage({ role: "user", content: msg }, initialTiming);
         }
       }
 
       // Agent 主循环：不断调用 LLM，直到它不再请求工具调用
       // 每次 run() 创建独立的恢复状态，避免死循环和重复执行
       const recoveryState = createRecoveryState();
-      let roundCount = 0;
+      let loopRound = 0;
       // 累积因 finishReason === "length" 被截断的多段输出
       let accumulatedContent = "";
 
       for (;;) {
-        roundCount++;
+        loopRound++;
+        const loopIndex = ++nextLoopIndex;
+        const timing: MessageTimingInput = {
+          turnIndex,
+          loopRound,
+          loopIndex,
+        };
 
         // 0. 外部中止信号检查（如 async run timeout）
         if (abortSignal?.aborted) {
@@ -786,14 +812,14 @@ export function createAgent(deps: {
         }
 
         // 1. 子智能体轮次上限检测
-        const limitResponse = buildRoundLimitResponse(roundCount);
+        const limitResponse = buildLoopRoundLimitResponse(loopRound);
         if (limitResponse !== null) return limitResponse;
 
         // 2. 父智能体的 TODO 轮次检测（子智能体没有 todoManager，跳过）
         if (todoManager) {
           const interruptMsg = todoManager.tickRound();
           if (interruptMsg) {
-            appendMessage({ role: "user", content: interruptMsg }, roundCount);
+            appendMessage({ role: "user", content: interruptMsg }, timing);
           }
         }
 
@@ -804,13 +830,16 @@ export function createAgent(deps: {
           if (notifications.length > 0) {
             const lines = ["Async run updates:"];
             for (const n of notifications) {
+              const outputHint = n.outputRef?.outputId
+                ? `use run_output_read with output_id ${n.outputRef.outputId}`
+                : `use run_async_output_read with run_id ${n.runId}`;
               lines.push(
                 `- run_id: ${n.runId}`,
                 `  title: ${n.title}`,
                 `  executor: ${n.executor}`,
                 `  status: ${n.status}`,
                 `  preview: ${n.preview}`,
-                `  full_output: use run_async_output_read with run_id ${n.runId}`,
+                `  full_output: ${outputHint}`,
               );
             }
             const reminderContent = `<system-reminder source="async-run">\n${lines.join("\n")}\n</system-reminder>`;
@@ -823,7 +852,7 @@ export function createAgent(deps: {
                 role: "user",
                 content: reminderContent,
               },
-              roundCount,
+              timing,
             );
           }
         }
@@ -844,6 +873,11 @@ export function createAgent(deps: {
               if (n.asyncRunId) {
                 lines.push(`  async_run: ${n.asyncRunId}`);
               }
+              if (n.outputId) {
+                lines.push(
+                  `  full_output: use run_output_read with output_id ${n.outputId}`,
+                );
+              }
             }
             const reminderContent = `<system-reminder source="schedule">\n${lines.join("\n")}\n</system-reminder>`;
             logger.info(
@@ -855,13 +889,13 @@ export function createAgent(deps: {
                 role: "user",
                 content: reminderContent,
               },
-              roundCount,
+              timing,
             );
           }
         }
 
         // 3. 消息处理管道
-        let finalMsgs = prepareMessages(roundCount);
+        let finalMsgs = prepareMessages(loopIndex);
         const toolDefs = tools.getToolDefinitions();
         logger.debug(
           "Calling LLM with %d messages, %d tools",
@@ -903,7 +937,7 @@ export function createAgent(deps: {
                 transcriptStore.append({
                   sessionId,
                   type: "recovery_event",
-                  round: roundCount,
+                  timing,
                   payload: {
                     kind,
                     action,
@@ -922,7 +956,7 @@ export function createAgent(deps: {
                 transcriptStore.append({
                   sessionId,
                   type: "recovery_event",
-                  round: roundCount,
+                  timing,
                   payload: {
                     kind,
                     action,
@@ -931,7 +965,7 @@ export function createAgent(deps: {
                 });
               }
               try {
-                compactCurrentHistoryForRecovery(roundCount);
+                compactCurrentHistoryForRecovery(timing);
               } catch (compactErr) {
                 logger.warn(
                   "Compact failed: %s",
@@ -942,7 +976,7 @@ export function createAgent(deps: {
                 return formatFailureMessage(kind, error);
               }
               // compact 后需要重新构建消息列表，并同步重算 cache debug
-              finalMsgs = prepareMessages(roundCount);
+              finalMsgs = prepareMessages(loopIndex);
               cacheState = cacheDebugTracker.inspect({
                 messages: finalMsgs,
                 tools: toolDefs,
@@ -956,7 +990,7 @@ export function createAgent(deps: {
               transcriptStore.append({
                 sessionId,
                 type: "recovery_event",
-                round: roundCount,
+                timing,
                 payload: { kind, action },
               });
             }
@@ -978,14 +1012,14 @@ export function createAgent(deps: {
             tool_calls:
               response.toolCalls.length > 0 ? response.toolCalls : undefined,
           } as ChatCompletionMessageParam,
-          roundCount,
+          timing,
         );
 
         // 5. 处理工具调用
         //    如果响应包含 tool_calls，即使 finishReason 异常，
         //    也优先按工具调用流程处理，避免破坏 tool_call / tool_result 配对。
         if (response.toolCalls.length > 0) {
-          await handleToolCalls(response.toolCalls, roundCount);
+          await handleToolCalls(response.toolCalls, timing);
           continue;
         }
 
@@ -1006,7 +1040,7 @@ export function createAgent(deps: {
               transcriptStore.append({
                 sessionId,
                 type: "recovery_event",
-                round: roundCount,
+                timing,
                 payload: {
                   kind: "output_interrupted",
                   action,
@@ -1016,7 +1050,7 @@ export function createAgent(deps: {
             }
             // 累积本次被截断的部分输出
             accumulatedContent += response.content ?? "";
-            appendContinuationReminder(roundCount);
+            appendContinuationReminder(timing);
             continue; // 进入下一轮 LLM 调用，请求从断点继续
           }
           // 超过继续次数上限，返回累积的部分内容加中断说明

@@ -13,6 +13,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Logger } from "./logger.js";
+import { atomicWriteJsonFile } from "./atomic-write.js";
 
 // ============================================================================
 // 类型定义
@@ -163,6 +164,7 @@ export type OccurrenceStatus =
   | "completed"
   | "failed"
   | "timeout"
+  | "orphaned"
   | "missed"
   | "skipped_overlap";
 
@@ -180,6 +182,7 @@ export interface ScheduleOccurrenceFile {
   skippedAt?: string | undefined;
   completedAt?: string | undefined;
   asyncRunId?: string | undefined;
+  outputId?: string | undefined;
   outputRef?: string | undefined;
   reason?: string | undefined;
   notificationDrainedAt?: string | undefined;
@@ -198,6 +201,7 @@ export interface ScheduleSummary {
 export interface ScheduleListQuery {
   includeArchived?: boolean;
   includeCancelled?: boolean;
+  currentProjectOnly?: boolean;
   projectRoot?: string;
 }
 
@@ -225,6 +229,7 @@ export interface ScheduleStore {
 
 const SCHEDULE_ID_REGEX = /^sch_[0-9]{8}_[0-9]{6}_[a-z0-9_-]{1,48}$/;
 const OCCURRENCE_ID_REGEX = /^occ_[0-9]{8}_[0-9]{6}(_[a-z0-9_-]{1,32})?$/;
+const OUTPUT_ID_REGEX = /^out_[0-9]{8}_[0-9]{6}_[a-z0-9]{6}$/;
 
 const VALID_SCHEDULE_STATUSES: ReadonlySet<string> = new Set([
   "active",
@@ -240,6 +245,7 @@ const VALID_OCCURRENCE_STATUSES: ReadonlySet<string> = new Set([
   "completed",
   "failed",
   "timeout",
+  "orphaned",
   "missed",
   "skipped_overlap",
 ]);
@@ -632,6 +638,14 @@ export function validateOccurrenceFile(
     errors.push("status is invalid");
   }
 
+  if (
+    value["outputId"] !== undefined &&
+    (typeof value["outputId"] !== "string" ||
+      !OUTPUT_ID_REGEX.test(value["outputId"]))
+  ) {
+    errors.push("outputId has invalid format");
+  }
+
   for (const timeField of ["createdAt", "updatedAt"] as const) {
     if (
       typeof value[timeField] !== "string" ||
@@ -657,6 +671,7 @@ export function createScheduleStore(options: {
   const schedulesDir = path.resolve(options.schedulesDir);
   const schedulesSubDir = path.resolve(schedulesDir, "schedules");
   const indexPath = path.resolve(schedulesDir, "index.json");
+  const currentProjectRoot = path.resolve(options.projectRoot);
   const logger = options.logger;
 
   // 内存缓存：scheduleId -> ScheduleFile
@@ -735,8 +750,7 @@ export function createScheduleStore(options: {
       .map((s) => s.id);
 
     const index: ScheduleIndexFile = { version: 1, schedules: allSchedules };
-    fs.mkdirSync(schedulesDir, { recursive: true });
-    fs.writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+    atomicWriteJsonFile(indexPath, index);
   }
 
   function assertValidForSave(schedule: ScheduleFile): void {
@@ -778,15 +792,23 @@ export function createScheduleStore(options: {
         if (schedule) schedules.set(schedule.id, schedule);
       }
       writeIndex();
-      return this.list({ includeArchived: true, includeCancelled: true });
+      return this.list({
+        includeArchived: true,
+        includeCancelled: true,
+        currentProjectOnly: false,
+      });
     },
 
     list(query = {}) {
       const includeArchived = query.includeArchived ?? false;
       const includeCancelled = query.includeCancelled ?? false;
-      const projectRootFilter = query.projectRoot
-        ? path.resolve(query.projectRoot)
-        : undefined;
+      const currentProjectOnly = query.currentProjectOnly ?? true;
+      const projectRootFilter =
+        query.projectRoot !== undefined
+          ? path.resolve(query.projectRoot)
+          : currentProjectOnly
+            ? currentProjectRoot
+            : undefined;
 
       return [...schedules.values()]
         .filter((schedule) => {
@@ -817,14 +839,9 @@ export function createScheduleStore(options: {
 
     save(schedule) {
       assertValidForSave(schedule);
-      const dir = scheduleDir(schedule.id);
-      const tmpDir = path.resolve(dir, ".tmp");
-      const tmpPath = path.resolve(tmpDir, "schedule.json.tmp");
       const finalPath = schedulePath(schedule.id);
 
-      fs.mkdirSync(tmpDir, { recursive: true });
-      fs.writeFileSync(tmpPath, `${JSON.stringify(schedule, null, 2)}\n`);
-      fs.renameSync(tmpPath, finalPath);
+      atomicWriteJsonFile(finalPath, schedule);
 
       schedules.set(schedule.id, cloneJson(schedule));
       writeIndex();
@@ -849,14 +866,9 @@ export function createScheduleStore(options: {
 
     saveOccurrence(occurrence) {
       assertValidOccurrence(occurrence);
-      const dir = occurrencesDir(occurrence.scheduleId);
-      const tmpDir = path.resolve(dir, ".tmp");
-      const tmpPath = path.resolve(tmpDir, `${occurrence.id}.json.tmp`);
       const finalPath = occurrencePath(occurrence.scheduleId, occurrence.id);
 
-      fs.mkdirSync(tmpDir, { recursive: true });
-      fs.writeFileSync(tmpPath, `${JSON.stringify(occurrence, null, 2)}\n`);
-      fs.renameSync(tmpPath, finalPath);
+      atomicWriteJsonFile(finalPath, occurrence);
     },
 
     listOccurrences(scheduleId, limit) {

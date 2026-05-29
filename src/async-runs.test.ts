@@ -13,7 +13,9 @@ import { createAsyncRunManager } from "./async-runs.js";
 import type { LLMClient } from "./llm.js";
 import type { Logger } from "./logger.js";
 import { createDefaultAsyncCommandPolicy } from "./tools/bash.js";
+import type { AsyncCommandPolicy } from "./execution-policy.js";
 import type { ToolRegistry } from "./tools/registry.js";
+import { createOutputStore } from "./output-store.js";
 
 // ---------------------------------------------------------------------------
 // 测试辅助函数
@@ -57,14 +59,25 @@ function createMockLogger(): Logger {
 function createTestManager(options?: {
   projectRoot?: string;
   taskOutputsDir?: string;
+  commandPolicy?: AsyncCommandPolicy;
+  withOutputStore?: boolean;
 }) {
   const tempDir = createTempDir();
+  const taskOutputsDir = options?.taskOutputsDir ?? resolve(tempDir, "outputs");
+  const outputStore = options?.withOutputStore
+    ? createOutputStore({
+        outputDir: taskOutputsDir,
+        clock: () => new Date("2026-05-28T15:30:00.000"),
+        idGenerator: () => "abc123",
+      })
+    : undefined;
   const manager = createAsyncRunManager({
     projectRoot: options?.projectRoot ?? tempDir,
-    taskOutputsDir: options?.taskOutputsDir ?? resolve(tempDir, "outputs"),
+    taskOutputsDir,
     llm: {} as LLMClient,
     logger: createMockLogger(),
-    commandPolicy: createDefaultAsyncCommandPolicy(),
+    commandPolicy: options?.commandPolicy ?? createAllowAllCommandPolicy(),
+    ...(outputStore ? { outputStore } : {}),
     createAgentFn: vi.fn().mockReturnValue({
       run: vi.fn().mockResolvedValue("subagent output"),
     }),
@@ -75,7 +88,14 @@ function createTestManager(options?: {
     } satisfies ToolRegistry),
     getStableSystemPrompt: () => null,
   });
-  return { manager, tempDir };
+  return { manager, tempDir, outputStore };
+}
+
+function createAllowAllCommandPolicy(): AsyncCommandPolicy {
+  return {
+    maxTimeoutMs: 300_000,
+    validate: () => ({ allowed: true }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +261,50 @@ describe("AsyncRunManager", () => {
             resources: { read_paths: ["../outside"], write_paths: [] },
           }),
         ).toThrow('is outside project directory');
+      } finally {
+        cleanupTempDir(tempDir);
+      }
+    });
+
+    it("should reject command blocked by readonly execution policy", () => {
+      const { manager, tempDir } = createTestManager({
+        commandPolicy: createDefaultAsyncCommandPolicy(),
+      });
+      try {
+        expect(() =>
+          manager.start({
+            title: "Fix lint",
+            executor: "command",
+            command: "npx eslint --fix",
+            resources: { read_paths: ["src"], write_paths: [] },
+          }),
+        ).toThrow("--fix");
+        expect(() =>
+          manager.start({
+            title: "TSC emit",
+            executor: "command",
+            command: "npx tsc",
+            resources: { read_paths: ["src"], write_paths: [] },
+          }),
+        ).toThrow("--noEmit");
+      } finally {
+        cleanupTempDir(tempDir);
+      }
+    });
+
+    it("should allow noEmit tsc command through readonly execution policy", () => {
+      const { manager, tempDir } = createTestManager({
+        commandPolicy: createDefaultAsyncCommandPolicy(),
+      });
+      try {
+        const record = manager.start({
+          title: "TSC no emit",
+          executor: "command",
+          command: "npx tsc --noEmit",
+          resources: { read_paths: ["src"], write_paths: [] },
+        });
+
+        expect(record.command).toBe("npx tsc --noEmit");
       } finally {
         cleanupTempDir(tempDir);
       }
@@ -509,6 +573,35 @@ describe("AsyncRunManager", () => {
       }
     });
 
+    it("should register completed output in OutputStore when provided", async () => {
+      const { manager, tempDir, outputStore } = createTestManager({
+        withOutputStore: true,
+      });
+      try {
+        manager.start({
+          resources: { read_paths: [], write_paths: [] },
+          title: "Test",
+          executor: "command",
+          command: "echo output-store-run",
+        });
+
+        await new Promise((r) => setTimeout(r, 500));
+
+        const completed = manager
+          .list()
+          .find((r) => r.status === "completed");
+        expect(completed?.outputId).toBe("out_20260528_153000_abc123");
+        expect(
+          outputStore!.read({ outputId: completed!.outputId! }).content,
+        ).toContain("output-store-run");
+        expect(manager.readOutput({ runId: completed!.id })).toContain(
+          "output-store-run",
+        );
+      } finally {
+        cleanupTempDir(tempDir);
+      }
+    });
+
     it("should reject invalid run_id", () => {
       const { manager, tempDir } = createTestManager();
       try {
@@ -581,8 +674,49 @@ describe("AsyncRunManager", () => {
       }
     });
 
-    it("should block non-read-only bash when async runs are active", () => {
+    it("should block exact edit to path claimed by running async run", () => {
       const { manager, tempDir } = createTestManager();
+      try {
+        manager.start({
+          title: "Test",
+          executor: "command",
+          command: "sleep 10",
+          resources: { read_paths: ["src"], write_paths: [] },
+          timeoutMs: 60_000,
+        });
+
+        const result = manager.checkForegroundToolConflict({
+          toolName: "run_edit_exact",
+          args: {
+            path: "src/file.ts",
+            old_string: "a",
+            new_string: "b",
+            expected_occurrences: 1,
+          },
+        });
+
+        expect(result.blocked).toBe(true);
+      } finally {
+        cleanupTempDir(tempDir);
+      }
+    });
+
+    it("should block non-read-only bash when async runs are active", () => {
+      const { manager, tempDir } = createTestManager({
+        commandPolicy: {
+          maxTimeoutMs: 300_000,
+          validate(command: string) {
+            if (command === "sleep 10") return { allowed: true };
+            if (command.includes(";")) {
+              return {
+                allowed: false,
+                reason: "Shell operators are not allowed",
+              };
+            }
+            return { allowed: true };
+          },
+        },
+      });
       try {
         manager.start({
           resources: { read_paths: [], write_paths: [] },

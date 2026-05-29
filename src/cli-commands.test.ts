@@ -10,9 +10,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   createCliCommandRegistry,
+  createScheduleCliCommand,
   createTaskCliCommand,
 } from "./cli-commands.js";
 import { createLogger } from "./logger.js";
+import type { ScheduleManager } from "./schedules.js";
 import { createTaskStore } from "./task-store.js";
 import { createTaskManager } from "./tasks.js";
 
@@ -94,5 +96,58 @@ describe("CLI task command", () => {
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Only completed or cancelled"),
     );
+  });
+});
+
+describe("CLI schedule command", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function createScheduleManagerMock(): ScheduleManager {
+    return {
+      create: vi.fn(),
+      list: vi.fn().mockReturnValue([]),
+      read: vi.fn().mockReturnValue(null),
+      cancel: vi.fn(),
+      delete: vi.fn(),
+      listOccurrences: vi.fn().mockReturnValue([]),
+      start: vi.fn(),
+      stop: vi.fn(),
+      tick: vi.fn(),
+      drainNotifications: vi.fn().mockReturnValue([]),
+    };
+  }
+
+  it("lists current project schedules by default", () => {
+    const manager = createScheduleManagerMock();
+    const registry = createCliCommandRegistry();
+    registry.register(createScheduleCliCommand(manager, createLogger("error")));
+
+    registry.dispatch("/schedule list");
+
+    expect(manager.list).toHaveBeenCalledWith({
+      includeArchived: false,
+      includeCancelled: false,
+      currentProjectOnly: true,
+    });
+  });
+
+  it("uses --all-projects only for explicit cross-project summaries", () => {
+    const manager = createScheduleManagerMock();
+    const registry = createCliCommandRegistry();
+    registry.register(createScheduleCliCommand(manager, createLogger("error")));
+
+    registry.dispatch("/schedule list --all --all-projects");
+
+    expect(manager.list).toHaveBeenCalledWith({
+      includeArchived: true,
+      includeCancelled: true,
+      currentProjectOnly: false,
+    });
   });
 });

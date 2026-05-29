@@ -252,6 +252,27 @@ trigger: {
 
 PDD13 只要求 `AsyncRunRecord` 能保存这些元数据；不实现 schedule 的创建、持久化、触发循环或 proactive 用户通知。
 
+实现备注（2026-05 第一轮重构）：
+
+- Async Run 仍然是 session-local / process-local 运行实例，不跨 agent 重启恢复。
+- Schedule 可以跨重启恢复的是 occurrence 审计状态，而不是旧 async run 进程本身。
+- 如果 agent 重启时发现 Schedule occurrence 仍是 `running`，ScheduleManager 会把它收敛为 `orphaned`，表示该次 async run 已失联且无法恢复输出。
+- `orphaned` 不等同于 `missed`：`missed` 表示 due occurrence 没有触发；`orphaned` 表示 occurrence 已触发并进入 running，但进程重启后无法继续追踪。
+
+实现备注（2026-05 第三轮重构）：
+
+- Async Run 的非交互执行边界已经集中到 `src/execution-policy.ts`，`AsyncRunManager.start()` 会在实际启动 command/subagent 前校验 resources 和 command。
+- `run_async_start` 的 command executor 使用 readonly profile：允许 `npx tsc --noEmit`、`npm run typecheck`、`npm test`、`npx vitest run` 等诊断命令；拒绝 `--fix`、shell operators、git 写操作、`npx tsc` 默认 emit 和 readonly 下的 `npm run build`。
+- `read_paths` / `write_paths` 的第一版约束也由 `ExecutionPolicy.validateResources()` 表达：读路径必须在 `projectRoot` 内，readonly 下 `write_paths` 必须为空。
+- async subagent 的 filtered registry 和 scoped permission 复用同一个 readonly command adapter，避免 Schedule、Async Run 和子智能体各自维护一份命令白名单。
+
+实现备注（2026-05 第四轮重构）：
+
+- Async Run 完成后会把完整输出登记到 `OutputStore`，并在 record / notification 中保存 `outputId`。
+- `run_async_output_read(run_id)` 仍保留，内部优先通过 `outputId` 读取，缺失时 fallback 到旧的 `outputPath` 安全读取。
+- 新 notification 会优先提示 `run_output_read(output_id)`，让 Async Run 输出和普通 P1 大工具输出使用同一套读取方式。
+- 旧字段 `outputPath` 仍存在，用于兼容 PDD13 章节和历史测试；新代码不再把绝对路径作为 LLM 的首选读取入口。
+
 ## 生命周期边界
 
 ### 可以跨什么
@@ -1245,4 +1266,3 @@ record 变为 `timeout`，写 notification。
 12. `run_async_start` 不自动更新 PDD12 Task Group。
 13. 工具定义在主 Agent 中保持稳定，不因 async run 状态变化而改变。
 14. PDD14 scheduler 未来可以调用 `AsyncRunManager.start()` 创建 scheduled async run，无需重做运行实例生命周期。
-

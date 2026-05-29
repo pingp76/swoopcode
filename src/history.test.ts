@@ -45,7 +45,9 @@ describe("add with meta", () => {
     const entries = history.getEntries();
     expect(entries).toHaveLength(2);
     expect(entries[0]!.round).toBe(0);
+    expect(entries[0]!.loopRound).toBe(0);
     expect(entries[1]!.round).toBe(1);
+    expect(entries[1]!.loopRound).toBe(1);
   });
 
   it("allows undefined round when no meta passed (backward compatible)", () => {
@@ -54,6 +56,7 @@ describe("add with meta", () => {
     const entries = history.getEntries();
     expect(entries).toHaveLength(1);
     expect(entries[0]!.round).toBeUndefined();
+    expect(entries[0]!.loopRound).toBeUndefined();
   });
 
   it("allows explicit undefined round in meta", () => {
@@ -62,6 +65,30 @@ describe("add with meta", () => {
     const entries = history.getEntries();
     expect(entries).toHaveLength(1);
     expect(entries[0]!.round).toBeUndefined();
+  });
+
+  it("assigns monotonically increasing messageSequence values", () => {
+    const history = createHistory();
+    const first = history.add({ role: "user", content: "hello" });
+    const second = history.add({ role: "assistant", content: "hi" });
+
+    expect(first.messageSequence).toBe(1);
+    expect(second.messageSequence).toBe(2);
+    expect(history.getEntries().map((e) => e.messageSequence)).toEqual([1, 2]);
+  });
+
+  it("stores turnIndex, loopRound, and loopIndex metadata", () => {
+    const history = createHistory();
+    history.add(
+      { role: "assistant", content: "thinking" },
+      { turnIndex: 2, loopRound: 1, loopIndex: 5 },
+    );
+
+    const entry = history.getEntries()[0]!;
+    expect(entry.turnIndex).toBe(2);
+    expect(entry.loopRound).toBe(1);
+    expect(entry.loopIndex).toBe(5);
+    expect(entry.round).toBe(1);
   });
 });
 
@@ -91,7 +118,11 @@ describe("getEntries", () => {
     history.add({ role: "user", content: "hello" }, { round: 1 });
     const entries = history.getEntries();
     // 修改返回的数组不应影响内部状态
-    entries.push({ message: { role: "assistant", content: "hi" }, round: 2 });
+    entries.push({
+      message: { role: "assistant", content: "hi" },
+      messageSequence: 99,
+      round: 2,
+    });
     expect(history.getEntries()).toHaveLength(1);
   });
 });
@@ -154,6 +185,43 @@ describe("replaceEntries", () => {
     const entries = history.getEntries();
     expect(entries[0]!.round).toBe(3);
     expect(entries[1]!.round).toBe(4);
+  });
+
+  it("preserves existing messageSequence and advances future sequence", () => {
+    const history = createHistory();
+    history.add({ role: "user", content: "old" });
+    history.replaceEntries([
+      {
+        message: { role: "user", content: "kept sequence" },
+        messageSequence: 10,
+        turnIndex: 2,
+        loopRound: 1,
+        loopIndex: 8,
+        round: 1,
+      },
+      {
+        message: { role: "assistant", content: "missing sequence" },
+        loopRound: 2,
+      },
+    ]);
+
+    const entries = history.getEntries();
+    expect(entries[0]!.messageSequence).toBe(10);
+    expect(entries[1]!.messageSequence).toBe(11);
+    expect(entries[0]!.loopIndex).toBe(8);
+
+    const added = history.add({ role: "user", content: "next" });
+    expect(added.messageSequence).toBe(12);
+  });
+
+  it("does not expose timing metadata through getMessages", () => {
+    const history = createHistory();
+    history.add(
+      { role: "user", content: "hello" },
+      { turnIndex: 1, loopRound: 0, loopIndex: 1 },
+    );
+
+    expect(history.getMessages()[0]).toEqual({ role: "user", content: "hello" });
   });
 
   it("does not modify system prompt", () => {

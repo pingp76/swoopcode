@@ -5,7 +5,7 @@
  * - estimateTokens：token 估算准确性
  * - truncateToTokens：文本截断
  * - groupToBlocks：各种消息序列的分组
- * - flattenToMessages：还原 + _round 清除
+ * - flattenToMessages：还原 + 内部 timing 字段清除
  * - round-trip：groupToBlocks → flattenToMessages 一致性
  */
 
@@ -18,6 +18,7 @@ import {
   estimateBlockTokens,
   estimateMessagesTokens,
 } from "./message-block.js";
+import { normalizeMessages } from "./normalize.js";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 // ---------------------------------------------------------------------------
@@ -187,6 +188,38 @@ describe("groupToBlocks", () => {
     ] as unknown as ChatCompletionMessageParam[];
     const blocks = groupToBlocks(messages);
     expect(blocks[0]!.round).toBe(1);
+    expect(blocks[0]!.loopRound).toBeUndefined();
+  });
+
+  it("preserves timing metadata on blocks", () => {
+    const messages = [
+      {
+        role: "user",
+        content: "hello",
+        _turnIndex: 2,
+        _loopRound: 1,
+        _loopIndex: 5,
+        _messageSequence: 10,
+        _round: 1,
+      },
+      {
+        role: "assistant",
+        content: "hi",
+        _turnIndex: 2,
+        _loopRound: 1,
+        _loopIndex: 5,
+        _messageSequence: 11,
+        _round: 1,
+      },
+    ] as unknown as ChatCompletionMessageParam[];
+
+    const blocks = groupToBlocks(messages);
+
+    expect(blocks[0]!.turnIndex).toBe(2);
+    expect(blocks[0]!.loopRound).toBe(1);
+    expect(blocks[0]!.loopIndex).toBe(5);
+    expect(blocks[0]!.messageSequence).toBe(10);
+    expect(blocks[0]!.round).toBe(1);
   });
 
   it("uses min round for multi-message blocks", () => {
@@ -222,6 +255,40 @@ describe("groupToBlocks", () => {
       expect(blocks[0]!.user).toBeUndefined();
     }
   });
+
+  it("groups normalized missing tool_result into a complete tool_use block", () => {
+    const normalized = normalizeMessages([
+      { role: "user", content: "check files" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "tc_missing",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"ls"}' },
+          },
+        ],
+      } as ChatCompletionMessageParam,
+      { role: "user", content: "next question" },
+    ]);
+
+    const blocks = groupToBlocks(normalized);
+
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]!.type).toBe("tool_use");
+    if (blocks[0]!.type === "tool_use") {
+      expect(blocks[0]!.toolResults).toHaveLength(1);
+      expect(
+        (blocks[0]!.toolResults[0] as unknown as { tool_call_id: string })
+          .tool_call_id,
+      ).toBe("tc_missing");
+    }
+    expect(blocks[1]!.type).toBe("text");
+    if (blocks[1]!.type === "text") {
+      expect(blocks[1]!.user?.content).toBe("next question");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -255,16 +322,66 @@ describe("flattenToMessages", () => {
     expect(result).toEqual(original);
   });
 
-  it("strips _round from output messages", () => {
+  it("strips internal timing metadata from output messages", () => {
     const annotated = [
-      { role: "user", content: "hello", _round: 5 },
-      { role: "assistant", content: "hi", _round: 5 },
+      {
+        role: "user",
+        content: "hello",
+        _turnIndex: 1,
+        _loopRound: 2,
+        _loopIndex: 7,
+        _messageSequence: 3,
+        _round: 2,
+      },
+      {
+        role: "assistant",
+        content: "hi",
+        _turnIndex: 1,
+        _loopRound: 2,
+        _loopIndex: 7,
+        _messageSequence: 4,
+        _round: 2,
+      },
     ] as unknown as ChatCompletionMessageParam[];
     const blocks = groupToBlocks(annotated);
     const result = flattenToMessages(blocks);
     for (const msg of result) {
+      expect(msg).not.toHaveProperty("_turnIndex");
+      expect(msg).not.toHaveProperty("_loopRound");
+      expect(msg).not.toHaveProperty("_loopIndex");
+      expect(msg).not.toHaveProperty("_messageSequence");
       expect(msg).not.toHaveProperty("_round");
     }
+  });
+
+  it("preserves tool_use loopIndex on the block and strips messages", () => {
+    const annotated = [
+      {
+        role: "assistant",
+        content: null,
+        _loopIndex: 8,
+        _messageSequence: 2,
+        tool_calls: [
+          { id: "tc1", type: "function", function: { name: "run_bash", arguments: "{}" } },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "tc1",
+        content: "output",
+        _loopIndex: 8,
+        _messageSequence: 3,
+      },
+    ] as unknown as ChatCompletionMessageParam[];
+
+    const blocks = groupToBlocks(annotated);
+    expect(blocks[0]!.loopIndex).toBe(8);
+    expect(blocks[0]!.messageSequence).toBe(2);
+
+    const result = flattenToMessages(blocks);
+    expect(result.map((m) => m.role)).toEqual(["assistant", "tool"]);
+    expect(result[0]).not.toHaveProperty("_loopIndex");
+    expect(result[1]).not.toHaveProperty("_messageSequence");
   });
 
   it("preserves tool_call_id after round-trip", () => {
@@ -319,6 +436,34 @@ describe("flattenToMessages", () => {
     const lastMsg = result[result.length - 1];
     expect(lastMsg!.role).toBe("user");
     expect((lastMsg as { content: string }).content).toBe("Latest query");
+  });
+
+  it("keeps normalized assistant tool_call and tool_result adjacent after round-trip", () => {
+    const normalized = normalizeMessages([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "tc_roundtrip",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"pwd"}' },
+          },
+        ],
+      } as ChatCompletionMessageParam,
+      { role: "user", content: "later user" },
+    ]);
+
+    const result = flattenToMessages(groupToBlocks(normalized));
+
+    expect(result.map((m) => m.role)).toEqual([
+      "assistant",
+      "tool",
+      "user",
+    ]);
+    expect((result[1] as unknown as { tool_call_id: string }).tool_call_id).toBe(
+      "tc_roundtrip",
+    );
   });
 });
 

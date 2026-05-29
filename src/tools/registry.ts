@@ -23,6 +23,8 @@ import {
   executeWrite,
   runEditToolDefinition,
   executeEdit,
+  runEditExactToolDefinition,
+  executeEditExact,
 } from "./files.js";
 import type { ToolResult } from "./types.js";
 import type { TodoToolProvider } from "../todo.js";
@@ -32,7 +34,8 @@ import type { MemoryToolProvider } from "./memory.js";
 import type { TaskToolProvider } from "./tasks.js";
 import type { AsyncRunToolProvider } from "./async-runs.js";
 import type { ScheduleToolProvider } from "./schedules.js";
-import type { AsyncCommandPolicy } from "./bash.js";
+import type { OutputToolProvider } from "./output.js";
+import type { AsyncCommandPolicy } from "../execution-policy.js";
 
 /**
  * ToolExecutor — 工具执行函数的类型
@@ -110,6 +113,7 @@ export function createToolRegistry(
   asyncRunProvider?: AsyncRunToolProvider,
   options?: ToolRegistryOptions,
   scheduleProvider?: ScheduleToolProvider,
+  outputProvider?: OutputToolProvider,
 ): ToolRegistry {
   // 工具映射表：工具名 → 工具注册项
   const tools = new Map<string, ToolEntry>();
@@ -197,6 +201,17 @@ export function createToolRegistry(
           options?.projectRoot,
         ),
     });
+    register({
+      definition: runEditExactToolDefinition,
+      execute: async (args) =>
+        executeEditExact(
+          String(args["path"] ?? ""),
+          String(args["old_string"] ?? ""),
+          String(args["new_string"] ?? ""),
+          Number(args["expected_occurrences"] ?? 0),
+          options?.projectRoot,
+        ),
+    });
   }
 
   // 注册 todo 管理工具（6 个工具）
@@ -246,6 +261,14 @@ export function createToolRegistry(
   // Async Run 是 session-local 的非阻塞运行层，通过 AsyncRunToolProvider 接入注册表。
   if (asyncRunProvider) {
     for (const entry of asyncRunProvider.toolEntries) {
+      register(entry);
+    }
+  }
+
+  // 注册 output 工具（1 个工具）
+  // OutputStore 属于 Agent 全局运行数据，只能按 output_id 读取登记过的大输出。
+  if (outputProvider) {
+    for (const entry of outputProvider.toolEntries) {
       register(entry);
     }
   }

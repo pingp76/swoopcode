@@ -109,6 +109,16 @@ describe("createDefaultAsyncCommandPolicy", () => {
     expect(result.allowed).toBe(true);
   });
 
+  it("allows npx tsc only with noEmit", () => {
+    expect(policy.validate("npx tsc --noEmit").allowed).toBe(true);
+    expect(policy.validate("npx tsc").allowed).toBe(false);
+  });
+
+  it("rejects fix flags", () => {
+    expect(policy.validate("npx eslint --fix").allowed).toBe(false);
+    expect(policy.validate("npm run lint -- --fix").allowed).toBe(false);
+  });
+
   it("rejects non-whitelisted bare commands", () => {
     const result = policy.validate("echo hello");
     expect(result.allowed).toBe(false);
@@ -118,7 +128,7 @@ describe("createDefaultAsyncCommandPolicy", () => {
   it("rejects bare find", () => {
     const result = policy.validate("find . -name '*.ts'");
     expect(result.allowed).toBe(false);
-    expect(result.reason).toContain("Bare 'find'");
+    expect(result.reason).toContain("not in allowed list");
   });
 
   it("rejects dangerous commands via isDangerousCommand", () => {

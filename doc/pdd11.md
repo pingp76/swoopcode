@@ -208,10 +208,10 @@ replaceEntries(entries: HistoryEntry[]): void;
 
 语义：
 
-- 替换普通对话消息和对应 round 元信息。
+- 替换普通对话消息和对应 timing 元信息。
 - 不修改 system prompt。
 - `entries` 的顺序必须按时间顺序写入。
-- 每个 entry 的 `message` 原样保存，每个 entry 的 `round` 原样保存。
+- 每个 entry 的 `message` 原样保存，`turnIndex` / `loopRound` / `loopIndex` / `messageSequence` / `round` 按当前实现规则保留或补齐。
 
 为什么需要这个 API：
 
@@ -223,17 +223,17 @@ replaceEntries(entries: HistoryEntry[]): void;
 
 Agent 层新增内部函数。
 
-#### `compactCurrentHistoryForRecovery(roundCount)`
+#### `compactCurrentHistoryForRecovery(timing)`
 
 职责：当 API 报 context window 超限时，强制压缩当前 history 并写回。
 
 流程：
 
 1. `history.getEntries()` 读取当前普通消息。
-2. `annotateEntries(entries)` 附加 round 元信息。
+2. `annotateEntries(entries)` 附加内部 timing 元信息。
 3. `normalizeMessages(annotated)` 标准化消息。
 4. `groupToBlocks(normalized)` 分块。
-5. `compressor.decayOldBlocks(blocks, roundCount)` 先做 P0 衰减。
+5. `compressor.decayOldBlocks(blocks, timing.loopIndex)` 先做 P0 衰减。
 6. `compressor.compactHistory(decayed)` 做 P2 全量压缩。
 7. `flattenToMessages(compacted.blocks)` 得到压缩后的消息。
 8. 将压缩后消息转换为 `HistoryEntry[]`。
@@ -245,7 +245,7 @@ Agent 层新增内部函数。
 - 如果 compact 后没有减少消息，仍然消耗一次 `compactRetryCount`，避免死循环。
 - compact 失败时记录 warn，并返回 `fail`。
 
-#### `appendContinuationReminder(roundCount)`
+#### `appendContinuationReminder(timing)`
 
 职责：LLM 输出被截断后，追加一条 user reminder。
 
@@ -298,7 +298,7 @@ try {
   if (action === "compact") {
     recoveryState.compactRetryCount++;
     logger.info(formatRecoveryNotice(action, kind, recoveryState));
-    const compacted = compactCurrentHistoryForRecovery(roundCount);
+    const compacted = compactCurrentHistoryForRecovery(timing);
     if (compacted) continue;
     return formatFailureMessage(kind, error);
   }
@@ -363,6 +363,13 @@ return `[模型输出被截断，已达到继续次数上限]\n${response.conten
 - 普通 `prepareMessages()` 里的 compact 只影响本次发给 LLM 的消息。
 - 恢复用 compact 必须写回 `history`，否则下一次请求仍可能携带过长历史。
 
+实现备注（2026-05 第五轮重构）：
+
+- 恢复用 compact 写回 history 时，会保留每条消息自己的 timing metadata。
+- `turnIndex` 表示用户 turn，`loopRound` 表示当前 turn 内循环，`loopIndex` 表示跨 turn 的全局 LLM 调用序号。
+- `blocksToEntries()` 优先读取消息上的内部 timing 字段，只有缺失时才 fallback 到 block 聚合 timing，避免 compact 后把一个 block 内所有消息的时间语义统一覆盖。
+- Transcript 会额外记录 `historySequence`，用于把 append-only recovery event 和被压缩的 History 工作上下文关联起来。
+
 ## 测试计划
 
 ### `src/recovery.test.ts`
@@ -393,7 +400,7 @@ return `[模型输出被截断，已达到继续次数上限]\n${response.conten
 覆盖 `replaceEntries()`：
 
 1. 替换普通消息。
-2. 保留 round 元信息。
+2. 保留 timing 元信息（含兼容 round 字段）。
 3. 不修改 system prompt。
 4. 替换后 `getMessages()` 仍会在头部插入 system prompt。
 
@@ -435,4 +442,3 @@ return `[模型输出被截断，已达到继续次数上限]\n${response.conten
 7. continuation 有次数上限，不会无限继续。
 8. 恢复提示会通过 logger 输出。
 9. 不修改稳定 system prompt。
-

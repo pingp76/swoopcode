@@ -18,7 +18,11 @@ import type {
   AsyncRunRecord,
   StartAsyncRunInput,
 } from "./async-runs.js";
-import type { AsyncCommandPolicy } from "./tools/bash.js";
+import {
+  createExecutionPolicy,
+  type AsyncCommandPolicy,
+  type ExecutionPolicy,
+} from "./execution-policy.js";
 import type {
   ScheduleFile,
   ScheduleOccurrenceFile,
@@ -88,10 +92,19 @@ export interface ScheduleNotification {
   id: string;
   scheduleId: string;
   occurrenceId: string;
-  type: "triggered" | "skipped_overlap" | "missed" | "completed" | "failed" | "timeout" | "cancelled";
+  type:
+    | "triggered"
+    | "skipped_overlap"
+    | "missed"
+    | "orphaned"
+    | "completed"
+    | "failed"
+    | "timeout"
+    | "cancelled";
   message: string;
   timestamp: string;
   asyncRunId?: string;
+  outputId?: string;
   outputRef?: string;
 }
 
@@ -486,10 +499,13 @@ export function createScheduleManager(deps: {
   projectRoot: string;
   logger: Logger;
   now?: () => Date;
+  executionPolicy?: ExecutionPolicy;
   commandPolicy?: AsyncCommandPolicy;
 }): ScheduleManager {
-  const { store, asyncRunManager, projectRoot, logger, commandPolicy } = deps;
+  const { store, asyncRunManager, projectRoot, logger } = deps;
   const now = deps.now ?? (() => new Date());
+  const currentProjectRoot = path.resolve(projectRoot);
+  const executionPolicy = deps.executionPolicy ?? createExecutionPolicy();
 
   // 注册 async run 完成回调
   asyncRunManager.setOnFinish?.(onAsyncRunFinish);
@@ -510,11 +526,18 @@ export function createScheduleManager(deps: {
   function reloadActiveSchedules(): void {
     store.scan();
     activeSchedules = store
-      .list({ includeArchived: false, includeCancelled: false })
+      .list({
+        includeArchived: false,
+        includeCancelled: false,
+        projectRoot: currentProjectRoot,
+      })
       .map((summary) => store.read(summary.id))
-      .filter((s): s is ScheduleFile => s !== null);
+      .filter(
+        (s): s is ScheduleFile => s !== null && isCurrentProjectSchedule(s),
+      );
 
-    // 先检查 missed occurrences（使用 persisted 的 nextRunAt）
+    // 先收敛上个进程遗留的 running occurrence，再检查 missed occurrences。
+    reconcileOrphanedOccurrences();
     checkMissedOccurrences();
 
     // 再重新计算每个 active schedule 的 nextRunAt
@@ -531,6 +554,55 @@ export function createScheduleManager(deps: {
       }
       schedule.lastEvaluatedAt = now().toISOString();
       store.save(schedule);
+    }
+  }
+
+  function isCurrentProjectSchedule(schedule: ScheduleFile): boolean {
+    return path.resolve(schedule.projectRoot) === currentProjectRoot;
+  }
+
+  function assertCurrentProjectSchedule(
+    schedule: ScheduleFile,
+    scheduleId: string,
+  ): void {
+    if (!isCurrentProjectSchedule(schedule)) {
+      throw new Error(
+        `Schedule not found in current project: ${scheduleId}`,
+      );
+    }
+  }
+
+  function reconcileOrphanedOccurrences(): void {
+    const currentNow = now();
+    for (const schedule of activeSchedules) {
+      const occurrences = store.listOccurrences(schedule.id);
+      for (const occurrence of occurrences) {
+        if (occurrence.status !== "running") continue;
+
+        occurrence.status = "orphaned";
+        occurrence.completedAt = currentNow.toISOString();
+        occurrence.updatedAt = currentNow.toISOString();
+        occurrence.reason =
+          "Async run was session-local and the agent process restarted before completion";
+        store.saveOccurrence(occurrence);
+
+        runningOccurrences.get(schedule.id)?.delete(occurrence.id);
+
+        if (schedule.outputPolicy.notifyLlm) {
+          const notification: ScheduleNotification = {
+            id: `orphaned_${schedule.id}_${occurrence.id}_${currentNow.getTime()}`,
+            scheduleId: schedule.id,
+            occurrenceId: occurrence.id,
+            type: "orphaned",
+            message: `Schedule "${schedule.title}" occurrence ${occurrence.id} was marked orphaned because its async run was session-local and the agent process restarted before completion.`,
+            timestamp: currentNow.toISOString(),
+          };
+          if (occurrence.asyncRunId !== undefined) {
+            notification.asyncRunId = occurrence.asyncRunId;
+          }
+          enqueueNotification(notification);
+        }
+      }
     }
   }
 
@@ -665,10 +737,12 @@ export function createScheduleManager(deps: {
       // command executor 必须经过 commandPolicy 预检
       if (
         schedule.execution.executor === "command" &&
-        schedule.execution.command &&
-        commandPolicy
+        schedule.execution.command
       ) {
-        const validation = commandPolicy.validate(schedule.execution.command);
+        const validation = executionPolicy.validateCommand({
+          command: schedule.execution.command,
+          profile: schedule.execution.permissionProfile,
+        });
         if (!validation.allowed) {
           triggeredOcc.status = "failed";
           triggeredOcc.reason = validation.reason;
@@ -828,6 +902,9 @@ export function createScheduleManager(deps: {
     const { scheduleId, occurrenceId } = record.trigger;
     if (!scheduleId || !occurrenceId) return;
 
+    const schedule = store.read(scheduleId);
+    if (!schedule || !isCurrentProjectSchedule(schedule)) return;
+
     const occurrence = store.readOccurrence(scheduleId, occurrenceId);
     if (!occurrence) return;
 
@@ -843,6 +920,11 @@ export function createScheduleManager(deps: {
 
     occurrence.status = nextStatus;
     occurrence.completedAt = currentNow.toISOString();
+    if (record.outputId) {
+      occurrence.outputId = record.outputId;
+    } else {
+      occurrence.outputId = undefined;
+    }
     if (record.outputPath) {
       occurrence.outputRef = record.outputPath;
     } else {
@@ -854,17 +936,22 @@ export function createScheduleManager(deps: {
     // 从 running set 中移除
     runningOccurrences.get(scheduleId)?.delete(occurrenceId);
 
-    const schedule = store.read(scheduleId);
-    if (schedule && schedule.outputPolicy.notifyLlm) {
+    if (schedule.outputPolicy.notifyLlm) {
+      const outputHint = record.outputId
+        ? `use run_output_read with output_id ${record.outputId}`
+        : `use run_async_output_read with run_id ${record.id}`;
       const notif: ScheduleNotification = {
         id: `finish_${scheduleId}_${occurrenceId}_${currentNow.getTime()}`,
         scheduleId,
         occurrenceId,
         type: nextStatus === "completed" ? "completed" : nextStatus === "timeout" ? "timeout" : "failed",
-        message: `Schedule "${schedule.title}" completed occurrence ${occurrenceId}. Async run: ${record.id}. Status: ${record.status}. Output: use run_async_output_read with run_id ${record.id}.`,
+        message: `Schedule "${schedule.title}" completed occurrence ${occurrenceId}. Async run: ${record.id}. Status: ${record.status}. Output: ${outputHint}.`,
         timestamp: currentNow.toISOString(),
         asyncRunId: record.id,
       };
+      if (record.outputId) {
+        notif.outputId = record.outputId;
+      }
       if (record.outputPath) {
         notif.outputRef = record.outputPath;
       }
@@ -940,6 +1027,16 @@ export function createScheduleManager(deps: {
       schedule.linkedTask = input.linkedTask;
     }
 
+    const resourceValidation = executionPolicy.validateResources({
+      projectRoot,
+      readPaths: schedule.execution.resources.readPaths,
+      writePaths: schedule.execution.resources.writePaths,
+      profile: schedule.execution.permissionProfile,
+    });
+    if (!resourceValidation.allowed) {
+      throw new Error(resourceValidation.reason ?? "Invalid schedule resources");
+    }
+
     // 计算初始 nextRunAt
     const nextRunAt = computeNextRunAt(schedule.timing, schedule.timezone, currentNow);
     if (nextRunAt) {
@@ -954,12 +1051,20 @@ export function createScheduleManager(deps: {
   }
 
   function list(query?: ScheduleListQuery): ScheduleSummary[] {
-    return store.list(query);
+    if (query?.currentProjectOnly === false) {
+      return store.list({ ...query, currentProjectOnly: false });
+    }
+    return store.list({
+      ...query,
+      projectRoot: currentProjectRoot,
+      currentProjectOnly: true,
+    });
   }
 
   function read(scheduleId: string, options?: ScheduleReadOptions): ScheduleView | null {
     const schedule = store.read(scheduleId);
     if (!schedule) return null;
+    if (!isCurrentProjectSchedule(schedule)) return null;
 
     if (options?.recentOccurrences !== undefined && options.recentOccurrences > 0) {
       // occurrence 不嵌入 ScheduleView，调用方通过 listOccurrences 获取
@@ -972,6 +1077,7 @@ export function createScheduleManager(deps: {
     if (!schedule) {
       throw new Error(`Schedule not found: ${scheduleId}`);
     }
+    assertCurrentProjectSchedule(schedule, scheduleId);
     if (schedule.status === "cancelled") {
       return schedule;
     }
@@ -1006,6 +1112,7 @@ export function createScheduleManager(deps: {
     if (!schedule) {
       throw new Error(`Schedule not found: ${scheduleId}`);
     }
+    assertCurrentProjectSchedule(schedule, scheduleId);
 
     const occurrences = store.listOccurrences(scheduleId);
     if (occurrences.length > 0 || schedule.triggeredCount > 0) {
@@ -1020,6 +1127,8 @@ export function createScheduleManager(deps: {
   }
 
   function listOccurrences(input: ListOccurrencesInput): ScheduleOccurrenceFile[] {
+    const schedule = store.read(input.scheduleId);
+    if (!schedule || !isCurrentProjectSchedule(schedule)) return [];
     return store.listOccurrences(input.scheduleId, input.limit);
   }
 
@@ -1057,7 +1166,5 @@ export function createScheduleManager(deps: {
     stop,
     tick,
     drainNotifications,
-    // 暴露内部回调供 AsyncRunManager 注册
-    _onAsyncRunFinish: onAsyncRunFinish,
-  } as ScheduleManager & { _onAsyncRunFinish: (record: AsyncRunRecord) => void };
+  };
 }

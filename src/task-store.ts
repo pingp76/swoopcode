@@ -14,6 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { Logger } from "./logger.js";
+import { atomicWriteJsonFile } from "./atomic-write.js";
 
 // ============================================================================
 // 类型定义
@@ -371,8 +372,7 @@ export function createTaskStore(options: {
     }
 
     const index: TaskIndexFile = { version: 1, byProjectKey, allGroups };
-    fs.mkdirSync(tasksDir, { recursive: true });
-    fs.writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+    atomicWriteJsonFile(indexPath, index);
   }
 
   function assertValidForSave(group: TaskGroupFile): void {
@@ -428,14 +428,9 @@ export function createTaskStore(options: {
 
     save(group) {
       assertValidForSave(group);
-      const dir = groupDir(group.id);
-      const tmpDir = path.resolve(dir, ".tmp");
-      const tmpPath = path.resolve(tmpDir, "group.json.tmp");
       const finalPath = groupPath(group.id);
 
-      fs.mkdirSync(tmpDir, { recursive: true });
-      fs.writeFileSync(tmpPath, `${JSON.stringify(group, null, 2)}\n`);
-      fs.renameSync(tmpPath, finalPath);
+      atomicWriteJsonFile(finalPath, group);
 
       groups.set(group.id, cloneJson(group));
       writeIndex();

@@ -10,9 +10,9 @@
  * - 连续同角色消息不符合 OpenAI API 的严格交替要求
  *
  * 标准化做三件事：
- * 1. 过滤元数据字段（以 "_" 开头的键）
- * 2. 补全缺失的 tool_result（每个 tool_call 必须有对应的 tool 消息）
- * 3. 合并连续同角色消息（user+user → user，assistant+assistant → assistant）
+ * 1. 过滤 content block 内的元数据字段（顶层 _round 仍保留给压缩管线）
+ * 2. 补全或移动缺失的 tool_result，让它紧跟对应 assistant tool_call
+ * 3. 合并连续同角色消息（只合并普通 user/assistant 文本，不合并 tool_call）
  */
 
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
@@ -42,47 +42,20 @@ export function normalizeMessages(
  * cleanMetadata — 过滤消息中的元数据字段
  *
  * 处理规则：
- * - content 是字符串 → 直接保留（最常见的格式）
+ * - content 是字符串 → clone 消息后保留（最常见的格式）
  * - content 是数组 → 过滤每个 block 中以 "_" 开头的键（如 _timestamp、_id）
  * - content 是 null/undefined → 保留不变
  *
  * 元数据字段（如 _timestamp）是内部系统使用的，LLM API 无法识别，
  * 发送过去可能导致 API 报错或行为异常。
+ *
+ * 注意：顶层 _round 是 prepareMessages → message-block 的内部协议字段，
+ * normalize 阶段必须保留，最终由 flattenToMessages() 清除。
  */
 function cleanMetadata(
   messages: ChatCompletionMessageParam[],
 ): ChatCompletionMessageParam[] {
-  return messages.map((msg) => {
-    // 如果 content 不是数组，直接返回原消息（不需要处理）
-    if (typeof msg.content !== "object" || msg.content === null) {
-      return msg;
-    }
-
-    // content 是数组格式（OpenAI 多模态消息格式）
-    // 过滤每个 block 中以下划线开头的键
-    if (Array.isArray(msg.content)) {
-      const cleanedContent = msg.content
-        .filter(
-          (block) => typeof block === "object" && block !== null,
-        )
-        .map((block) =>
-          // 移除所有以 "_" 开头的键
-          // 使用 unknown 中转避免 TS 严格类型检查报错
-          Object.fromEntries(
-            Object.entries(block as unknown as Record<string, unknown>).filter(
-              ([key]) => !key.startsWith("_"),
-            ),
-          ),
-        );
-
-      return {
-        ...msg,
-        content: cleanedContent,
-      } as unknown as ChatCompletionMessageParam;
-    }
-
-    return msg;
-  });
+  return messages.map(cloneMessage);
 }
 
 /**
@@ -93,37 +66,48 @@ function cleanMetadata(
  *   都必须有且仅有一条 role="tool" 的消息作为回应
  * - 如果缺少 tool 消息，API 会报错
  *
- * 这个函数会：
- * 1. 收集所有已有的 tool 消息的 tool_call_id
- * 2. 遍历所有 assistant 消息的 tool_calls
- * 3. 如果某个 tool_call 没有对应的 tool 消息，插入一条占位消息
+ * 这个函数会按 assistant tool_calls 原始顺序重建 tool block：
+ * 1. 先收集所有已有 tool 消息
+ * 2. 遇到 assistant(tool_calls) 时，立即补上对应 tool 消息
+ * 3. 已消费的 tool 消息在原位置跳过，孤立 tool 消息不发送给 LLM
  */
 function ensureToolResults(
   messages: ChatCompletionMessageParam[],
 ): ChatCompletionMessageParam[] {
-  const result = [...messages];
-
-  // 收集所有已有的 tool 消息的 tool_call_id
-  const existingToolIds = new Set<string>();
-  for (const msg of result) {
-    if (msg.role === "tool" && "tool_call_id" in msg) {
-      existingToolIds.add(msg.tool_call_id as string);
+  const toolMessagesById = new Map<string, ChatCompletionMessageParam>();
+  for (const msg of messages) {
+    if (msg.role !== "tool") continue;
+    const toolCallId = readToolCallId(msg);
+    if (toolCallId && !toolMessagesById.has(toolCallId)) {
+      toolMessagesById.set(toolCallId, msg);
     }
   }
 
-  // 遍历 assistant 消息，检查 tool_calls 是否都有对应的 tool 消息
-  for (const msg of result) {
-    if (msg.role !== "assistant") continue;
-    if (!("tool_calls" in msg) || !Array.isArray(msg.tool_calls)) continue;
+  const result: ChatCompletionMessageParam[] = [];
 
-    for (const toolCall of msg.tool_calls) {
-      // 如果这个 tool_call 没有对应的 tool 消息，插入占位消息
-      if (toolCall.id && !existingToolIds.has(toolCall.id)) {
+  for (const msg of messages) {
+    // 已经被归入 assistant tool block 的 tool 消息，在原位置跳过；
+    // 没有 assistant 引用的孤立 tool 消息也跳过，避免发送非法 provider 输入。
+    if (msg.role === "tool") {
+      continue;
+    }
+
+    result.push(cloneMessage(msg));
+    if (!hasToolCalls(msg)) continue;
+
+    const toolCalls = (msg as { tool_calls: Array<{ id?: string }> })
+      .tool_calls;
+    for (const toolCall of toolCalls) {
+      if (!toolCall.id) continue;
+      const existing = toolMessagesById.get(toolCall.id);
+      if (existing) {
+        result.push(cloneMessage(existing));
+      } else {
         result.push({
           role: "tool",
           tool_call_id: toolCall.id,
           content: "(cancelled)",
-        } as ChatCompletionMessageParam);
+        } as unknown as ChatCompletionMessageParam);
       }
     }
   }
@@ -148,26 +132,22 @@ function mergeConsecutiveRoles(
 ): ChatCompletionMessageParam[] {
   if (messages.length === 0) return [];
 
-  const merged: ChatCompletionMessageParam[] = [messages[0]!];
+  const merged: ChatCompletionMessageParam[] = [cloneMessage(messages[0]!)];
 
   for (let i = 1; i < messages.length; i++) {
-    const msg = messages[i]!;
+    const msg = cloneMessage(messages[i]!);
     const last = merged[merged.length - 1]!;
 
-    // 只合并 user 和 assistant 的连续消息
-    // tool 消息有 tool_call_id 字段，不能简单合并
-    if (
-      msg.role === last.role &&
-      (msg.role === "user" || msg.role === "assistant")
-    ) {
+    if (canMergeMessages(last, msg)) {
       // 将两条消息的 content 都转为数组格式后拼接
       const prevContent = toArrayContent(last.content);
       const currContent = toArrayContent(msg.content);
 
-      // 更新最后一条消息的 content（使用 unknown 中转避免类型不兼容）
-      ;(last as unknown as { content: unknown }).content = prevContent.concat(
-        currContent,
-      );
+      const mergedMsg = {
+        ...last,
+        content: prevContent.concat(currContent),
+      } as unknown as ChatCompletionMessageParam;
+      merged[merged.length - 1] = mergedMsg;
     } else {
       merged.push(msg);
     }
@@ -192,7 +172,9 @@ function toArrayContent(
   content: string | unknown[] | null | undefined,
 ): Array<Record<string, unknown>> {
   if (Array.isArray(content)) {
-    return content as Array<Record<string, unknown>>;
+    return content.map((block) => ({
+      ...(block as Record<string, unknown>),
+    }));
   }
 
   if (typeof content === "string") {
@@ -201,4 +183,64 @@ function toArrayContent(
 
   // null 或 undefined → 空数组
   return [];
+}
+
+function canMergeMessages(
+  last: ChatCompletionMessageParam,
+  msg: ChatCompletionMessageParam,
+): boolean {
+  if (last.role !== msg.role) return false;
+  if (msg.role === "user") return true;
+  if (msg.role !== "assistant") return false;
+  return !hasToolCalls(last) && !hasToolCalls(msg);
+}
+
+function hasToolCalls(msg: ChatCompletionMessageParam): boolean {
+  return (
+    msg.role === "assistant" &&
+    "tool_calls" in msg &&
+    Array.isArray(msg.tool_calls) &&
+    msg.tool_calls.length > 0
+  );
+}
+
+function readToolCallId(msg: ChatCompletionMessageParam): string | undefined {
+  if (msg.role !== "tool") return undefined;
+  const toolCallId = (msg as unknown as { tool_call_id?: unknown })
+    .tool_call_id;
+  return typeof toolCallId === "string" ? toolCallId : undefined;
+}
+
+function cloneMessage(
+  msg: ChatCompletionMessageParam,
+): ChatCompletionMessageParam {
+  const cloned = { ...(msg as unknown as Record<string, unknown>) };
+  if ("content" in cloned) {
+    cloned.content = cloneContent(cloned.content);
+  }
+  if (Array.isArray(cloned.tool_calls)) {
+    cloned.tool_calls = cloned.tool_calls.map((toolCall) => ({
+      ...(toolCall as Record<string, unknown>),
+      function: {
+        ...((toolCall as { function?: Record<string, unknown> }).function ??
+          {}),
+      },
+    }));
+  }
+  return cloned as unknown as ChatCompletionMessageParam;
+}
+
+function cloneContent(content: unknown): unknown {
+  if (Array.isArray(content)) {
+    return content
+      .filter((block) => typeof block === "object" && block !== null)
+      .map((block) =>
+        Object.fromEntries(
+          Object.entries(block as Record<string, unknown>).filter(
+            ([key]) => !key.startsWith("_"),
+          ),
+        ),
+      );
+  }
+  return content;
 }

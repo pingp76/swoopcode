@@ -16,6 +16,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createOutputStore } from "./output-store.js";
 
 // ---------------------------------------------------------------------------
 // 辅助函数
@@ -142,6 +143,46 @@ describe("decayOldBlocks (P0)", () => {
       expect(
         (toolResult as { tool_call_id: string }).tool_call_id,
       ).toBeDefined();
+    }
+  });
+
+  it("uses loopIndex as the primary age for decay", () => {
+    const longOutput = "x".repeat(1000);
+    const block = makeToolUseBlock(
+      "run_bash",
+      '{"command":"ls"}',
+      longOutput,
+      1,
+    );
+    block.loopRound = 1;
+    block.loopIndex = 2;
+
+    const result = compressor.decayOldBlocks([block], 7);
+
+    expect(result[0]!.type).toBe("tool_use");
+    if (result[0]!.type === "tool_use") {
+      const content = (result[0]!.toolResults[0]! as { content: string })
+        .content;
+      expect(content.length).toBeLessThan(longOutput.length);
+    }
+  });
+
+  it("keeps legacy round fallback for blocks without loopIndex", () => {
+    const longOutput = "x".repeat(1000);
+    const block = makeToolUseBlock(
+      "run_bash",
+      '{"command":"ls"}',
+      longOutput,
+      1,
+    );
+
+    const result = compressor.decayOldBlocks([block], 10);
+
+    expect(result[0]!.type).toBe("tool_use");
+    if (result[0]!.type === "tool_use") {
+      const content = (result[0]!.toolResults[0]! as { content: string })
+        .content;
+      expect(content.length).toBeLessThan(longOutput.length);
     }
   });
 
@@ -362,6 +403,33 @@ describe("compressToolResult (P1)", () => {
     expect(existsSync(result.persistedPath!)).toBe(true);
   });
 
+  it("persists large output through OutputStore when provided", () => {
+    const outputStore = createOutputStore({
+      outputDir,
+      clock: () => new Date("2026-05-28T15:30:00.000"),
+      idGenerator: () => "abc123",
+    });
+    const compressor = createContextCompressor({
+      thresholdToolOutput: 100,
+      outputDir,
+      outputStore,
+    });
+    const largeOutput = "a".repeat(1000);
+
+    const result = compressor.compressToolResult(
+      "run_bash",
+      "tc_output_store",
+      largeOutput,
+    );
+
+    expect(result.outputId).toBe("out_20260528_153000_abc123");
+    expect(result.content).toContain('output-id="out_20260528_153000_abc123"');
+    expect(result.content).toContain("run_output_read");
+    expect(outputStore.read({ outputId: result.outputId! }).content).toBe(
+      largeOutput,
+    );
+  });
+
   it("preview is shorter than original output", () => {
     const compressor = createContextCompressor({
       thresholdToolOutput: 100,
@@ -375,6 +443,40 @@ describe("compressToolResult (P1)", () => {
     );
 
     expect(result.content.length).toBeLessThan(largeOutput.length);
+  });
+
+  it("decayOldBlocks appends output id when OutputStore persisted the result", () => {
+    const outputStore = createOutputStore({
+      outputDir,
+      clock: () => new Date("2026-05-28T15:30:00.000"),
+      idGenerator: () => "def456",
+    });
+    const comp = createContextCompressor({
+      thresholdToolOutput: 100,
+      decayThreshold: 3,
+      decayPreviewTokens: 100,
+      outputDir,
+      outputStore,
+    });
+    const tcId = "tc_output_id_decay";
+    const longOutput = "a".repeat(1000);
+    comp.compressToolResult("run_bash", tcId, longOutput);
+
+    const block = makeToolUseBlock(
+      "run_bash",
+      '{"command":"ls"}',
+      longOutput,
+      1,
+      tcId,
+    );
+    const result = comp.decayOldBlocks([block], 10);
+
+    if (result[0]!.type === "tool_use") {
+      const content = (result[0]!.toolResults[0]! as { content: string })
+        .content;
+      expect(content).toContain("output_id out_20260528_153000_def456");
+      expect(content).toContain("run_output_read");
+    }
   });
 });
 
@@ -508,5 +610,24 @@ describe("cleanup", () => {
 
     compressor.cleanup();
     expect(existsSync(outputDir)).toBe(false);
+  });
+
+  it("does not remove OutputStore managed directory", () => {
+    const outputDir = makeTempOutputDir();
+    const outputStore = createOutputStore({
+      outputDir,
+      clock: () => new Date("2026-05-28T15:30:00.000"),
+      idGenerator: () => "abc123",
+    });
+    const compressor = createContextCompressor({
+      thresholdToolOutput: 50,
+      outputDir,
+      outputStore,
+    });
+    compressor.compressToolResult("run_bash", "tc_cleanup_store", "x".repeat(500));
+
+    compressor.cleanup();
+    expect(existsSync(outputDir)).toBe(true);
+    rmSync(outputDir, { recursive: true, force: true });
   });
 });

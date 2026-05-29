@@ -353,6 +353,13 @@ sessionEventBuffer?: SessionEventBuffer;
 - `groupToBlocks()` 可以正常分组。
 - P0/P1/P2 压缩无需知道 reminder 的特殊语义。
 
+实现备注（2026-05 第五轮重构）：
+
+- reminder 仍然以普通 user message 进入 history，不修改 system prompt。
+- history 会给 reminder 附带当前 `turnIndex`、`loopRound`、`loopIndex` 和 `messageSequence`。
+- 这些 timing metadata 只在 prepare/group/compact 管线内部流转，`flattenToMessages()` 会在发送给 LLM 前清除内部字段。
+- 因此 prompt cache 友好的 stable prefix 设计不变：动态状态仍走 user reminder，而不是 system prompt rewrite。
+
 ### 测试
 
 更新 `src/agent.test.ts`：
@@ -959,6 +966,12 @@ messages: full old conversation
 | `src/tools/subagent.test.ts` | 修改 | 子智能体 cache 和能力限制测试 |
 | `doc/summary.md` | 实现后修改 | 更新当前项目状态 |
 | `AGENTS.md` | 可选修改 | 增加 cache-friendly 设计约束 |
+
+实现备注（2026-05 Runtime Hardening Round A）：
+
+- `llm.log` 不再在每次 Agent 启动时清空，也不再在超过大小上限时清空重写。
+- 当前实现改为追加 BOOT 标记，并在单文件超过默认 5MB 时轮转为 `llm.log.1`、`llm.log.2` 等历史文件，默认保留 5 份。
+- 这不会改变 prompt cache 的请求布局；它只改变本地审计日志的保留策略。
 
 ## 测试计划
 

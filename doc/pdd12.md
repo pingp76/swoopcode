@@ -366,11 +366,16 @@ export interface TaskStore {
 实现要求：
 
 - 每个 group 的真实数据路径是 `groups/<group_id>/group.json`。
-- 所有写入使用 `writeFile(groups/<group_id>/.tmp/group.json.tmp)` 后 `rename(tmp, group.json)` 的原子写入模式。
+- 所有写入使用共享 `atomicWriteJsonFile()` 完成“同目录临时文件 -> JSON 语法校验 -> rename 覆盖”的原子写入模式。
 - JSON 写入使用稳定缩进 `JSON.stringify(value, null, 2)`。
 - `scan()` 只加载合法文件，非法文件不参与正常返回。
 - `rebuildIndex()` 根据所有合法 group 的 `projectRoots` 重建根目录级 `index.json`。
 - `cleanupTempFiles()` 只删除各 group `.tmp/` 下超过阈值的临时文件，不删除 task group。
+
+实现备注（2026-05 Runtime Hardening Round A）：
+
+- TaskStore 的 `group.json` 和派生 `index.json` 已接入共享原子写入工具。
+- 本轮只加固写入路径，不改变 Task Group 的 archive/delete 语义，也不自动清理 completed group。
 
 ### 新增 `src/tasks.ts`
 

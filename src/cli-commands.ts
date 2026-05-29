@@ -326,7 +326,7 @@ export function createMemoryCliCommand(
  * createScheduleCliCommand — 创建 /schedule CLI 命令
  *
  * 直接操作 ScheduleManager，不经过 LLM：
- * - /schedule list [--all]       列出 schedule 摘要
+ * - /schedule list [--all] [--all-projects] 列出 schedule 摘要
  * - /schedule show <schedule_id> 显示 schedule 详情和最近 occurrences
  * - /schedule cancel <schedule_id> 取消 schedule
  * - /schedule delete <schedule_id> 删除未执行的 schedule
@@ -344,9 +344,11 @@ export function createScheduleCliCommand(
       switch (subcommand) {
         case "list": {
           const includeAll = args.includes("--all");
+          const currentProjectOnly = !args.includes("--all-projects");
           const schedules = manager.list({
             includeArchived: includeAll,
             includeCancelled: includeAll,
+            currentProjectOnly,
           });
           if (schedules.length === 0) {
             console.log("No schedules found.");
@@ -439,7 +441,7 @@ export function createScheduleCliCommand(
         }
         default:
           console.log(
-            "Usage: /schedule <list [--all]|show <id>|cancel <id>|delete <id>|occurrences <id>>",
+            "Usage: /schedule <list [--all] [--all-projects]|show <id>|cancel <id>|delete <id>|occurrences <id>>",
           );
       }
     },

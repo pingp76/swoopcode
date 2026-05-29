@@ -21,7 +21,7 @@ import type {
   AsyncRunManager,
   AsyncRunRecord,
 } from "../async-runs.js";
-import type { AsyncCommandPolicy } from "./bash.js";
+import type { AsyncCommandPolicy } from "../execution-policy.js";
 
 /**
  * AsyncRunToolProvider — async run 工具提供者接口
@@ -221,7 +221,11 @@ function formatAsyncRunStatus(record: AsyncRunRecord): string {
       duration_ms: record.durationMs ?? null,
       preview: record.preview,
       output_ref: record.outputPath
-        ? { run_id: record.id, path: record.outputPath }
+        ? {
+            run_id: record.id,
+            output_id: record.outputId ?? null,
+            path: record.outputPath,
+          }
         : null,
       error: record.error ?? null,
     },
@@ -248,6 +252,7 @@ function formatAsyncRunList(records: AsyncRunRecord[]): string {
         finished_at: r.finishedAt ?? null,
         duration_ms: r.durationMs ?? null,
         preview: r.preview,
+        output_id: r.outputId ?? null,
       })),
     },
     null,
@@ -456,11 +461,13 @@ export function createAsyncRunToolProvider(
       };
       if (maxBytes !== undefined) readInput.maxBytes = maxBytes;
       const content = manager.readOutput(readInput);
+      const record = manager.check(runId);
       return {
         output: JSON.stringify(
           {
             type: "async_run_output",
             run_id: runId,
+            output_id: record?.outputId ?? null,
             content,
           },
           null,

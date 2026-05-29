@@ -7,9 +7,11 @@
  * - TranscriptStore 不参与 prompt 构建。
  * - History 可以被 compact/replace；TranscriptStore 不会改写旧事件。
  * - 每条事件都带 sessionId，后续可以自然扩展到多 session 和子智能体。
+ * - TranscriptEvent.sequence 是事件流顺序，不等同于 History.messageSequence。
  */
 
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import type { MessageTimingInput } from "./timeline.js";
 
 export type TranscriptEventType =
   | "user_message"
@@ -36,6 +38,14 @@ export interface TranscriptEvent {
   type: TranscriptEventType;
   /** Agent loop 轮次（如果适用） */
   round?: number;
+  /** 第几次外部用户输入触发的 agent.run() */
+  turnIndex?: number;
+  /** 当前 turn 内第几次 LLM 调用 */
+  loopRound?: number;
+  /** 当前 Agent 实例内第几次 LLM 调用 */
+  loopIndex?: number;
+  /** 对应 History messageSequence；非 message 事件可以没有 */
+  historySequence?: number;
   /** 原始负载，不参与 prompt 处理 */
   payload: unknown;
 }
@@ -45,11 +55,14 @@ export interface TranscriptStore {
     sessionId: string;
     type: TranscriptEventType;
     round?: number;
+    timing?: MessageTimingInput;
     payload: unknown;
   }): TranscriptEvent;
   appendMessage(input: {
     sessionId: string;
-    round: number;
+    round?: number;
+    timing?: MessageTimingInput;
+    historySequence?: number;
     message: ChatCompletionMessageParam;
   }): TranscriptEvent;
   readSession(sessionId: string): TranscriptEvent[];
@@ -80,6 +93,8 @@ export function createTranscriptStore(options?: {
     sessionId: string;
     type: TranscriptEventType;
     round?: number;
+    timing?: MessageTimingInput;
+    historySequence?: number;
     payload: unknown;
   }): TranscriptEvent {
     const nextSequence = (sequenceBySession.get(input.sessionId) ?? 0) + 1;
@@ -93,7 +108,10 @@ export function createTranscriptStore(options?: {
       type: input.type,
       payload: cloneJson(input.payload),
     };
-    if (input.round !== undefined) event.round = input.round;
+    applyTiming(event, input.timing ?? timingFromRound(input.round));
+    if (input.historySequence !== undefined) {
+      event.historySequence = input.historySequence;
+    }
 
     events.push(event);
     return event;
@@ -103,10 +121,14 @@ export function createTranscriptStore(options?: {
     append,
 
     appendMessage(input) {
+      const timing = input.timing ?? timingFromRound(input.round);
       return append({
         sessionId: input.sessionId,
         type: classifyMessage(input.message),
-        round: input.round,
+        ...(timing ? { timing } : {}),
+        ...(input.historySequence !== undefined
+          ? { historySequence: input.historySequence }
+          : {}),
         payload: { message: input.message },
       });
     },
@@ -155,6 +177,24 @@ export function classifyMessage(
     return "user_message";
   }
   return "system_reminder";
+}
+
+function applyTiming(
+  event: TranscriptEvent,
+  timing: MessageTimingInput | undefined,
+): void {
+  if (!timing) return;
+  const loopRound = timing.loopRound ?? timing.round;
+  if (timing.turnIndex !== undefined) event.turnIndex = timing.turnIndex;
+  if (loopRound !== undefined) {
+    event.loopRound = loopRound;
+    event.round = loopRound;
+  }
+  if (timing.loopIndex !== undefined) event.loopIndex = timing.loopIndex;
+}
+
+function timingFromRound(round: number | undefined): MessageTimingInput | undefined {
+  return round !== undefined ? { round } : undefined;
 }
 
 function defaultIdGenerator(): string {

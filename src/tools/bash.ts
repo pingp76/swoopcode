@@ -20,38 +20,11 @@
 
 import { exec } from "node:child_process";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
-
-/**
- * DANGEROUS_PATTERNS — 危险命令的正则表达式列表
- *
- * 每个正则匹配一类危险操作。这里的策略是"黑名单"模式：
- * 列出已知的危险模式，匹配到的就拒绝。
- *
- * \b 表示单词边界，防止误匹配（比如 "reboot" 不应匹配 "myreboot"）
- */
-const DANGEROUS_PATTERNS: RegExp[] = [
-  // rm -rf：递归强制删除，尤其是 rm -rf / 会删除整个文件系统
-  /\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|.*--no-preserve-root)/,
-  // mkfs：格式化文件系统
-  /\bmkfs\b/,
-  // dd 写入块设备：可以直接覆盖硬盘数据
-  /\bdd\s+.*of=\/dev\//,
-  // fork bomb：fork 炸弹，会耗尽系统资源
-  /:\(\)\{\s*:\|:&\s*\}/,
-  // chmod 000 根目录：会锁死整个系统
-  /\bchmod\s+(-R\s+)?000\s+\//,
-  // 递归 chown 根目录：修改所有文件的 ownership
-  /\bchown\b.*\b-R\b.*\//,
-  // 重定向到块设备：覆盖硬盘
-  />\s*\/dev\/sda/,
-  // 系统电源命令
-  /\bshutdown\b/,
-  /\breboot\b/,
-  /\bpoweroff\b/,
-  // 防火墙操作：可能导致网络断开
-  /\biptables\b/,
-  /\bufw\b/,
-];
+import {
+  createDefaultAsyncCommandPolicy as createDefaultExecutionAsyncCommandPolicy,
+  type AsyncCommandPolicy,
+} from "../execution-policy.js";
+import { isDangerousCommand } from "../command-safety.js";
 
 import { ToolResult } from "./types.js";
 
@@ -59,75 +32,9 @@ import { ToolResult } from "./types.js";
 // 其他已经 import { ToolResult } from "./bash.js" 的文件不需要修改
 export type { ToolResult } from "./types.js";
 
-/**
- * isDangerousCommand — 检查命令是否危险
- *
- * 遍历所有危险模式，只要有一个匹配就返回 true。
- *
- * @param command - 要检查的命令字符串
- * @returns true 表示命令危险，应该被拒绝
- */
-export function isDangerousCommand(command: string): boolean {
-  return DANGEROUS_PATTERNS.some((pattern) => pattern.test(command));
-}
+export { isDangerousCommand } from "../command-safety.js";
 
-/**
- * AsyncCommandPolicy — 异步命令策略接口
- *
- * 用于 async run 的 command executor 和前台冲突检查。
- * 验证命令是否符合只读诊断命令白名单。
- */
-export interface AsyncCommandPolicy {
-  maxTimeoutMs: number;
-  validate(command: string): { allowed: boolean; reason?: string };
-}
-
-/**
- * SHELL_OPERATORS — 需要拒绝的 shell 控制字符
- *
- * 这些字符可以组合命令产生副作用，async run 的 command executor 必须严格拒绝。
- */
-const SHELL_OPERATORS = /[;&&||`$()><>|]/;
-
-/**
- * WRITE_COMMAND_PATTERNS — 写入/修改命令的正则列表
- *
- * 这些命令会修改文件系统或 git 历史，async run 第一版必须拒绝。
- */
-const WRITE_COMMAND_PATTERNS: RegExp[] = [
-  /\bgit\s+add\b/,
-  /\bgit\s+commit\b/,
-  /\bgit\s+push\b/,
-  /\bgit\s+reset\b/,
-  /\bgit\s+checkout\b/,
-  /\bnpm\s+run\s+format\b/,
-  /\bfind\b.*\b-delete\b/,
-  /\bfind\b.*\b-exec\b/,
-];
-
-/**
- * ALLOWED_ASYNC_COMMANDS — 允许在 async run 中执行的诊断命令前缀白名单
- */
-const ALLOWED_ASYNC_COMMANDS: string[] = [
-  "git diff",
-  "git status",
-  "git log",
-  "git show",
-  "npm run typecheck",
-  "npm run lint",
-  "npm run format:check",
-  "npm test",
-  "npx vitest run",
-  "npx eslint",
-  "npx tsc",
-  "rg",
-  "sed -n",
-  "cat",
-  "head",
-  "tail",
-  "ls",
-  "pwd",
-];
+export type { AsyncCommandPolicy } from "../execution-policy.js";
 
 /**
  * createDefaultAsyncCommandPolicy — 创建默认的异步命令策略
@@ -139,65 +46,7 @@ const ALLOWED_ASYNC_COMMANDS: string[] = [
  * 4. 最后检查白名单前缀
  */
 export function createDefaultAsyncCommandPolicy(): AsyncCommandPolicy {
-  return {
-    maxTimeoutMs: 300_000,
-    validate(command: string): { allowed: boolean; reason?: string } {
-      // 步骤 0：复用危险命令黑名单
-      if (isDangerousCommand(command)) {
-        return {
-          allowed: false,
-          reason: "Dangerous command blocked",
-        };
-      }
-
-      // 步骤 1：拒绝 shell 控制字符（先做严格字符串检查）
-      if (SHELL_OPERATORS.test(command)) {
-        return {
-          allowed: false,
-          reason: "Shell operators are not allowed in async commands",
-        };
-      }
-
-      // 步骤 2：拒绝写入/修改命令
-      for (const pattern of WRITE_COMMAND_PATTERNS) {
-        if (pattern.test(command)) {
-          return {
-            allowed: false,
-            reason: `Write command not allowed: ${command.slice(0, 40)}`,
-          };
-        }
-      }
-
-      // 步骤 3：拒绝裸 find（不含白名单前缀的 find）
-      const trimmed = command.trim();
-      if (trimmed.startsWith("find ") || trimmed === "find") {
-        // find 命令只有在匹配白名单时才允许
-        const isAllowed = ALLOWED_ASYNC_COMMANDS.some((allowed) =>
-          trimmed.startsWith(allowed),
-        );
-        if (!isAllowed) {
-          return {
-            allowed: false,
-            reason: "Bare 'find' command is not allowed in async runs",
-          };
-        }
-        return { allowed: true };
-      }
-
-      // 步骤 4：检查白名单
-      const isAllowed = ALLOWED_ASYNC_COMMANDS.some((allowed) =>
-        trimmed.startsWith(allowed),
-      );
-      if (!isAllowed) {
-        return {
-          allowed: false,
-          reason: `Command not in allowed list: ${command.slice(0, 40)}`,
-        };
-      }
-
-      return { allowed: true };
-    },
-  };
+  return createDefaultExecutionAsyncCommandPolicy();
 }
 
 /**

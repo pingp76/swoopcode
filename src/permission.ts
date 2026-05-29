@@ -16,9 +16,9 @@
  */
 
 import { resolve, sep, basename } from "node:path";
-import { isDangerousCommand } from "./tools/bash.js";
+import { isDangerousCommand } from "./command-safety.js";
 import { isPathSafe } from "./tools/files.js";
-import type { AsyncCommandPolicy } from "./tools/bash.js";
+import type { AsyncCommandPolicy } from "./execution-policy.js";
 
 // ---------------------------------------------------------------------------
 // 类型定义
@@ -71,6 +71,7 @@ type ToolCategory =
   | "skill"
   | "subagent"
   | "async-run"
+  | "output"
   | "schedule"
   | "unknown";
 
@@ -78,13 +79,19 @@ type ToolCategory =
 function categorizeTool(toolName: string): ToolCategory {
   if (toolName === "run_bash") return "bash";
   if (toolName === "run_read") return "file-read";
-  if (toolName === "run_write" || toolName === "run_edit") return "file-write";
+  if (
+    toolName === "run_write" ||
+    toolName === "run_edit" ||
+    toolName === "run_edit_exact"
+  )
+    return "file-write";
   if (toolName.startsWith("run_todo_")) return "todo";
   if (toolName.startsWith("run_task_")) return "task";
   if (toolName.startsWith("run_memory_")) return "memory";
   if (toolName === "run_skill") return "skill";
   if (toolName === "run_subagent") return "subagent";
   if (toolName.startsWith("run_async_")) return "async-run";
+  if (toolName === "run_output_read") return "output";
   if (toolName.startsWith("run_schedule_")) return "schedule";
   return "unknown";
 }
@@ -204,6 +211,7 @@ export function createPermissionManager(projectDir: string): PermissionManager {
       if (category === "todo") return { action: "allow" };
       if (category === "task") return { action: "allow" };
       if (category === "skill") return { action: "allow" };
+      if (category === "output") return { action: "allow" };
 
       // ── 步骤 4.5：memory 工具权限 ──
       // run_memory_list/read 无需确认，run_memory_create/delete 所有模式都需确认
@@ -384,63 +392,6 @@ export function createPermissionManager(projectDir: string): PermissionManager {
         };
       }
 
-      // ── 步骤 5：模式权限检查 ──
-
-      // plan 模式：bash 禁止，写操作只允许 .claude/plans/
-      if (mode === "plan") {
-        if (category === "bash") {
-          return {
-            action: "deny",
-            reason: "bash commands are not allowed in plan mode",
-          };
-        }
-        if (category === "file-write") {
-          const rawPath = getPathArg(ctx.args);
-          const plansDir = resolve(projectRoot, ".claude", "plans");
-          const resolvedPath = resolve(projectRoot, rawPath);
-          if (
-            resolvedPath !== plansDir &&
-            !resolvedPath.startsWith(plansDir + sep)
-          ) {
-            return {
-              action: "deny",
-              reason: `Write to "${rawPath}" not allowed in plan mode (only .claude/plans/)`,
-            };
-          }
-          return { action: "allow" };
-        }
-        // plan 模式下 run_subagent 允许（子智能体继承同一模式）
-        if (category === "subagent") return { action: "allow" };
-      }
-
-      // auto 模式：所有通过黑名单和路径边界的操作直接放行
-      if (mode === "auto") {
-        return { action: "allow" };
-      }
-
-      // ── 步骤 6：default 模式下的敏感操作确认 ──
-      if (category === "bash") {
-        const command = String(ctx.args["command"] ?? "");
-        return {
-          action: "ask",
-          message: `Allow bash command: ${command.slice(0, 120)}`,
-        };
-      }
-      if (category === "file-write") {
-        const rawPath = getPathArg(ctx.args);
-        return {
-          action: "ask",
-          message: `Allow ${ctx.toolName}: ${rawPath}`,
-        };
-      }
-      if (category === "subagent") {
-        const task = String(ctx.args["task"] ?? "");
-        return {
-          action: "ask",
-          message: `Allow subagent task: ${task.slice(0, 120)}`,
-        };
-      }
-
       // 兜底：不应到达，安全起见放行
       return { action: "allow" };
     },
@@ -520,6 +471,7 @@ export function createScopedSubagentPermissionManager(deps: {
       if (
         ctx.toolName === "run_write" ||
         ctx.toolName === "run_edit" ||
+        ctx.toolName === "run_edit_exact" ||
         ctx.toolName === "run_subagent" ||
         ctx.toolName === "run_todo_add" ||
         ctx.toolName === "run_todo_complete" ||

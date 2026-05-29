@@ -318,18 +318,19 @@ describe("createSubagentToolProvider", () => {
 // ============================================================
 
 describe("filtered tool registry for sub-agent", () => {
-  it("contains only bash and file tools (4 tools)", () => {
+  it("contains only bash and file tools (5 tools)", () => {
     // createToolRegistry() 不传任何 provider → 只有 bash + files
     const registry = createToolRegistry();
     const defs = registry.getToolDefinitions();
 
-    expect(defs).toHaveLength(4);
+    expect(defs).toHaveLength(5);
 
     const names = defs.map((d) => d.function.name);
     expect(names).toContain("run_bash");
     expect(names).toContain("run_read");
     expect(names).toContain("run_write");
     expect(names).toContain("run_edit");
+    expect(names).toContain("run_edit_exact");
   });
 
   it("does not contain run_subagent", () => {

@@ -32,8 +32,14 @@ import type { ContextCompressor } from "./compressor.js";
 import type { History } from "./history.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import { executeBash } from "./tools/bash.js";
-import type { AsyncCommandPolicy } from "./tools/bash.js";
+import {
+  createExecutionPolicy,
+  createReadonlyCommandPolicy,
+  type AsyncCommandPolicy,
+  type ExecutionPolicy,
+} from "./execution-policy.js";
 import { createHistory } from "./history.js";
+import type { OutputStore } from "./output-store.js";
 
 // ---------------------------------------------------------------------------
 // 类型定义
@@ -86,6 +92,7 @@ export interface AsyncRunRecord {
   finishedAt?: string;
   durationMs?: number;
   preview: string;
+  outputId?: string;
   outputPath?: string;
   error?: string;
   childSessionId?: string;
@@ -106,7 +113,7 @@ export interface AsyncRunNotification {
   groupId?: string;
   persistentTaskId?: string;
   preview: string;
-  outputRef?: { runId: string; path: string };
+  outputRef?: { runId: string; outputId?: string; path?: string };
   timestamp: string;
 }
 
@@ -233,14 +240,6 @@ function deepClone<T>(value: T): T {
 }
 
 /**
- * isPathWithin — 检查路径是否在项目根目录内
- */
-function isPathWithin(filePath: string, baseDir: string): boolean {
-  const resolved = resolve(baseDir, filePath);
-  return resolved === baseDir || resolved.startsWith(baseDir + sep);
-}
-
-/**
  * pathsOverlap — 检查两个路径是否重叠（一个是另一个的前缀或相同）
  *
  * 用于前台冲突检测：前台写入路径与 async run 声明的 readPaths 是否重叠
@@ -281,7 +280,8 @@ function writeRecordSnapshot(record: AsyncRunRecord): void {
  * @param deps.taskOutputsDir - Agent 全局输出目录，async run 输出放在其下的 async-runs/
  * @param deps.llm - LLM 客户端，供 subagent executor 复用
  * @param deps.logger - 日志器
- * @param deps.commandPolicy - 命令策略，用于前台冲突检查中验证 bash 命令的只读性
+ * @param deps.executionPolicy - 非交互执行边界，用于验证资源声明和命令 profile
+ * @param deps.commandPolicy - 兼容旧接口的 readonly 命令策略
  * @param deps.createAgentFn - Agent 工厂函数，供 subagent executor 创建 child Agent
  * @param deps.createCompressorFn - 压缩器工厂函数，供 subagent 创建独立压缩器
  * @param deps.createReadonlyRegistryFn - 只读注册表工厂函数，供 subagent 获取过滤后的工具集
@@ -297,7 +297,9 @@ export function createAsyncRunManager(deps: {
   taskOutputsDir: string;
   llm: LLMClient;
   logger: Logger;
-  commandPolicy: AsyncCommandPolicy;
+  executionPolicy?: ExecutionPolicy;
+  commandPolicy?: AsyncCommandPolicy;
+  outputStore?: OutputStore;
   createAgentFn: CreateAgentFn;
   createCompressorFn: () => ContextCompressor;
   createReadonlyRegistryFn: (readPaths: string[]) => ToolRegistry;
@@ -315,6 +317,7 @@ export function createAsyncRunManager(deps: {
     llm,
     logger,
     commandPolicy,
+    outputStore,
     createAgentFn,
     createCompressorFn,
     createReadonlyRegistryFn,
@@ -326,6 +329,10 @@ export function createAsyncRunManager(deps: {
     permissionManager,
     onFinish,
   } = deps;
+
+  const executionPolicy = deps.executionPolicy ?? createExecutionPolicy();
+  const readonlyCommandPolicy =
+    commandPolicy ?? createReadonlyCommandPolicy(executionPolicy);
 
   // 进程内 record 表：run_id → AsyncRunRecord
   const records = new Map<string, AsyncRunRecord>();
@@ -384,7 +391,28 @@ export function createAsyncRunManager(deps: {
     const started = new Date(record.startedAt).getTime();
     record.durationMs = now.getTime() - started;
 
-    // 写输出到文件
+    // 先把完整输出登记到 OutputStore，得到 LLM 可读的 output_id。
+    // 旧 outputPath 仍会继续写入，保持 run_async_output_read 的 PDD13 兼容语义。
+    if (output !== undefined && outputStore) {
+      try {
+        const stored = outputStore.writeText({
+          sourceKind: "async_run",
+          sourceId: record.id,
+          runId: record.id,
+          projectRoot,
+          content: output,
+        });
+        record.outputId = stored.id;
+      } catch (err) {
+        logger.warn(
+          "Failed to register async run output for %s: %s",
+          record.id,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+
+    // 写输出到旧文件路径
     if (output !== undefined && record.outputPath) {
       const outputDir = resolve(record.outputPath, "..");
       try {
@@ -443,8 +471,11 @@ export function createAsyncRunManager(deps: {
     if (record.groupId !== undefined) notification.groupId = record.groupId;
     if (record.persistentTaskId !== undefined)
       notification.persistentTaskId = record.persistentTaskId;
-    if (record.outputPath)
-      notification.outputRef = { runId: record.id, path: record.outputPath };
+    if (record.outputId || record.outputPath) {
+      notification.outputRef = { runId: record.id };
+      if (record.outputId) notification.outputRef.outputId = record.outputId;
+      if (record.outputPath) notification.outputRef.path = record.outputPath;
+    }
     notificationQueue.push(notification);
 
     logger.info(
@@ -500,21 +531,28 @@ export function createAsyncRunManager(deps: {
       );
     }
 
-    // 第一版 write_paths 必须为空
+    // 第一版 async run 仍然是只读执行层，先保留 PDD13 的用户友好错误文案。
     if (writePaths.length > 0) {
       throw new Error(
         "write_paths must be empty in the first version of async runs",
       );
     }
 
-    // 验证 readPaths 路径边界
-    for (const p of readPaths) {
-      if (typeof p !== "string") {
-        throw new Error("read_paths must contain only strings");
-      }
-      if (!isPathWithin(p, projectRoot)) {
+    const resourceValidation = executionPolicy.validateResources({
+      projectRoot,
+      readPaths,
+      writePaths,
+      profile: "readonly",
+    });
+    if (!resourceValidation.allowed) {
+      throw new Error(resourceValidation.reason ?? "Invalid async run resources");
+    }
+
+    if (input.executor === "command" && input.command) {
+      const commandValidation = readonlyCommandPolicy.validate(input.command);
+      if (!commandValidation.allowed) {
         throw new Error(
-          `read_paths entry "${p}" is outside project directory`,
+          commandValidation.reason ?? "Command is not allowed in async run",
         );
       }
     }
@@ -701,7 +739,7 @@ export function createAsyncRunManager(deps: {
     const scopedPermissionManager = permissionManager
       ? createScopedSubagentPermissionManager({
           parent: permissionManager,
-          commandPolicy,
+          commandPolicy: readonlyCommandPolicy,
         })
       : {
           check: () => ({ action: "allow" } as import("./permission.js").PermissionDecision),
@@ -809,6 +847,14 @@ export function createAsyncRunManager(deps: {
       throw new Error(`Async run not found or no output path: ${runId}`);
     }
 
+    // 新版本优先通过 OutputStore 读取，保证输出读取走统一 output_id 边界。
+    if (record.outputId && outputStore) {
+      return outputStore.read({
+        outputId: record.outputId,
+        maxBytes,
+      }).content;
+    }
+
     // 安全检查：输出路径必须在 taskOutputsDir/async-runs/ 下
     const expectedPrefix = resolve(taskOutputsDir, "async-runs");
     const resolvedOutputPath = resolve(record.outputPath);
@@ -867,8 +913,12 @@ export function createAsyncRunManager(deps: {
       return { blocked: false };
     }
 
-    // run_write / run_edit：检查路径是否与 running runs 的 readPaths 重叠
-    if (toolName === "run_write" || toolName === "run_edit") {
+    // run_write / run_edit / run_edit_exact：检查路径是否与 running runs 的 readPaths 重叠
+    if (
+      toolName === "run_write" ||
+      toolName === "run_edit" ||
+      toolName === "run_edit_exact"
+    ) {
       const path = String(args["path"] ?? "");
       if (!path) return { blocked: false };
 
@@ -889,7 +939,7 @@ export function createAsyncRunManager(deps: {
       const command = String(args["command"] ?? "");
       if (!command) return { blocked: false };
 
-      const validation = commandPolicy.validate(command);
+      const validation = readonlyCommandPolicy.validate(command);
       if (!validation.allowed) {
         return {
           blocked: true,

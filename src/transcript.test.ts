@@ -72,16 +72,45 @@ describe("createTranscriptStore", () => {
     const message = { role: "user" as const, content: "hello" };
     const event = store.appendMessage({
       sessionId: "s1",
-      round: 0,
+      timing: { turnIndex: 1, loopRound: 0, loopIndex: 1 },
+      historySequence: 7,
       message,
     });
 
     message.content = "changed";
 
     expect(event.type).toBe("user_message");
+    expect(event.turnIndex).toBe(1);
+    expect(event.loopRound).toBe(0);
+    expect(event.loopIndex).toBe(1);
+    expect(event.round).toBe(0);
+    expect(event.historySequence).toBe(7);
     expect(event.payload).toEqual({
       message: { role: "user", content: "hello" },
     });
+  });
+
+  it("keeps transcript sequence separate from historySequence", () => {
+    const store = createTestStore();
+
+    const first = store.appendMessage({
+      sessionId: "s1",
+      timing: { turnIndex: 1, loopRound: 1, loopIndex: 1 },
+      historySequence: 42,
+      message: { role: "assistant", content: "hello" },
+    });
+    const second = store.append({
+      sessionId: "s1",
+      type: "recovery_event",
+      timing: { turnIndex: 1, loopRound: 1, loopIndex: 1 },
+      payload: { action: "backoff" },
+    });
+
+    expect(first.sequence).toBe(1);
+    expect(first.historySequence).toBe(42);
+    expect(second.sequence).toBe(2);
+    expect(second.historySequence).toBeUndefined();
+    expect(second.loopIndex).toBe(1);
   });
 
   it("reads and searches events without mutating the log", () => {

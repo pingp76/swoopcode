@@ -24,21 +24,38 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 /**
  * MessageBlock — 消息块，压缩操作的最小原子单位
  *
- * round 字段记录该消息块所属的 agent loop 轮次，用于衰减压缩判断"新旧"。
- * 由 groupToBlocks() 从消息的 _round 元数据中提取。
+ * timing 字段记录该消息块在 Agent 时间线中的位置。
+ * - loopIndex 用于衰减压缩判断"新旧"
+ * - loopRound / round 只描述当前 turn 内循环次数，round 是兼容字段
+ * - messageSequence 用于 debug 和 compact round-trip
+ * 这些字段由 groupToBlocks() 从消息的内部 _xxx 元数据中提取。
  */
+interface BlockTiming {
+  turnIndex?: number;
+  loopRound?: number;
+  loopIndex?: number;
+  messageSequence?: number;
+  round?: number;
+}
+
 export type MessageBlock =
-  | { type: "text"; user?: ChatCompletionMessageParam; assistant?: ChatCompletionMessageParam; round?: number }
-  | { type: "tool_use"; user?: ChatCompletionMessageParam; assistant: ChatCompletionMessageParam; toolResults: ChatCompletionMessageParam[]; round?: number }
-  | { type: "summary"; user: ChatCompletionMessageParam; round?: number };
+  | ({ type: "text"; user?: ChatCompletionMessageParam; assistant?: ChatCompletionMessageParam } & BlockTiming)
+  | ({ type: "tool_use"; user?: ChatCompletionMessageParam; assistant: ChatCompletionMessageParam; toolResults: ChatCompletionMessageParam[] } & BlockTiming)
+  | ({ type: "summary"; user: ChatCompletionMessageParam } & BlockTiming);
 
 /**
- * 带有 _round 元数据的消息类型（内部使用）
+ * 带有内部 timing 元数据的消息类型（内部使用）
  *
- * _round 在 normalize 中不会被清除（normalize 只清理 content 数组中的 _ 前缀键），
+ * 这些字段在 normalize 中不会被清除（normalize 只清理 content 数组中的 _ 前缀键），
  * 但会在 flattenToMessages 中被清除，不会发送给 LLM API。
  */
-type AnnotatedMessage = ChatCompletionMessageParam & { _round?: number };
+type AnnotatedMessage = ChatCompletionMessageParam & {
+  _turnIndex?: number;
+  _loopRound?: number;
+  _loopIndex?: number;
+  _messageSequence?: number;
+  _round?: number;
+};
 
 // ---------------------------------------------------------------------------
 // Token 估算
@@ -161,23 +178,59 @@ export function truncateToTokens(text: string, maxTokens: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * readRound — 从消息中读取 _round 元数据
+ * readTiming — 从消息中读取内部 timing 元数据
  *
- * @param msg - 消息（可能带有 _round 字段）
- * @returns 轮次号，如果不存在返回 undefined
+ * @param msg - 消息（可能带有 _turnIndex / _loopIndex 等字段）
+ * @returns timing 字段集合
  */
-function readRound(msg: ChatCompletionMessageParam): number | undefined {
-  return (msg as AnnotatedMessage)._round;
+function readTiming(msg: ChatCompletionMessageParam): BlockTiming {
+  const annotated = msg as AnnotatedMessage;
+  const timing: BlockTiming = {};
+  if (annotated._turnIndex !== undefined) timing.turnIndex = annotated._turnIndex;
+  if (annotated._loopRound !== undefined) timing.loopRound = annotated._loopRound;
+  if (annotated._loopIndex !== undefined) timing.loopIndex = annotated._loopIndex;
+  if (annotated._messageSequence !== undefined) {
+    timing.messageSequence = annotated._messageSequence;
+  }
+  if (annotated._round !== undefined) timing.round = annotated._round;
+  return timing;
 }
 
 /**
- * minRound — 从多个轮次号中取最小值
+ * mergeTiming — 从多条消息的 timing 中取最早值
  *
- * 用于确定消息块所属的轮次：取块内所有消息中最早的轮次。
+ * 用于确定消息块所属的聚合时间：取块内所有消息中最早的值。
  */
-function minRound(...rounds: (number | undefined)[]): number | undefined {
-  const defined = rounds.filter((r): r is number => r !== undefined);
+function mergeTiming(messages: ChatCompletionMessageParam[]): BlockTiming {
+  const result: BlockTiming = {};
+  const timings = messages.map(readTiming);
+  const turnIndex = minNumber(timings.map((t) => t.turnIndex));
+  const loopRound = minNumber(timings.map((t) => t.loopRound));
+  const loopIndex = minNumber(timings.map((t) => t.loopIndex));
+  const messageSequence = minNumber(timings.map((t) => t.messageSequence));
+  const round = minNumber(timings.map((t) => t.round));
+
+  if (turnIndex !== undefined) result.turnIndex = turnIndex;
+  if (loopRound !== undefined) result.loopRound = loopRound;
+  if (loopIndex !== undefined) result.loopIndex = loopIndex;
+  if (messageSequence !== undefined) result.messageSequence = messageSequence;
+  if (round !== undefined) result.round = round;
+  return result;
+}
+
+function minNumber(values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined);
   return defined.length > 0 ? Math.min(...defined) : undefined;
+}
+
+function applyTiming(block: MessageBlock, timing: BlockTiming): void {
+  if (timing.turnIndex !== undefined) block.turnIndex = timing.turnIndex;
+  if (timing.loopRound !== undefined) block.loopRound = timing.loopRound;
+  if (timing.loopIndex !== undefined) block.loopIndex = timing.loopIndex;
+  if (timing.messageSequence !== undefined) {
+    block.messageSequence = timing.messageSequence;
+  }
+  if (timing.round !== undefined) block.round = timing.round;
 }
 
 /**
@@ -190,7 +243,7 @@ function minRound(...rounds: (number | undefined)[]): number | undefined {
  * 4. assistant 有 tool_calls → tool_use 块，收集后续匹配的 tool 消息
  * 5. assistant 无 tool_calls → 与缓冲的 user 组成 text 块
  *
- * @param messages - 扁平消息列表（已标准化，可能带 _round 元数据）
+ * @param messages - 扁平消息列表（已标准化，可能带内部 timing 元数据）
  * @returns 消息块数组
  */
 export function groupToBlocks(
@@ -218,8 +271,7 @@ export function groupToBlocks(
           type: "summary",
           user: msg,
         };
-        const r = readRound(msg);
-        if (r !== undefined) block.round = r;
+        applyTiming(block, readTiming(msg));
         blocks.push(block);
       } else {
         pendingUser = msg;
@@ -257,12 +309,14 @@ export function groupToBlocks(
           block.user = pendingUser;
           pendingUser = undefined;
         }
-        const r = minRound(
-          block.user ? readRound(block.user) : undefined,
-          readRound(msg),
-          ...toolResults.map(readRound),
+        applyTiming(
+          block,
+          mergeTiming([
+            ...(block.user ? [block.user] : []),
+            msg,
+            ...toolResults,
+          ]),
         );
-        if (r !== undefined) block.round = r;
         blocks.push(block);
       } else {
         // text 块：user + assistant
@@ -271,13 +325,11 @@ export function groupToBlocks(
           assistant: msg,
         };
         if (pendingUser !== undefined) block.user = pendingUser;
-        const r = minRound(
-          pendingUser ? readRound(pendingUser) : undefined,
-          readRound(msg),
+        applyTiming(
+          block,
+          mergeTiming([...(pendingUser ? [pendingUser] : []), msg]),
         );
-        if (r !== undefined) block.round = r;
         blocks.push(block);
-        pendingUser = undefined;
         pendingUser = undefined;
         i++;
       }
@@ -296,8 +348,7 @@ export function groupToBlocks(
       type: "text",
       user: pendingUser,
     };
-    const r = readRound(pendingUser);
-    if (r !== undefined) block.round = r;
+    applyTiming(block, readTiming(pendingUser));
     blocks.push(block);
   }
 
@@ -307,10 +358,10 @@ export function groupToBlocks(
 /**
  * flattenToMessages — 将消息块数组还原为扁平消息列表
  *
- * 同时清除所有消息中的 _round 元数据，确保不会发送给 LLM API。
+ * 同时清除所有消息中的内部 timing 元数据，确保不会发送给 LLM API。
  *
  * @param blocks - 消息块数组
- * @returns 扁平消息列表（不含 _round 元数据）
+ * @returns 扁平消息列表（不含内部 timing 元数据）
  */
 export function flattenToMessages(
   blocks: MessageBlock[],
@@ -320,21 +371,21 @@ export function flattenToMessages(
   for (const block of blocks) {
     if (block.type === "text") {
       if (block.user) {
-        result.push(stripRound(block.user));
+        result.push(stripTiming(block.user));
       }
       if (block.assistant) {
-        result.push(stripRound(block.assistant));
+        result.push(stripTiming(block.assistant));
       }
     } else if (block.type === "tool_use") {
       if (block.user) {
-        result.push(stripRound(block.user));
+        result.push(stripTiming(block.user));
       }
-      result.push(stripRound(block.assistant));
+      result.push(stripTiming(block.assistant));
       for (const tr of block.toolResults) {
-        result.push(stripRound(tr));
+        result.push(stripTiming(tr));
       }
     } else if (block.type === "summary") {
-      result.push(stripRound(block.user));
+      result.push(stripTiming(block.user));
     }
   }
 
@@ -370,19 +421,40 @@ function extractContent(msg: ChatCompletionMessageParam): string {
 }
 
 /**
- * stripRound — 清除消息中的 _round 元数据
+ * stripTiming — 清除消息中的内部 timing 元数据
  *
  * 确保发送给 LLM API 的消息不会包含内部元数据。
  * 使用 spread 操作创建新对象，不修改原消息。
  */
-export function stripRound(
+export function stripTiming(
   msg: ChatCompletionMessageParam,
 ): ChatCompletionMessageParam {
   const annotated = msg as AnnotatedMessage;
-  if (!("_round" in annotated)) return msg;
+  if (
+    !("_turnIndex" in annotated) &&
+    !("_loopRound" in annotated) &&
+    !("_loopIndex" in annotated) &&
+    !("_messageSequence" in annotated) &&
+    !("_round" in annotated)
+  ) {
+    return msg;
+  }
 
-  // 创建新对象，排除 _round 字段
-  const { _round, ...rest } = annotated;
-  void _round; // 显式丢弃，避免 ESLint 未使用变量警告
+  // 创建新对象，排除所有内部 timing 字段
+  const {
+    _turnIndex,
+    _loopRound,
+    _loopIndex,
+    _messageSequence,
+    _round,
+    ...rest
+  } = annotated;
+  void _turnIndex;
+  void _loopRound;
+  void _loopIndex;
+  void _messageSequence;
+  void _round;
   return rest as ChatCompletionMessageParam;
 }
+
+export const stripRound = stripTiming;

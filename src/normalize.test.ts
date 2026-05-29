@@ -54,7 +54,7 @@ describe("normalizeMessages - metadata filtering", () => {
  * tool_result 补全测试
  */
 describe("normalizeMessages - tool result completion", () => {
-  it("inserts placeholder for missing tool result", () => {
+  it("inserts missing tool result immediately after its assistant tool call", () => {
     const messages: ChatCompletionMessageParam[] = [
       { role: "user", content: "list files" },
       {
@@ -73,15 +73,16 @@ describe("normalizeMessages - tool result completion", () => {
     ];
 
     const result = normalizeMessages(messages);
-    // 应该在最后追加一条 tool 消息来补全 call_123
-    const toolMsg = result.find(
-      (m) =>
-        m.role === "tool" &&
-        "tool_call_id" in m &&
-        (m as unknown as Record<string, unknown>).tool_call_id === "call_123",
+    expect(result.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "user",
+    ]);
+    expect((result[2] as unknown as Record<string, unknown>).tool_call_id).toBe(
+      "call_123",
     );
-    expect(toolMsg).toBeDefined();
-    expect((toolMsg as unknown as Record<string, unknown>).content).toBe(
+    expect((result[2] as unknown as Record<string, unknown>).content).toBe(
       "(cancelled)",
     );
   });
@@ -111,6 +112,91 @@ describe("normalizeMessages - tool result completion", () => {
     // 不应该追加额外的 tool 消息
     const toolMsgs = result.filter((m) => m.role === "tool");
     expect(toolMsgs).toHaveLength(1);
+  });
+
+  it("keeps multiple tool results adjacent and ordered by tool_calls", () => {
+    const messages: ChatCompletionMessageParam[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"pwd"}' },
+          },
+          {
+            id: "call_2",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"ls"}' },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_2",
+        content: "file1.txt",
+      } as unknown as ChatCompletionMessageParam,
+    ];
+
+    const result = normalizeMessages(messages);
+    expect(result.map((m) => m.role)).toEqual(["assistant", "tool", "tool"]);
+    expect((result[1] as unknown as Record<string, unknown>).tool_call_id).toBe(
+      "call_1",
+    );
+    expect((result[1] as unknown as Record<string, unknown>).content).toBe(
+      "(cancelled)",
+    );
+    expect((result[2] as unknown as Record<string, unknown>).tool_call_id).toBe(
+      "call_2",
+    );
+  });
+
+  it("moves existing out-of-place tool result back into the assistant tool block", () => {
+    const messages: ChatCompletionMessageParam[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_late",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"pwd"}' },
+          },
+        ],
+      },
+      { role: "user", content: "next question" },
+      {
+        role: "tool",
+        tool_call_id: "call_late",
+        content: "/tmp/project",
+      } as unknown as ChatCompletionMessageParam,
+    ];
+
+    const result = normalizeMessages(messages);
+    expect(result.map((m) => m.role)).toEqual(["assistant", "tool", "user"]);
+    expect((result[1] as unknown as Record<string, unknown>).tool_call_id).toBe(
+      "call_late",
+    );
+    expect((result[1] as unknown as Record<string, unknown>).content).toBe(
+      "/tmp/project",
+    );
+  });
+
+  it("drops orphan tool result without an assistant tool call", () => {
+    const messages: ChatCompletionMessageParam[] = [
+      { role: "user", content: "hello" },
+      {
+        role: "tool",
+        tool_call_id: "orphan",
+        content: "orphaned output",
+      } as unknown as ChatCompletionMessageParam,
+      { role: "assistant", content: "hi" },
+    ];
+
+    const result = normalizeMessages(messages);
+    expect(result.some((m) => m.role === "tool")).toBe(false);
+    expect(result.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
 });
 
@@ -145,6 +231,30 @@ describe("normalizeMessages - consecutive role merging", () => {
     expect(content).toHaveLength(2);
   });
 
+  it("does not merge assistant messages when either side has tool calls", () => {
+    const messages: ChatCompletionMessageParam[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_789",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"pwd"}' },
+          },
+        ],
+      },
+      { role: "assistant", content: "plain text" },
+    ];
+
+    const result = normalizeMessages(messages);
+    expect(result.map((m) => m.role)).toEqual([
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+  });
+
   it("does not merge different roles", () => {
     const messages: ChatCompletionMessageParam[] = [
       { role: "user", content: "question" },
@@ -166,5 +276,48 @@ describe("normalizeMessages - consecutive role merging", () => {
     ];
     const result = normalizeMessages(messages);
     expect(result).toHaveLength(1);
+  });
+});
+
+describe("normalizeMessages - purity", () => {
+  it("does not mutate input messages", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "hello", _timestamp: 123 }],
+        _round: 7,
+      },
+      { role: "user", content: "second" },
+    ] as unknown as ChatCompletionMessageParam[];
+    const before = JSON.parse(JSON.stringify(messages)) as unknown;
+
+    normalizeMessages(messages);
+
+    expect(messages).toEqual(before);
+  });
+
+  it("does not share merged content array with input messages", () => {
+    const messages: ChatCompletionMessageParam[] = [
+      { role: "user", content: "first message" },
+      { role: "user", content: "second message" },
+    ];
+
+    const result = normalizeMessages(messages);
+    const content = result[0]!.content as unknown as Array<
+      Record<string, unknown>
+    >;
+    content[0]!.text = "changed";
+
+    expect(messages[0]!.content).toBe("first message");
+  });
+
+  it("preserves top-level _round metadata for message-block grouping", () => {
+    const messages = [
+      { role: "user", content: "hello", _round: 3 },
+    ] as unknown as ChatCompletionMessageParam[];
+
+    const result = normalizeMessages(messages);
+
+    expect(result[0]).toHaveProperty("_round", 3);
   });
 });

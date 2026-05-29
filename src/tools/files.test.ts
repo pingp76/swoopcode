@@ -16,6 +16,7 @@ import {
   executeRead,
   executeWrite,
   executeEdit,
+  executeEditExact,
 } from "./files.js";
 
 /**
@@ -217,6 +218,88 @@ describe("executeEdit", () => {
 
   it("returns error for path outside working directory", async () => {
     const result = await executeEdit("/etc/passwd", "a", "b");
+    expect(result.error).toBe(true);
+    expect(result.output).toContain("outside the working directory");
+  });
+});
+
+/**
+ * 安全文件编辑测试
+ */
+describe("executeEditExact", () => {
+  const testDir = join(tmpdir(), "agent-files-test-edit-exact");
+
+  beforeEach(async () => {
+    await mkdir(testDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  it("replaces a single expected occurrence", async () => {
+    const filePath = join(testDir, "single.txt");
+    await executeWrite(filePath, "hello world", testDir);
+
+    const result = await executeEditExact(
+      filePath,
+      "world",
+      "TypeScript",
+      1,
+      testDir,
+    );
+
+    expect(result.error).toBe(false);
+    expect(result.output).toContain("1 replacement");
+    const content = await executeRead(filePath, testDir);
+    expect(content.output).toBe("hello TypeScript");
+  });
+
+  it("rejects multiple matches when expected_occurrences is one", async () => {
+    const filePath = join(testDir, "multi-reject.txt");
+    await executeWrite(filePath, "aaa bbb aaa", testDir);
+
+    const result = await executeEditExact(filePath, "aaa", "ccc", 1, testDir);
+
+    expect(result.error).toBe(true);
+    expect(result.output).toContain("found 2");
+    const content = await executeRead(filePath, testDir);
+    expect(content.output).toBe("aaa bbb aaa");
+  });
+
+  it("replaces multiple matches when expected_occurrences matches", async () => {
+    const filePath = join(testDir, "multi-accept.txt");
+    await executeWrite(filePath, "aaa bbb aaa", testDir);
+
+    const result = await executeEditExact(filePath, "aaa", "ccc", 2, testDir);
+
+    expect(result.error).toBe(false);
+    const content = await executeRead(filePath, testDir);
+    expect(content.output).toBe("ccc bbb ccc");
+  });
+
+  it("rejects empty old_string", async () => {
+    const filePath = join(testDir, "empty.txt");
+    await executeWrite(filePath, "hello", testDir);
+
+    const result = await executeEditExact(filePath, "", "x", 1, testDir);
+
+    expect(result.error).toBe(true);
+    expect(result.output).toContain("non-empty");
+  });
+
+  it("rejects invalid expected_occurrences", async () => {
+    const filePath = join(testDir, "invalid-expected.txt");
+    await executeWrite(filePath, "hello", testDir);
+
+    const result = await executeEditExact(filePath, "hello", "x", 0, testDir);
+
+    expect(result.error).toBe(true);
+    expect(result.output).toContain("positive integer");
+  });
+
+  it("returns error for path outside working directory", async () => {
+    const result = await executeEditExact("/etc/passwd", "a", "b", 1);
     expect(result.error).toBe(true);
     expect(result.output).toContain("outside the working directory");
   });

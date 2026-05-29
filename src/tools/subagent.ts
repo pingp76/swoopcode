@@ -24,7 +24,7 @@ import type { Agent } from "../agent.js";
 import type { ContextCompressor } from "../compressor.js";
 import type { PermissionManager } from "../permission.js";
 import { createScopedSubagentPermissionManager } from "../permission.js";
-import type { AsyncCommandPolicy } from "./bash.js";
+import type { AsyncCommandPolicy } from "../execution-policy.js";
 import type { HookRunner } from "../hooks.js";
 import type { SessionManager } from "../session.js";
 import type { TranscriptStore } from "../transcript.js";

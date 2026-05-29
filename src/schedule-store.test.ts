@@ -191,6 +191,15 @@ describe("validateOccurrenceFile", () => {
     expect(validateOccurrenceFile(occ)).toEqual([]);
   });
 
+  it("accepts an orphaned occurrence", () => {
+    const occ = makeValidOccurrence("sch_20260525_120000_test", "occ_20260525_120000_x7a9", {
+      status: "orphaned",
+      completedAt: new Date().toISOString(),
+      reason: "Async run was lost after restart",
+    });
+    expect(validateOccurrenceFile(occ)).toEqual([]);
+  });
+
   it("rejects wrong kind", () => {
     const occ = makeValidOccurrence("sch_20260525_120000_test", "occ_20260525_120000_x7a9", {
       kind: "schedule" as "schedule_occurrence",
@@ -259,6 +268,23 @@ describe("createScheduleStore", () => {
     expect(index.schedules).toContain("sch_20260525_120000_test");
   });
 
+  it("scan returns all projects while list defaults to current project", () => {
+    store.save(makeValidSchedule("sch_20260525_120000_a"));
+    store.save(makeValidSchedule("sch_20260525_120000_b", {
+      projectRoot: "/tmp/project-b",
+      cwd: "/tmp/project-b",
+    }));
+
+    const defaultList = store.list();
+    expect(defaultList.map((s) => s.id)).toEqual(["sch_20260525_120000_a"]);
+
+    const scanned = store.scan();
+    expect(scanned.map((s) => s.id).sort()).toEqual([
+      "sch_20260525_120000_a",
+      "sch_20260525_120000_b",
+    ]);
+  });
+
   it("hard deletes a schedule", () => {
     store.save(makeValidSchedule("sch_20260525_120000_test"));
     store.hardDelete("sch_20260525_120000_test");
@@ -310,6 +336,20 @@ describe("createScheduleStore", () => {
 
     const list = store.list({ projectRoot: "/tmp/project-a" });
     expect(list.map((s) => s.id)).toEqual(["sch_20260525_120000_a"]);
+  });
+
+  it("can explicitly list schedules across all projects", () => {
+    store.save(makeValidSchedule("sch_20260525_120000_a"));
+    store.save(makeValidSchedule("sch_20260525_120000_b", {
+      projectRoot: "/tmp/project-b",
+      cwd: "/tmp/project-b",
+    }));
+
+    const list = store.list({ currentProjectOnly: false });
+    expect(list.map((s) => s.id).sort()).toEqual([
+      "sch_20260525_120000_a",
+      "sch_20260525_120000_b",
+    ]);
   });
 
   it("rejects saving invalid schedule", () => {

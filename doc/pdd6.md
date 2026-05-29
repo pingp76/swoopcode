@@ -110,13 +110,29 @@ Preview (first {N} chars):
 </persisted-output>
 ```
 
+实现备注（2026-05 第四轮重构）：
+
+- 当前实现已经把 P1 即时压缩输出接入 `OutputStore`。
+- 新路径不再只把裸 `.task_outputs/<toolCallId>.txt` 暴露给 LLM，而是返回稳定 `output_id`。
+- LLM 看到 `<persisted-output ... output-id="out_...">` 后，应使用 `run_output_read({"output_id":"out_..."})` 读回完整输出。
+- 未注入 OutputStore 的单独压缩器实例仍保留旧文件 fallback，保证早期 lesson 和单元测试可以独立运行。
+- 注入 OutputStore 后，`cleanup()` 不会删除已登记输出；这些输出属于 Agent 运行 artifact，而不是压缩器私有临时文件。
+
+实现备注（2026-05 第五轮重构）：
+
+- 当前实现已经把压缩年龄从局部 `roundCount` 收口到全局 `loopIndex`。
+- `loopRound` 仍表示当前 user turn 内第几次 LLM 调用，并保留为旧 `round` 字段的兼容语义。
+- P0 衰减压缩现在使用 `currentLoopIndex - block.loopIndex > DECAY_THRESHOLD` 判断旧工具结果；如果读取到旧 block 只有 `round` 字段，仍按旧逻辑 fallback。
+- `messageSequence` 只用于 History 排序、debug 和 compact round-trip，不作为压缩年龄。
+
 ## 2. 衰减压缩（每轮 agent loop 调用 LLM 之前触发）
 
 随着对话推进，逐步缩短旧的工具调用结果，保留近期上下文的完整度。以**消息块**为操作单位。
 
 - **触发时机**：每轮 agent loop 调用 LLM 之前
-- **触发条件**：`当前轮次 - 消息块所在轮次 > DECAY_THRESHOLD`（默认 3）
-  - 其中"轮次"以 agent loop 中每次 LLM 调用为一轮（对应 `agent.ts` 中的 `roundCount`）
+- **触发条件**：`当前全局 loopIndex - 消息块所在 loopIndex > DECAY_THRESHOLD`（默认 3）
+  - `loopIndex` 以同一个 Agent 实例内每次 LLM 调用为一轮，跨多次用户输入单调递增
+  - 旧 `round` 只作为兼容 fallback，不再作为跨 turn 年龄判断的首选字段
 - **按消息块类型的压缩规则**：
   - **text 块**（纯文本对话）：不修改，完整保留
   - **tool_use 块**（工具调用轮次）：
@@ -240,7 +256,7 @@ interface ContextCompressor {
   - `handleToolCalls()` 中对**所有**工具统一调用 `compressor.compressToolResult(fnName, toolCallId, output)`
   - 压缩器内部根据 `compressibleTools` 配置决策是否压缩，调用方无需硬编码工具名
   - `prepareMessages()` 中依次执行衰减压缩 + 全量压缩检测
-- **history.ts**：压缩操作在 `history.getEntries()` 返回的带 round 元信息条目上进行
+- **history.ts**：压缩操作在 `history.getEntries()` 返回的带 timing 元信息条目上进行
 - **normalize.ts**：压缩在其后执行，不改变现有处理顺序
 - **tools/bash.ts**：工具本身不知道压缩的存在，由 agent 负责压缩
 - **子智能体**：

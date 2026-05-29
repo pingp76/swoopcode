@@ -130,13 +130,14 @@ describe("TaskStore", () => {
       now: () => new Date("2026-05-13T00:00:00.000Z"),
     });
     store.save(makeGroup("tg_20260513_000000_cleanup"));
-    const tmpFile = join(
+    const tmpDir = join(
       tempDir,
       "groups",
       "tg_20260513_000000_cleanup",
       ".tmp",
-      "old.tmp",
     );
+    const tmpFile = join(tmpDir, "old.tmp");
+    mkdirSync(tmpDir, { recursive: true });
     writeFileSync(tmpFile, "stale");
     utimesSync(tmpFile, oldDate, oldDate);
 

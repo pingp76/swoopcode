@@ -1,6 +1,7 @@
 import { format } from "node:util";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { rotateLogFileIfNeeded } from "./log-rotation.js";
 
 /**
  * logger.ts — 日志模块
@@ -54,6 +55,16 @@ export interface Logger {
   error(msg: string, ...args: unknown[]): void;
 }
 
+export interface LoggerOptions {
+  /** 单个日志文件最大字节数，超过后写下一条日志前轮转 */
+  maxFileBytes?: number;
+  /** 轮转后保留多少个历史文件，例如 agent.log.1、agent.log.2 */
+  keepFiles?: number;
+}
+
+const DEFAULT_LOG_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const DEFAULT_LOG_KEEP_FILES = 5;
+
 /**
  * createLogger — 创建日志器
  *
@@ -67,7 +78,11 @@ export interface Logger {
  * 3. 输出格式：[ISO时间戳] [级别] 消息内容
  * 4. 如果提供了 logFile，同时追加到文件（目录不存在时自动创建）
  */
-export function createLogger(level: string, logFile?: string): Logger {
+export function createLogger(
+  level: string,
+  logFile?: string,
+  options: LoggerOptions = {},
+): Logger {
   // 将字符串级别转为数字，如果传入无效值则默认使用 info 级别
   const current =
     LEVEL_ORDER[(level as LogLevel) ?? "info"] ?? LEVEL_ORDER["info"];
@@ -143,6 +158,11 @@ export function createLogger(level: string, logFile?: string): Logger {
       // 同时写入文件（如果提供了 logFile）
       if (logFile) {
         try {
+          rotateLogFileIfNeeded(logFile, {
+            maxFileBytes: options.maxFileBytes ?? DEFAULT_LOG_MAX_FILE_BYTES,
+            keepFiles: options.keepFiles ?? DEFAULT_LOG_KEEP_FILES,
+            onWarning: (message) => console.warn(message),
+          });
           appendFileSync(logFile, `${prefix} ${formatted}\n`);
         } catch {
           // 文件写入失败不阻塞 console 输出

@@ -14,7 +14,10 @@ import type { LLMClient, LLMResponse } from "./llm.js";
 import type { ToolRegistry, ToolExecutor } from "./tools/registry.js";
 import type { ToolResult } from "./tools/types.js";
 import type { Logger } from "./logger.js";
-import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import type {
+  ChatCompletionMessageParam,
+  ChatCompletionTool,
+} from "openai/resources/chat/completions";
 import * as recovery from "./recovery.js";
 import { createTranscriptStore } from "./transcript.js";
 
@@ -222,6 +225,45 @@ describe("Agent Hook 集成", () => {
 
     // SessionStart handler 只应被调用一次（第一次 run）
     expect(sessionHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it("连续 run 使用递增 turnIndex 和全局 loopIndex", async () => {
+    const logger = createMockLogger();
+    const history = createHistory();
+    const transcriptStore = createTranscriptStore({
+      now: () => new Date("2026-05-29T00:00:00.000Z"),
+      idGenerator: () => "event",
+    });
+    const agent = createAgent({
+      llm: createMockLLM([
+        { content: "first response", toolCalls: [], finishReason: "stop" },
+        { content: "second response", toolCalls: [], finishReason: "stop" },
+      ]),
+      history,
+      tools: createMockToolRegistry("run_bash", async () => ({
+        output: "ok",
+        error: false,
+      })),
+      logger,
+      compressor: createContextCompressor(),
+      permissionManager: createMockPermissionManager(),
+      transcriptStore,
+      sessionId: "main-session",
+    });
+
+    await agent.run("first query");
+    await agent.run("second query");
+
+    const entries = history.getEntries();
+    expect(entries.map((e) => e.turnIndex)).toEqual([1, 1, 2, 2]);
+    expect(entries.map((e) => e.loopRound)).toEqual([0, 1, 0, 1]);
+    expect(entries.map((e) => e.loopIndex)).toEqual([1, 1, 2, 2]);
+    expect(entries.map((e) => e.messageSequence)).toEqual([1, 2, 3, 4]);
+
+    const events = transcriptStore.readSession("main-session");
+    expect(events.map((e) => e.sequence)).toEqual([1, 2, 3, 4]);
+    expect(events.map((e) => e.historySequence)).toEqual([1, 2, 3, 4]);
+    expect(events.map((e) => e.loopIndex)).toEqual([1, 1, 2, 2]);
   });
 
   it("SessionStart exitCode 1 时，history 不写入用户消息", async () => {
@@ -452,6 +494,99 @@ describe("Agent Hook 集成", () => {
 
     // 两个工具都应该被执行
     expect(toolExecutor).toHaveBeenCalledTimes(2);
+  });
+
+  it("多 tool call 后下一次 LLM 输入保持 assistant/tool_result/user 顺序", async () => {
+    const logger = createMockLogger();
+    const history = createHistory();
+    const compressor = createContextCompressor({
+      thresholdToolOutput: 2000,
+      decayThreshold: 3,
+      decayPreviewTokens: 100,
+      maxContextTokens: 80000,
+      compactKeepRecent: 4,
+    });
+    const toolExecutor = vi.fn<ToolExecutor>().mockResolvedValue({
+      output: "result",
+      error: false,
+    });
+    const capturedMessages: ChatCompletionMessageParam[][] = [];
+    const responses: LLMResponse[] = [
+      {
+        content: null,
+        toolCalls: [
+          makeToolCall("call_1", "run_bash", '{"command":"ls"}'),
+          makeToolCall("call_2", "run_bash", '{"command":"pwd"}'),
+        ],
+        finishReason: "stop",
+      },
+      { content: "done", toolCalls: [], finishReason: "stop" },
+    ];
+    let callIndex = 0;
+    const llm: LLMClient = {
+      async chat(messages) {
+        capturedMessages.push(
+          JSON.parse(JSON.stringify(messages)) as ChatCompletionMessageParam[],
+        );
+        const response = responses[callIndex++];
+        if (!response) throw new Error("No more mock responses");
+        return response;
+      },
+    };
+
+    const agent = createAgent({
+      llm,
+      history,
+      tools: createMockToolRegistry("run_bash", toolExecutor),
+      logger,
+      compressor,
+      permissionManager: createMockPermissionManager(),
+      hookRunner: createHookRunner(
+        {
+          PreToolUse: [
+            () => ({
+              exitCode: 2 as const,
+              message: "提醒",
+            }),
+          ],
+        },
+        logger,
+      ),
+    });
+
+    await agent.run("run both");
+
+    expect(capturedMessages).toHaveLength(2);
+    const secondCall = capturedMessages[1]!;
+    expect(secondCall.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "tool",
+      "user",
+    ]);
+    expect(
+      (secondCall[1] as unknown as { tool_calls: unknown[] }).tool_calls,
+    ).toHaveLength(2);
+    expect(
+      (secondCall[2] as unknown as { tool_call_id: string }).tool_call_id,
+    ).toBe("call_1");
+    expect(
+      (secondCall[3] as unknown as { tool_call_id: string }).tool_call_id,
+    ).toBe("call_2");
+    // normalizeMessages 合并连续 user 消息，content 可能为数组格式
+    const hookContent = secondCall[4]!.content;
+    if (Array.isArray(hookContent)) {
+      expect(
+        hookContent.some(
+          (c: unknown) =>
+            typeof (c as { text?: string }).text === "string" &&
+            (c as { text: string }).text.includes("[Hook: PreToolUse]"),
+        ),
+      ).toBe(true);
+    } else {
+      expect(hookContent).toContain("[Hook: PreToolUse]");
+    }
   });
 });
 

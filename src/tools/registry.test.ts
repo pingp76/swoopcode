@@ -54,11 +54,12 @@ describe("ToolRegistry order stability", () => {
     const defs = registry.getToolDefinitions();
     const names = defs.map((d) => d.function?.name);
 
-    // 基础工具：bash, read, write, edit
+    // 基础工具：bash, read, write, edit, edit_exact
     expect(names).toContain("run_bash");
     expect(names).toContain("run_read");
     expect(names).toContain("run_write");
     expect(names).toContain("run_edit");
+    expect(names).toContain("run_edit_exact");
 
     // 多次调用顺序一致
     const defs2 = registry.getToolDefinitions();
@@ -165,6 +166,55 @@ describe("ToolRegistry async run provider", () => {
 });
 
 // ============================================================================
+// Output provider 注册
+// ============================================================================
+
+describe("ToolRegistry output provider", () => {
+  it("registers run_output_read only when provider is given", () => {
+    const outputProvider = {
+      toolEntries: [
+        {
+          definition: {
+            type: "function" as const,
+            function: {
+              name: "run_output_read",
+              description: "read output",
+            },
+          },
+          execute: async () => ({ output: "ok", error: false }),
+        },
+      ],
+    };
+
+    const registry = createToolRegistry(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      outputProvider,
+    );
+    const names = registry.getToolDefinitions().map((d) => d.function?.name);
+    expect(names).toContain("run_output_read");
+
+    const subRegistry = createToolRegistry(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { includeFileWrite: false, includeFileEdit: false },
+    );
+    const subNames = subRegistry.getToolDefinitions().map((d) => d.function?.name);
+    expect(subNames).not.toContain("run_output_read");
+  });
+});
+
+// ============================================================================
 // 过滤选项
 // ============================================================================
 
@@ -185,6 +235,7 @@ describe("ToolRegistry filtering options", () => {
     });
     const names = registry.getToolDefinitions().map((d) => d.function?.name);
     expect(names).not.toContain("run_edit");
+    expect(names).not.toContain("run_edit_exact");
     expect(names).toContain("run_read");
     expect(names).toContain("run_bash");
   });

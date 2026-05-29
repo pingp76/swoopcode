@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统**
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）
 
 ## 源码结构
 
@@ -23,10 +23,16 @@ src/
 ├── llm-providers.ts    # LLM Provider Profile 抽象层：registry + resolver
 ├── project-context.ts  # 项目上下文：集中解析 projectRoot、AGENTS.md、agentHome 与运行数据路径
 ├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
+├── log-rotation.ts     # 日志轮转工具：单文件大小上限 + 固定历史份数
+├── atomic-write.ts     # 原子写入工具：同目录临时文件 + rename 覆盖 + JSON 语法校验
 ├── llm.ts              # LLM 客户端（OpenAI SDK + streaming 聚合）+ LLM 日志记录
-├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 <agentHome>/logs/llm.log，超 1MB 清空重写
-├── normalize.ts        # 消息标准化：过滤元数据、补全 tool_result、合并同角色消息
-├── history.ts          # 对话历史管理（messages + rounds 统一存储 + HistoryEntry + system prompt 支持）
+├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 <agentHome>/logs/llm.log，超限轮转保留
+├── command-safety.ts   # shell 命令硬性安全黑名单：普通 bash 与 ExecutionPolicy 共享
+├── execution-policy.ts # 非交互执行边界：readonly/ci/workspace_write profile + command/resource 校验
+├── output-store.ts     # Agent 大输出登记与读取：output_id + index.json + run_output_read 边界
+├── timeline.ts         # 时间语义类型：turnIndex / loopRound / loopIndex / messageSequence
+├── normalize.ts        # 消息标准化：纯函数清理元数据、补全/移动 tool_result、合并普通同角色消息
+├── history.ts          # 对话历史管理（messages + timing metadata 统一存储 + HistoryEntry + system prompt 支持）
 ├── message-block.ts    # 消息块：压缩的原子单位，groupToBlocks/flattenToMessages + token 估算
 ├── compressor.ts       # 上下文压缩器：三层压缩（衰减 + 即时 + 全量）+ compressibleTools 配置
 ├── agent.ts            # Agent 主循环：think → act → observe + 内部步骤函数 + 权限检查拦截
@@ -38,57 +44,64 @@ src/
 ├── system-prompt.ts    # System Prompt 组合器：稳定 snapshot + turn reminder（cache-ready）
 ├── session-events.ts   # 会话事件缓冲区：收集 out-of-band 状态变化，注入为 system-reminder
 ├── session.ts          # Session 管理器：main/subagent sessionId + parentSessionId + 项目元信息
-├── transcript.ts       # Transcript 原始事件流：append-only 记录 user/assistant/tool/reminder/recovery 事件
+├── transcript.ts       # Transcript 原始事件流：append-only 记录事件 sequence + historySequence
 ├── task-store.ts       # 持久化 Task 存储层：groups/<group_id>/group.json + project 索引 + 读写校验
 ├── tasks.ts            # Task 业务层：Task Group 状态机、依赖校验、activeTaskGroupId、格式化输出
 ├── async-runs.ts       # Async Run 核心：start/check/list/readOutput/drainNotifications/冲突检测
-├── async-runs.test.ts  # Async Run 测试（26 个测试用例）
+├── async-runs.test.ts  # Async Run 测试（32 个测试用例）
 ├── schedule-store.ts   # Schedule 持久化存储层：schedulesDir 布局 + JSON 校验 + 索引重建
 ├── schedules.ts        # Schedule 业务层：tick 调度 + occurrence 管理 + Async Run 触发 + 通知队列
-├── schedules.test.ts   # Schedule 管理器测试（9 个测试用例）
+├── schedules.test.ts   # Schedule 管理器测试（28 个测试用例）
 ├── cache-debug.ts      # Prompt Cache 调试：system/tools/prefix hash + 稳定性追踪
 ├── recovery.ts         # LLM 错误分类与恢复决策：backoff/compact/continue/fail
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
 ├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
-├── message-block.test.ts # 消息块测试（24 个测试用例）
-├── compressor.test.ts    # 压缩器测试（21 个测试用例）
-├── permission.test.ts   # 权限管理器测试（47 个测试用例）
+├── message-block.test.ts # 消息块测试（29 个测试用例）
+├── compressor.test.ts    # 压缩器测试（26 个测试用例）
+├── execution-policy.test.ts # ExecutionPolicy 测试（12 个测试用例）
+├── atomic-write.test.ts # 原子写入测试（3 个测试用例）
+├── llm-logger.test.ts # LLMLogger 日志轮转测试（1 个测试用例）
+├── output-store.test.ts # OutputStore 测试（7 个测试用例）
+├── permission.test.ts   # 权限管理器测试（74 个测试用例）
 ├── hooks.test.ts        # Hook Runner 单元测试（11 个测试用例）
-├── agent.test.ts        # Agent Hook 集成测试（7 个测试用例）
+├── agent.test.ts        # Agent Hook/错误恢复/Transcript 集成测试（22 个测试用例）
 ├── memory.test.ts       # Memory 管理器测试（40 个测试用例）
-├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
+├── todo.test.ts        # TODO 管理器测试（34 个测试用例）
 ├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
-├── normalize.test.ts   # 消息标准化测试
-├── system-prompt.test.ts # System Prompt 测试（17 个测试用例）
+├── normalize.test.ts   # 消息标准化测试（17 个测试用例）
+├── system-prompt.test.ts # System Prompt 测试（20 个测试用例）
 ├── session-events.test.ts # Session Event Buffer 测试（5 个测试用例）
 ├── cache-debug.test.ts  # Cache Debug 测试（7 个测试用例）
 ├── project-context.test.ts # ProjectContext 路径派生测试
 ├── recovery.test.ts    # LLM 错误恢复决策测试
 ├── session.test.ts     # Session 管理器测试
-├── transcript.test.ts  # Transcript 原始事件流测试
+├── transcript.test.ts  # Transcript 原始事件流测试（6 个测试用例）
 ├── task-store.test.ts  # TaskStore 持久化、索引和清理测试
 ├── tasks.test.ts       # TaskManager 状态机和依赖测试
 ├── cli-commands.test.ts # CLI 命令测试（含 /task）
 ├── index.test.ts       # 占位测试
-├── history.test.ts     # history 模块测试（13 个测试用例）
+├── history.test.ts     # history 模块测试（22 个测试用例）
 ├── logger.test.ts      # logger 模块测试
 └── tools/
     ├── types.ts        # 共享类型：ToolResult 接口
     ├── bash.ts         # bash 工具：执行 shell 命令 + 危险命令过滤（工具名: run_bash）
-    ├── bash.test.ts    # bash 工具测试
-    ├── files.ts        # 文件操作工具：run_read、run_write、run_edit（限工作目录）
-    ├── files.test.ts   # 文件操作工具测试
+    ├── bash.test.ts    # bash 工具测试（24 个测试用例）
+    ├── files.ts        # 文件操作工具：run_read、run_write、run_edit、run_edit_exact（限工作目录）
+    ├── files.test.ts   # 文件操作工具测试（23 个测试用例）
     ├── subagent.ts     # 子智能体工具：run_subagent（复用父级 stable prompt + 独立上下文）
-    ├── subagent.test.ts # 子智能体工具测试（13 个测试用例）
+    ├── subagent.test.ts # 子智能体工具测试（17 个测试用例）
     ├── memory.ts       # Memory 工具提供者：run_memory_create/list/read/delete（4 个工具）
     ├── memory.test.ts  # Memory 工具测试（2 个测试用例）
     ├── tasks.ts        # Task 工具提供者：run_task_group_create/list/read + run_task_add/update/delete
     ├── tasks.test.ts   # Task 工具测试
     ├── async-runs.ts   # Async Run 工具提供者：run_async_start/check/list/output_read（4 个工具）
-    ├── async-runs.test.ts # Async Run 工具测试（14 个测试用例）
+    ├── async-runs.test.ts # Async Run 工具测试（16 个测试用例）
+    ├── output.ts       # OutputStore 工具提供者：run_output_read
+    ├── output.test.ts  # Output 工具测试（4 个测试用例）
     ├── schedules.ts    # Schedule 工具提供者：create/list/read/cancel/delete/occurrence_list（6 个工具）
+    ├── schedules.test.ts # Schedule 工具测试（4 个测试用例）
     ├── registry.ts     # 工具注册表（顺序稳定 + 重复注册报错 + 过滤选项）
-    └── registry.test.ts # 工具注册表测试（4 个测试用例）
+    └── registry.test.ts # 工具注册表测试（11 个测试用例）
 skills/
 ├── code-review/
 │   └── SKILL.md        # 代码审查 skill（示例）
@@ -125,6 +138,17 @@ skills/
   - `recovery_event`：LLM 错误恢复行为记录
 - **双写边界**：`History` 继续作为 prompt working context；`TranscriptStore` 保存原始事件，未来用于搜索、回放、统计分析
 - **子智能体隔离**：子智能体仍使用独立 `History`，但 transcript 写入 child session，并通过 `parentSessionId` 关联父会话
+- **事件序列**：`TranscriptEvent.sequence` 是 append-only 事件流顺序；如果事件对应 History 消息，额外记录 `historySequence`
+
+### 时间语义 (`timeline.ts` + `history.ts` + `transcript.ts`)
+
+- **`turnIndex`**：第几次外部用户输入触发 `agent.run()`，同一个 Agent 实例内单调递增
+- **`loopRound`**：当前 user turn 内第几次 LLM 调用，每次 `agent.run()` 从 1 重新开始；子智能体 `maxRounds` 使用这个局部计数
+- **`loopIndex`**：当前 Agent 实例内第几次 LLM 调用，跨 user turn 单调递增；P0 衰减压缩使用它判断工具结果年龄
+- **`messageSequence`**：History 中普通对话消息的单调递增序号；用于 compact round-trip 和 debug，不等同于压缩年龄
+- **`TranscriptEvent.sequence`**：Transcript append-only 事件序列；它记录审计流顺序，不等同于 `messageSequence`
+- **兼容字段 `round`**：短期保留为 `loopRound` 的兼容别名，旧测试和旧调用点仍可读；新代码应优先使用 `loopRound` / `loopIndex`
+- **内部字段清理**：`_turnIndex`、`_loopRound`、`_loopIndex`、`_messageSequence`、`_round` 只在 prepare/group/compact 管线内部流转，`flattenToMessages()` 会全部清除，不发送给 LLM
 
 ### 持久化 Task 任务系统 (`task-store.ts` + `tasks.ts` + `tools/tasks.ts`)
 
@@ -132,6 +156,7 @@ skills/
 - **Agent 全局存储**：Task 数据位于 `ProjectContext.tasksDir`，默认 `<agentHome>/tasks`，不写入被操作项目目录
 - **Task Group 主身份**：每个 Task Group 使用 `groups/<group_id>/group.json` 作为唯一真实数据源，`group_id` 同时是目录名和内容身份
 - **Project 派生索引**：`index.json` 从所有合法 `group.json` 的 `projectRoots` 重建，支持当前项目过滤和跨项目总览
+- **原子写入**：`group.json` 与派生 `index.json` 都通过 `atomicWriteJsonFile()` 写入，避免进程中断留下半截 JSON
 - **跨项目支持**：Task Group 保存 `scope`、`projectRoots`、`primaryProjectRoot` 元数据；物理目录不按 projectKey 分层
 - **读写对称校验**：读取和保存都校验 group id 格式、目录名与内容 id 一致、task id 唯一、依赖引用存在、依赖图无环、projectRoots 为绝对路径
 - **状态机**：Task 支持 `pending/in_progress/completed/failed/cancelled/deleted`；依赖未完成时不能进入 `in_progress`；所有非 deleted task 完成后 group 自动 `completed`
@@ -142,6 +167,29 @@ skills/
 - **REPL 命令**：新增 `/task list`、`/task list --all`、`/task list --all-projects`、`/task show <group_id>`、`/task archive <group_id>`
 - **权限策略**：`run_task_*` 属于 Agent 运行数据操作，plan/default/auto 模式均允许；文件和 bash 仍由原权限边界控制
 
+### ExecutionPolicy 非交互执行边界 (`execution-policy.ts` + `command-safety.ts`)
+
+- **职责边界**：`PermissionManager` 继续负责 plan/default/auto 与 ask/deny/allow；`ExecutionPolicy` 负责已经获得授权后的非交互子流程能否执行某条命令、声明哪些资源
+- **共享实例**：`index.ts` 创建一个 `executionPolicy` 和一个 readonly `AsyncCommandPolicy` adapter，并注入 Async Run、Schedule、子智能体工具和 filtered registry
+- **Profile 语义**：`readonly` 只允许诊断命令；`ci` 允许 build/test/coverage 等 CI 命令但仍禁止修复和 git 写操作；`workspace_write` 目前只是类型预留，所有 command/resource 校验都会拒绝
+- **命令校验**：先拒绝明显危险命令和 shell control operators，再用保守 argv 解析匹配 allowlist；复杂 shell 语法解析不可靠时宁可拒绝
+- **readonly allowlist**：允许 `pwd/ls/rg/cat/head/tail/sed -n`、`git status/diff/log/show`、`npm run typecheck/lint/format:check`、`npm test`、`npx vitest run`、`npx eslint`、`npx tsc --noEmit`
+- **写入风险拦截**：`npm run lint -- --fix`、`npx eslint --fix`、`npx tsc` 不带 `--noEmit`、`npm run build` 在 readonly profile 下会被拒绝；`npm run build` 只在 `ci` profile 下允许
+- **资源校验**：`readPaths` 必须在 `projectRoot` 内；`readonly` 和 `ci` 都拒绝非空 `writePaths`；`workspace_write` 在当前阶段统一返回 reserved
+- **兼容层**：`tools/bash.ts` 仍重新导出 `AsyncCommandPolicy` 和 `createDefaultAsyncCommandPolicy()`，旧调用点可以逐步迁移到新模块
+- **安全黑名单共享**：`command-safety.ts` 保存普通 `run_bash` 和 `ExecutionPolicy` 都要使用的硬性危险命令黑名单，避免两处实现漂移
+
+### OutputStore 输出句柄 (`output-store.ts` + `tools/output.ts`)
+
+- **Agent 输出边界**：OutputStore 管理的是 Agent 自身保存的大输出，不是用户项目文件；默认位于 `<agentHome>/.task_outputs`
+- **稳定 handle**：每个输出使用 `out_YYYYMMDD_HHMMSS_xxxxxx` 形式的 `output_id`，LLM 不需要也不应该读取裸文件路径
+- **登记索引**：`index.json` 保存 `OutputRecord`，包括 source kind、source id、relativePath、byteLength、contentType 等元数据
+- **原子写入**：输出正文通过 `atomicWriteTextFile()` 写入，`index.json` 通过 `atomicWriteJsonFile()` 写入，减少半写入导致的 index 损坏
+- **读取工具**：新增 `run_output_read`，只接受 `output_id`、`max_bytes`、`start_byte`，只能读取 OutputStore index 中登记过的输出
+- **路径防线**：读取时先查 index，再确认 `relativePath` 解析后仍在 output root 内，不能借 output 工具读取任意 `agentHome` 或 `projectRoot` 文件
+- **分片读取**：`run_output_read` 支持 `max_bytes/start_byte`，避免一次性把超大输出重新塞回上下文
+- **注册边界**：主 Agent 注册 `run_output_read`；async/subagent 的 readonly filtered registry 默认不注册该工具，避免跨上下文输出泄露
+
 ### Async Run 非阻塞运行实例 (`async-runs.ts` + `tools/async-runs.ts`)
 
 - **Session-local 异步执行层**：允许 LLM 启动非阻塞的 command 或 subagent 运行，然后继续其他工作，完成后通过 notification 告知
@@ -150,30 +198,48 @@ skills/
 - **四种工具**：`run_async_start`（启动）、`run_async_check`（查询单个状态）、`run_async_list`（列表过滤）、`run_async_output_read`（读取输出）
 - **两种执行器**：`command`（shell 命令，白名单策略）和 `subagent`（委托 AI 任务，独立 history/compressor/session）
 - **并发限制**：最多 3 个同时 running 的 async run，超限拒绝启动
-- **只读约束**：第一版硬性拒绝 `write_paths` 非空；`read_paths` 必须在 projectRoot 内
+- **只读约束**：第一版通过 `ExecutionPolicy.validateResources({ profile: "readonly" })` 拒绝 `write_paths` 非空，并要求 `read_paths` 在 projectRoot 内
 - **超时机制**：默认 120s，最大 300s；超时后状态变为 `timeout`，通过 `setTimeout` deadline 监控
 - **核心正确性 `finishRun()`**：只有 `status === "running"` 时允许进入终态；使用 `Set<string>` 防止 late result 覆盖 timeout；第一个进入终态的路径负责写 output、计算 duration、递减计数、推送 notification
 - **深拷贝**：`check()` 和 `list()` 返回 `JSON.parse(JSON.stringify(record))`，防止外部修改内部状态
 - **前台冲突检测**：`checkForegroundToolConflict()` 在 Agent 工具执行前拦截——running async run 的 readPaths 与前台 `run_write`/`run_edit` 目标路径重叠时 block；存在 running runs 时前台 `run_bash` 只允许 strict read-only command policy 通过的命令
-- **Notification 注入**：Agent 每轮 LLM 调用前 `drainNotifications()`，以 `<system-reminder source="async-run">` 形式注入，包含 `run_async_output_read` 指引
+- **Notification 注入**：Agent 每轮 LLM 调用前 `drainNotifications()`，以 `<system-reminder source="async-run">` 形式注入；新输出优先提示 `run_output_read(output_id)`，旧输出 fallback 到 `run_async_output_read(run_id)`
 - **权限策略**：`run_async_check/list/output_read` 所有模式 allow；`run_async_start + command` 在 plan 模式 deny、auto 模式 allow、default 模式 ask；`run_async_start + subagent` 在 plan 模式 allow、auto 模式 allow、default 模式 ask
-- **Command Policy 验证**：拒绝 shell control operators（`; && || \` $() > >> < |`）；拒绝写入命令（git add/commit/push/reset/checkout、npm run format、find -delete/-exec）；白名单允许诊断命令（git diff/status/log/show、npm run typecheck/lint/format:check/test、npx vitest/eslint/tsc、rg、sed -n、cat、head、tail、ls、pwd）
-- **输出隔离**：async run 的输出写入 `<taskOutputsDir>/async-runs/<run_id>/output.txt`，`run_async_output_read` 只能读取 async-runs 目录下的文件
+- **ExecutionPolicy 验证**：`executor: "command"` 在 `AsyncRunManager.start()` 路径中使用共享 readonly policy 校验，拒绝 shell control operators、git 写命令、`--fix`、`npx tsc` 默认 emit 和 readonly profile 下的 build；允许 `npx tsc --noEmit`、`npm run typecheck/lint/format:check`、`npm test`、`npx vitest run` 等诊断命令
+- **输出隔离**：async run 完成后会登记到 OutputStore 并得到 `outputId`；同时保留 `<taskOutputsDir>/async-runs/<run_id>/output.txt` 与 `run_async_output_read` 作为 PDD13 兼容路径
 - **子智能体 registry 过滤**：async subagent 获得只读 registry（无 write/edit、无 subagent 嵌套、无 async-run 嵌套），通过 `ToolRegistryOptions` 的 `includeFileWrite`/`includeFileEdit`/`commandPolicy` 控制
+
+### Schedule 定时运行系统 (`schedule-store.ts` + `schedules.ts` + `tools/schedules.ts`)
+
+- **长期定时边界**：Schedule 用于跨 session / 跨重启保存时间触发规则；真正执行仍交给 Async Run，Schedule 不实现第二套执行生命周期
+- **Agent 全局存储**：Schedule 数据位于 `ProjectContext.schedulesDir`，默认 `<agentHome>/schedules`，不写入被操作项目目录
+- **当前项目默认视图**：物理存储是全局的，但 `ScheduleStore.list()`、`ScheduleManager.list()`、`/schedule list`、`run_schedule_list` 默认只返回当前 `projectRoot` 的 schedule；跨项目 summary 必须显式使用 `currentProjectOnly: false` 或 `/schedule list --all-projects`
+- **跨项目写保护**：`read/cancel/delete/listOccurrences` 不跨项目操作；当前项目 manager 不会触发、取消或删除其他项目的 schedule
+- **Occurrence 审计**：每次 due/triggered/running/completed/failed/timeout/missed/skipped/orphaned 都通过 occurrence 文件记录
+- **原子写入**：`schedule.json`、occurrence 文件和派生 `index.json` 都通过共享原子写工具写入
+- **重启收敛**：Async Run 是 session-local，进程重启后不能恢复旧 run；启动扫描时如果发现 persisted `running` occurrence，会收敛为 `orphaned` 并按 `notifyLlm` 生成 schedule notification
+- **触发流程**：`ScheduleManager.tick()` 只从当前项目 active schedules 中发现 due occurrence，创建 occurrence 后调用 `AsyncRunManager.start()`，并通过 async finish callback 回写 occurrence 终态
+- **Overlap 策略**：当前支持 `allow` 与 `skip`；`skip` 依赖当前进程内 running set，重启后的旧 running 会先收敛为 `orphaned`
+- **LLM 工具**：新增 6 个工具：`run_schedule_create`、`run_schedule_list`、`run_schedule_read`、`run_schedule_cancel`、`run_schedule_delete`、`run_schedule_occurrence_list`
+- **当前实现裁剪**：`run_schedule_create` 当前只暴露已实现能力；`saveRawOutput` 固定为 `true`，`linkedTaskUpdate` 固定为 `"never"`，`permissionProfile` 默认 `readonly`，`ci/workspace_write/linked Task 自动更新` 留给后续 ExecutionPolicy/Task 集成章节
+- **ExecutionPolicy 触发校验**：Schedule trigger 的 command preflight 使用共享 `ExecutionPolicy.validateCommand({ profile: schedule.execution.permissionProfile })`；新建 schedule 同时通过 `validateResources()` 校验资源边界
+- **Profile 当前边界**：tool schema 仍只公开 `readonly`；旧文件中的 `ci` command 可按 ci profile 校验；`workspace_write` 仍是 reserved，创建或触发都会失败
+- **输出引用**：Schedule occurrence 保存 `outputId` 与旧 `outputRef`；工具展示和 notification 优先提示 `run_output_read(output_id)`，旧 occurrence 只有 `outputRef` 时仍可展示但不会自动变成可读 handle
+- **REPL 命令**：`/schedule list [--all] [--all-projects]`、`/schedule show <id>`、`/schedule cancel <id>`、`/schedule delete <id>`、`/schedule occurrences <id>`
 
 ### Agent 核心循环 (`agent.ts`)
 
 - 接收用户 query，存入 history
 - **主循环骨架**（六步）：轮次上限检测 → TODO 中断注入 → 消息处理管道 → 调用 LLM → 处理工具调用 → 返回最终回复
 - **内部步骤函数**（从 `run()` 提取的闭包函数，职责明确）：
-  - `appendMessage()`：向 history 添加消息（round 元信息由 history 统一管理）
-  - `annotateEntries()`：将 HistoryEntry[] 转换为带 `_round` 的消息列表（替代原 annotateWithRounds）
-  - `prepareMessages(roundCount)`：消息处理管道（getEntries → annotate → normalize → group → decay → [compact] → flatten），含降级容错
-  - `handleToolCalls(toolCalls, roundCount)`：工具调用循环（解析参数 → 权限检查 → PreToolUse Hook → 执行 → P1 压缩 → 回写历史 → PostToolUse Hook → 延迟注入补充消息）
-  - `buildRoundLimitResponse(roundCount)`：子智能体轮次上限检测与截断响应
-- **轮次追踪**：round 元信息存储在 history 内部（`HistoryEntry`），agent 不再维护平行数组
+  - `appendMessage()`：向 history 添加消息（timing 元信息由 history 统一管理）
+  - `annotateEntries()`：将 HistoryEntry[] 转换为带内部 timing 字段的消息列表（替代原 annotateWithRounds）
+  - `prepareMessages(loopIndex)`：消息处理管道（getEntries → annotate → normalize → group → decay → [compact] → flatten），含降级容错
+  - `handleToolCalls(toolCalls, timing)`：工具调用循环（解析参数 → 权限检查 → PreToolUse Hook → 执行 → P1 压缩 → 回写历史 → PostToolUse Hook → 延迟注入补充消息）
+  - `buildLoopRoundLimitResponse(loopRound)`：子智能体当前 turn 内轮次上限检测与截断响应
+- **时间追踪**：`turnIndex` / `loopRound` / `loopIndex` / `messageSequence` 元信息存储在 history 内部（`HistoryEntry`），agent 不再维护平行数组
 - **P1 即时压缩**：run_bash 工具的大输出自动存文件，只返回 preview
-- **P0 衰减压缩**：每轮自动截断旧的工具结果
+- **P0 衰减压缩**：每次 LLM loop 前按全局 `loopIndex` 自动截断旧的工具结果
 - **P2 全量压缩**：上下文超过阈值时，将历史压缩为摘要
 - **Cache Debug 追踪**：每轮调用 LLM 前计算 system prompt / tools / prefix hash，监控前缀稳定性
 - **Reminder 注入**：`systemPromptProvider.buildTurnReminders()` + `sessionEventBuffer.drain()` 以 user message 形式注入，不修改 system prompt
@@ -183,7 +249,7 @@ skills/
 - **compressor 必需**：上下文压缩器通过依赖注入传入
 - **systemPromptProvider 可选**：用于生成 turn reminders（如"本轮忽略 memory"），不用于每轮重建 system prompt
 - **sessionEventBuffer 可选**：收集 out-of-band 状态变化（mode 切换、memory reload 等），下一轮注入为 `<system-reminder>`
-- **Transcript 旁路记录**：可选注入 `transcriptStore + sessionId`，每次 `appendMessage()` 同步记录原始事件，不影响 prompt 构建
+- **Transcript 旁路记录**：可选注入 `transcriptStore + sessionId`，每次 `appendMessage()` 同步记录原始事件、timing 和 `historySequence`，不影响 prompt 构建
 - **错误恢复事件记录**：backoff、compact、continue、fail 等恢复动作写入 transcript 的 `recovery_event`
 - **强制 compact 写回记录**：context window 超限恢复时，`history.replaceEntries()` 改写 working context，同时 transcript 追加 `history_replaced` 事件保留审计线索
 
@@ -204,21 +270,21 @@ skills/
   - `tool_use`：工具调用轮次（assistant 含 tool_calls + 所有对应的 tool 消息）
   - `summary`：全量压缩产生的摘要消息
 - `groupToBlocks()`：将扁平消息列表分组为消息块数组
-- `flattenToMessages()`：将消息块数组还原为扁平列表（清除 `_round` 元数据）
+- `flattenToMessages()`：将消息块数组还原为扁平列表（清除内部 timing 元数据）
 - `estimateTokens()`：基于字符数的 token 估算（中文×1.5，英文×0.25，取较大值）
 - `truncateToTokens()`：按 token 估算截断文本
 
 ### 上下文压缩 (`compressor.ts`)
 
 - **三层压缩机制**（按优先级）：
-  - **P0 衰减压缩**：`decayOldBlocks()` — 超过轮次阈值的 tool_use 块，截断 tool result content
-  - **P1 即时压缩**：`compressToolResult(toolName, toolCallId, output)` — 压缩器内部根据 `compressibleTools` 配置列表和输出大小决策是否压缩（默认只压缩 `run_bash`），大输出存入 Agent 全局 `.task_outputs/`，返回 preview
+  - **P0 衰减压缩**：`decayOldBlocks()` — 超过 `decayAfterRounds` 对应的全局 LLM loop 数后，截断 tool result content
+  - **P1 即时压缩**：`compressToolResult(toolName, toolCallId, output)` — 压缩器内部根据 `compressibleTools` 配置列表和输出大小决策是否压缩（默认只压缩 `run_bash`），大输出优先登记到 OutputStore，返回 `output_id` 与 preview
   - **P2 全量压缩**：`compactHistory()` — 纯规则压缩，保留 recent K 块，其余压缩为摘要
 - **消息块约束**：不拆分块、不孤立配对、不破坏 ID 关联
 - **状态管理**：hasCompacted、lastSummary、recentFiles（闭包保护）
 - **连续压缩**：后续压缩复用上一次 summary，避免信息退化
 - **降级策略**：文件写入失败跳过压缩、全量压缩后仍超限保留最精简上下文
-- **cleanup()**：清空 Agent 全局 `.task_outputs/` 目录
+- **cleanup()**：未注入 OutputStore 时清空临时 `.task_outputs/` 目录；注入 OutputStore 后不删除已登记输出
 - **输出目录可注入**：大工具输出目录由 `ProjectContext.taskOutputsDir` 注入，默认位于 `agentHome/.task_outputs/`
 
 ### LLM Provider Profile 抽象层 (`llm-providers.ts`)
@@ -245,14 +311,16 @@ skills/
 - **不做任何截断**：消息内容、工具参数、tool_call arguments 全部完整保留
 - **新增 Cache Debug 记录**：systemPromptHash、toolsHash、stablePrefixHash、变化标记
 - **格式化为易读结构**：角色标签对齐、JSON 美化、缩进
-- **文件策略**：固定写入 `<agentHome>/logs/llm.log`，每次启动清空，超过 1MB 清空重写；默认路径是 `~/.learn-claude-code-ts/logs/llm.log`，不是项目根目录的 `logs/llm.log`
+- **文件策略**：固定写入 `<agentHome>/logs/llm.log`，每次启动追加 BOOT 标记；默认单文件超过 5MB 时轮转为 `llm.log.1`、`llm.log.2` 等，默认保留 5 份；默认路径是 `~/.learn-claude-code-ts/logs/llm.log`，不是项目根目录的 `logs/llm.log`
 - **请求-响应成对**：每组用空行 + 分隔线隔开
 
 ### 消息标准化 (`normalize.ts`)
 
-- **过滤元数据字段**：清理 content 数组中 `_` 开头的键（如 `_timestamp`、`_id`）
-- **补全缺失 tool_result**：每个 assistant 的 tool_call 都必须有对应的 tool 消息，缺失则插入占位消息
-- **合并连续同角色消息**：将 user+user 或 assistant+assistant 合并为一条（OpenAI API 要求角色严格交替）
+- **纯函数转换**：不修改输入数组或输入 message 对象；输出消息使用 clone，避免 prepareMessages 污染 History 引用
+- **过滤元数据字段**：清理 content 数组中 `_` 开头的键（如 `_timestamp`、`_id`），但保留顶层 `_turnIndex/_loopRound/_loopIndex/_messageSequence/_round` 给 message-block 读取
+- **补全/移动 tool_result**：每个 assistant 的 tool_call 都必须有对应 tool 消息；缺失则在该 assistant 后插入占位消息，位置错误的 tool_result 会被移动回对应 tool block
+- **丢弃孤立 tool_result**：没有任何 assistant tool_call 引用的 role=tool 消息不会进入最终 LLM 输入
+- **合并连续同角色消息**：将 user+user 或普通 assistant+assistant 合并为一条；带 `tool_calls` 的 assistant 不参与合并
 
 ### 工具系统 (`tools/`)
 
@@ -270,7 +338,12 @@ skills/
   - `replaceAll` 行为：所有匹配项都会被替换
   - old_string 未找到时返回错误
   - 路径安全检查同上
-- **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数（含 bash、files、todo、subagent、skill、memory、task 七类工具）
+- **run_edit_exact 工具**：安全精确编辑文件
+  - `old_string` 必须非空，`expected_occurrences` 必须是正整数
+  - 只有实际匹配次数等于 `expected_occurrences` 才写文件
+  - 零匹配、多匹配或上下文漂移时不写文件，返回错误
+- **run_output_read 工具**：按 `output_id` 读取 OutputStore 登记输出，不接受文件路径
+- **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数（含 bash、files、output、todo、subagent、skill、memory、task、async、schedule 等工具）
 - **工具定义全局稳定**：当前进程内只有一套工具定义列表，不随 conversation/session 改变；projectRoot 只作为 bash/file 工具的执行 cwd 与路径边界
 - **项目根目录注入**：`createToolRegistry(..., { projectRoot })` 将同一个 projectRoot 传给 bash 和文件工具，避免散落使用 `process.cwd()`
 - **工具定义顺序稳定**：`orderedEntries` 数组保证 `getToolDefinitions()` 多次调用顺序一致
@@ -325,8 +398,10 @@ skills/
   - `auto`：自动模式，黑名单过滤后的操作直接放行
   - `default`：默认模式，敏感操作（bash/write/edit/subagent）需用户确认
 - **权限检查流程**（短路返回）：工具分类 → 黑名单 → 路径边界 → 白名单 → 模式规则 → 敏感确认
-- **复用现有安全机制**：`bash.ts` 的 `isDangerousCommand()`、`files.ts` 的 `isPathSafe()`
-- **子智能体继承**：共享同一个 `PermissionManager` 实例，不传 `askUserFn`（ask 降级为 deny）
+- **复用现有安全机制**：普通 bash 与非交互执行边界共享 `command-safety.ts` 的危险命令黑名单；文件路径仍使用 `files.ts` 的 `isPathSafe()`
+- **Output 读取权限**：`run_output_read` 属于 Agent 运行数据读取，plan/default/auto 均允许；它不走 projectRoot 文件读取边界，而是由 OutputStore index 和 output root 校验
+- **安全编辑权限**：`run_edit_exact` 与 `run_edit` 一样归类为 file-write，default 模式 ask，auto 模式 allow，plan 模式只允许 `.claude/plans/`
+- **子智能体继承**：同步子智能体共享父级 `PermissionManager` 实例；async/scoped 子智能体通过注入的 readonly `AsyncCommandPolicy` 校验内部 `run_bash`，内部 ask 降级为 deny
 - **`/mode` CLI 命令**：通过 `cli-commands.ts` 注册，切换运行模式
 
 ### Hook 机制 (`hooks.ts`)
@@ -394,14 +469,15 @@ skills/
 ### 基础设施
 
 - **配置** (config.ts)：从 .env 加载 API key、baseURL、模型名
-- **日志** (logger.ts)：四级日志，通过 LOG_LEVEL 控制，使用 `util.format` 替换 %s/%d 占位符
-- **对话历史** (history.ts)：messages + rounds 统一存储，支持 add/getMessages/getEntries/clear/setSystemPrompt/getSystemPrompt
-  - `add(message, meta?)`：添加消息，可选附带 round 元信息（向后兼容）
+- **日志** (logger.ts)：四级日志，通过 LOG_LEVEL 控制，使用 `util.format` 替换 %s/%d 占位符；写入 `agent.log` 时默认单文件 5MB、保留 5 份轮转历史
+- **原子写入** (atomic-write.ts)：持久化 store 共用的文本/JSON 原子写入工具，JSON 写入前会在临时文件上做一次语法 parse 校验
+- **对话历史** (history.ts)：messages + timing metadata 统一存储，支持 add/getMessages/getEntries/clear/setSystemPrompt/getSystemPrompt
+  - `add(message, meta?)`：添加消息，可选附带 turnIndex / loopRound / loopIndex / round 元信息（向后兼容），返回写入后的 HistoryEntry
   - `getMessages()`：返回纯消息列表（含 system prompt），用于 LLM API
-  - `getEntries()`：返回带 round 元信息的条目列表（不含 system prompt），用于压缩管道
+  - `getEntries()`：返回带 timing 元信息和 messageSequence 的条目列表（不含 system prompt），用于压缩管道
   - `getSystemPrompt()`：返回当前 system prompt
   - `setSystemPrompt()`：独立存储 system prompt，`getMessages()` 时自动插入头部
-  - round 元信息封装在闭包内，不可能失同步
+  - timing 元信息封装在闭包内，不可能失同步
 
 ## 依赖
 
@@ -440,30 +516,40 @@ skills/
 
 | 测试文件                       | 测试数 | 覆盖内容                                                                                                               |
 | ------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `src/tools/bash.test.ts`       | 9      | 危险命令拦截、正常执行、错误处理                                                                                       |
-| `src/tools/files.test.ts`      | 17     | 路径安全检查、读写文件、编辑替换                                                                                       |
-| `src/normalize.test.ts`        | 10     | 元数据过滤、tool_result 补全、消息合并                                                                                 |
-| `src/history.test.ts`          | 13     | 增删、返回副本、清空、add 带 meta、getEntries、getSystemPrompt                                                         |
-| `src/logger.test.ts`           | 1      | 日志级别过滤                                                                                                           |
-| `src/todo.test.ts`             | 33     | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程                                                         |
-| `src/tools/subagent.test.ts`   | 14     | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表、async run 提示                                    |
+| `src/tools/bash.test.ts`       | 24     | 危险命令拦截、正常执行、错误处理、非交互命令策略                                                                       |
+| `src/tools/files.test.ts`      | 23     | 路径安全检查、读写文件、编辑替换、精确编辑                                                                             |
+| `src/normalize.test.ts`        | 17     | 纯函数转换、元数据过滤、tool_result 邻接补全/移动、孤立 tool_result 丢弃、assistant tool_call 合并边界                 |
+| `src/history.test.ts`          | 22     | 增删、返回副本、清空、add 带 timing meta、messageSequence、getEntries、getSystemPrompt                                |
+| `src/logger.test.ts`           | 2      | 日志级别过滤、agent.log 轮转                                                                                          |
+| `src/llm-logger.test.ts`       | 1      | llm.log 轮转且保留 BOOT 历史                                                                                           |
+| `src/atomic-write.test.ts`     | 3      | 文本/JSON 原子写入、JSON 序列化失败不破坏旧文件                                                                        |
+| `src/todo.test.ts`             | 34     | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程                                                         |
+| `src/tools/subagent.test.ts`   | 17     | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表、async run 提示                                    |
 | `src/skills.test.ts`           | 25     | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量                                |
-| `src/message-block.test.ts`    | 24     | 消息块分组、还原、\_round 传递与清除、round-trip 一致性、token 估算                                                    |
-| `src/compressor.test.ts`       | 21     | 衰减压缩、即时压缩（含非压缩工具通过）、全量压缩、状态管理、cleanup                                                    |
-| `src/permission.test.ts`       | 49     | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory/async-run 权限   |
+| `src/message-block.test.ts`    | 29     | 消息块分组、normalized tool block、还原、内部 timing 字段传递与清除、round-trip 一致性、token 估算                    |
+| `src/compressor.test.ts`       | 26     | 衰减压缩、loopIndex 年龄判断、即时压缩（含非压缩工具通过）、OutputStore 输出句柄、全量压缩、状态管理、cleanup        |
+| `src/permission.test.ts`       | 74     | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory/async-run 权限   |
 | `src/hooks.test.ts`            | 11     | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner                                                    |
-| `src/agent.test.ts`            | 15     | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序、async notification/conflict |
+| `src/agent.test.ts`            | 22     | SessionStart 注入/单次触发、时间语义、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call LLM 输入顺序、错误恢复、Transcript |
 | `src/memory.test.ts`           | 40     | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar        |
 | `src/tools/memory.test.ts`     | 2      | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复                                                       |
-| `src/tools/registry.test.ts`   | 4      | 重复注册报错、工具定义顺序稳定性、完整 registry 创建、过滤选项                                                         |
-| `src/async-runs.test.ts`       | 26     | start 校验、finishRun 生命周期、timeout、深拷贝、冲突检测、notification drain、readOutput                              |
-| `src/tools/async-runs.test.ts` | 14     | 4 个工具定义、参数校验、JSON 输出格式、错误传播                                                                        |
-| `src/system-prompt.test.ts`    | 17     | buildSystemPrompt 组合、AGENTS.md 项目指令头、snapshot 稳定性、refreshSnapshot、ignore memory reminder                 |
+| `src/tools/registry.test.ts`   | 11     | 重复注册报错、工具定义顺序稳定性、完整 registry 创建、过滤选项、OutputStore 注册                                      |
+| `src/async-runs.test.ts`       | 32     | start 校验、finishRun 生命周期、timeout、深拷贝、冲突检测、notification drain、readOutput、OutputStore 输出登记       |
+| `src/tools/async-runs.test.ts` | 16     | 4 个工具定义、参数校验、JSON 输出格式、错误传播、output_id 展示                                                       |
+| `src/execution-policy.test.ts` | 12     | readonly/ci/workspace_write profile、命令白名单、资源边界                                                             |
+| `src/output-store.test.ts`     | 7      | output_id 生成、index 校验、分片读取、路径边界                                                                         |
+| `src/tools/output.test.ts`     | 4      | run_output_read 参数校验、分片读取、错误传播                                                                           |
+| `src/schedule-store.test.ts`   | 33     | Schedule 文件/occurrence 校验、当前项目默认过滤、跨项目显式列表、索引重建、occurrence 排序和 limit                    |
+| `src/schedules.test.ts`        | 28     | ScheduleManager 创建/触发/取消/删除、当前项目触发边界、orphaned 重启收敛、orphaned 后 overlap 不阻塞、async finish 回写、nextRunAt 计算           |
+| `src/tools/schedules.test.ts`  | 4      | 6 个 Schedule 工具定义、未实现字段不暴露、current_project_only 透传、创建时固定当前实现策略默认值                     |
+| `src/system-prompt.test.ts`    | 20     | buildSystemPrompt 组合、AGENTS.md 项目指令头、snapshot 稳定性、refreshSnapshot、ignore memory reminder                 |
 | `src/session-events.test.ts`   | 5      | drain 清空、peek 不清空、顺序保持                                                                                      |
+| `src/transcript.test.ts`       | 6      | 消息分类、事件 sequence、historySequence、timing 元信息、搜索                                                          |
 | `src/cache-debug.test.ts`      | 7      | inspect 变化检测、system prompt 不变性、formatCacheDebugLog                                                            |
-| `src/llm-providers.test.ts`    | 22     | provider 解析、默认值、覆盖优先级、错误提示、能力标记                                                                  |
+| `src/llm-providers.test.ts`    | 26     | provider 解析、默认值、覆盖优先级、错误提示、能力标记                                                                  |
 | `src/config.test.ts`           | 5      | loadConfig 解析 provider 字段、compression/logLevel 默认值、错误信息不泄漏 key                                         |
 | `src/llm.test.ts`              | 10     | non-streaming 路径、streaming content/tool_calls 聚合、llmLogger 调用                                                  |
+| `src/cli-commands.test.ts`     | 5      | /task 命令分发、/schedule list 当前项目默认和 --all-projects 跨项目摘要参数                                            |
 | `src/index.test.ts`            | 1      | 占位                                                                                                                   |
 
 ## 设计模式
@@ -498,7 +584,7 @@ skills/
 
 ### 压缩管道的注释解耦
 
-`prepareMessages()` 通过 `_round` 元数据与 `message-block.ts` 的 `groupToBlocks()` 通信。这个"协议"是松耦合的：`_round` 作为临时元数据，在 `flattenToMessages()` 中被清除，不会发送给 LLM API。只要 `_round` 的注入格式不变，下游模块（normalize、groupToBlocks、compressor）无需任何修改。
+`prepareMessages()` 通过内部 timing 元数据与 `message-block.ts` 的 `groupToBlocks()` 通信。这个"协议"是松耦合的：`_turnIndex/_loopRound/_loopIndex/_messageSequence/_round` 作为临时元数据，在 `flattenToMessages()` 中被清除，不会发送给 LLM API。只要内部字段的注入格式不变，下游模块（normalize、groupToBlocks、compressor）无需知道 History 的内部数组结构。
 
 ### getEntries() 不含 system prompt 的设计
 
@@ -522,7 +608,7 @@ skills/
 
 ### 往返转换必须保留原始粒度
 
-数据从细粒度聚合为粗粒度，再还原为细粒度时，还原步骤必须优先使用原始元素自带的元数据，不能把聚合值当作原始值的替代品。`groupToBlocks` 用 `minRound` 给 block 打聚合标签，但块内各条消息仍保留各自的 `_round`；`blocksToEntries` 还原时若统一使用 `block.round`，就会丢失原始粒度。任何"分组 → 处理 → 还原"的管道，在还原阶段都要问自己：原始元素上是否还有比分组键更细的信息需要保留。
+数据从细粒度聚合为粗粒度，再还原为细粒度时，还原步骤必须优先使用原始元素自带的元数据，不能把聚合值当作原始值的替代品。`groupToBlocks` 会给 block 打聚合 timing 标签，但块内各条消息仍保留各自的内部 timing 字段；`blocksToEntries` 还原时若统一使用 block 聚合值，就会丢失原始粒度。任何"分组 → 处理 → 还原"的管道，在还原阶段都要问自己：原始元素上是否还有比分组键更细的信息需要保留。
 
 ### 状态变更后显式刷新所有派生值
 

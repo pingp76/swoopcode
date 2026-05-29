@@ -8,6 +8,10 @@
 import { describe, it, expect } from "vitest";
 import { createPermissionManager, createScopedSubagentPermissionManager } from "./permission.js";
 import type { PermissionContext } from "./permission.js";
+import {
+  createDefaultAsyncCommandPolicy,
+  type AsyncCommandPolicy,
+} from "./execution-policy.js";
 import { resolve } from "node:path";
 
 // 测试用的项目目录
@@ -203,6 +207,15 @@ describe("whitelist", () => {
     const decision = pm.check(ctx("run_skill", { name: "code-review" }));
     expect(decision.action).toBe("allow");
   });
+
+  it("allows run_output_read as agent runtime data read", () => {
+    const decision = pm.check(
+      ctx("run_output_read", {
+        output_id: "out_20260528_153000_abc123",
+      }),
+    );
+    expect(decision.action).toBe("allow");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -290,6 +303,18 @@ describe("auto mode", () => {
     expect(decision.action).toBe("allow");
   });
 
+  it("allows run_edit_exact within project", () => {
+    const decision = pm.check(
+      ctx("run_edit_exact", {
+        path: resolve(PROJECT_DIR, "file.ts"),
+        old_string: "a",
+        new_string: "b",
+        expected_occurrences: 1,
+      }),
+    );
+    expect(decision.action).toBe("allow");
+  });
+
   it("allows run_subagent", () => {
     const decision = pm.check(ctx("run_subagent", { task: "do stuff" }));
     expect(decision.action).toBe("allow");
@@ -326,6 +351,18 @@ describe("default mode", () => {
         path: resolve(PROJECT_DIR, "file.ts"),
         old_string: "a",
         new_string: "b",
+      }),
+    );
+    expect(decision.action).toBe("ask");
+  });
+
+  it("asks for run_edit_exact", () => {
+    const decision = pm.check(
+      ctx("run_edit_exact", {
+        path: resolve(PROJECT_DIR, "file.ts"),
+        old_string: "a",
+        new_string: "b",
+        expected_occurrences: 1,
       }),
     );
     expect(decision.action).toBe("ask");
@@ -585,7 +622,7 @@ describe("createScopedSubagentPermissionManager", () => {
   /** 创建 mock commandPolicy（允许所有命令，用于测试非 bash 分支） */
   function createMockCommandPolicy(
     allowed = true,
-  ): import("./tools/bash.js").AsyncCommandPolicy {
+  ): AsyncCommandPolicy {
     return {
       maxTimeoutMs: 300_000,
       validate: () =>
@@ -697,6 +734,27 @@ describe("createScopedSubagentPermissionManager", () => {
     );
   });
 
+  it("uses shared readonly command policy for subagent bash", () => {
+    const parent = createPermissionManager(PROJECT_DIR);
+    const scoped = createScopedSubagentPermissionManager({
+      parent,
+      commandPolicy: createDefaultAsyncCommandPolicy(),
+    });
+
+    expect(
+      scoped.check({
+        toolName: "run_bash",
+        args: { command: "npx tsc --noEmit" },
+      }).action,
+    ).toBe("allow");
+    const denied = scoped.check({
+      toolName: "run_bash",
+      args: { command: "npx eslint --fix" },
+    });
+    expect(denied.action).toBe("deny");
+    expect(denied.action === "deny" && denied.reason).toContain("--fix");
+  });
+
   it("denies write tools inside subagent", () => {
     const parent = createPermissionManager(PROJECT_DIR);
     parent.setMode("auto");
@@ -705,7 +763,12 @@ describe("createScopedSubagentPermissionManager", () => {
       commandPolicy: createMockCommandPolicy(),
     });
 
-    const writeTools = ["run_write", "run_edit", "run_subagent"];
+    const writeTools = [
+      "run_write",
+      "run_edit",
+      "run_edit_exact",
+      "run_subagent",
+    ];
     for (const toolName of writeTools) {
       const decision = scoped.check({ toolName, args: {} });
       expect(decision.action).toBe("deny");

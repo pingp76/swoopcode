@@ -10,8 +10,8 @@
  *
  * 文件策略：
  * - 固定文件 logs/llm.log，不按 session 创建新文件
- * - 文件超过 maxSize 时清空重写（从头开始）
- * - 每次 Agent 启动时写入启动标记
+ * - 文件超过 maxSize 时轮转为 llm.log.1、llm.log.2……
+ * - 每次 Agent 启动时追加启动标记，不再清空旧日志
  */
 
 import * as fs from "node:fs";
@@ -23,6 +23,7 @@ import type {
 } from "openai/resources/chat/completions";
 import type { LLMResponse } from "./llm.js";
 import type { CacheDebugState } from "./cache-debug.js";
+import { rotateLogFileIfNeeded } from "./log-rotation.js";
 
 // ============================================================
 // 接口定义
@@ -220,6 +221,7 @@ function indent(text: string, spaces: number): string {
 export function createLLMLogger(options?: {
   logDir?: string;
   maxSize?: number;
+  keepFiles?: number;
 }): LLMLogger {
   const logDir =
     options?.logDir ??
@@ -228,7 +230,8 @@ export function createLLMLogger(options?: {
         path.resolve(homedir(), ".learn-claude-code-ts"),
       "logs",
     );
-  const maxSize = options?.maxSize ?? 1024 * 1024; // 1MB
+  const maxSize = options?.maxSize ?? 5 * 1024 * 1024; // 5MB
+  const keepFiles = options?.keepFiles ?? 5;
   const logFile = path.join(logDir, "llm.log");
 
   // 确保 logs 目录存在
@@ -236,10 +239,10 @@ export function createLLMLogger(options?: {
     fs.mkdirSync(logDir, { recursive: true });
   }
 
-  // 每次启动清空文件，写入启动标记
+  // 每次启动追加启动标记。写入前先检查轮转，避免一个长期运行的 llm.log
+  // 因为反复 append 变成无限增长的单个大文件。
   const bootTimestamp = new Date().toISOString();
-  fs.writeFileSync(
-    logFile,
+  appendLog(
     `${SEPARATOR}\n[BOOT] ${bootTimestamp}\n${SEPARATOR}\n\n`,
   );
 
@@ -248,17 +251,13 @@ export function createLLMLogger(options?: {
    */
   function appendLog(content: string): void {
     try {
-      const stat = fs.statSync(logFile);
-      if (stat.size >= maxSize) {
-        // 超过大小限制，清空文件并写入重置标记
-        const resetTimestamp = new Date().toISOString();
-        fs.writeFileSync(
-          logFile,
-          `${SEPARATOR}\n[RESET] ${resetTimestamp} — file exceeded ${maxSize} bytes\n${SEPARATOR}\n\n`,
-        );
-      }
+      rotateLogFileIfNeeded(logFile, {
+        maxFileBytes: maxSize,
+        keepFiles,
+        onWarning: (message) => console.warn(message),
+      });
     } catch {
-      // 文件不存在，appendFileSync 会自动创建
+      // 轮转失败不阻塞日志写入；appendFileSync 会在文件不存在时自动创建。
     }
     fs.appendFileSync(logFile, content + "\n");
   }

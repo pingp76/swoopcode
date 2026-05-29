@@ -7,6 +7,7 @@
  * - run_read：读取文件内容
  * - run_write：写入文件（覆盖已有内容）
  * - run_edit：编辑文件（查找并替换）
+ * - run_edit_exact：安全编辑文件（只有匹配次数符合预期才替换）
  *
  * 安全设计：
  * - 所有文件操作都限制在当前工作目录（process.cwd()）内
@@ -115,7 +116,7 @@ export const runEditToolDefinition: ChatCompletionTool = {
   function: {
     name: "run_edit",
     description:
-      "Edit a file by replacing all occurrences of old_string with new_string. The file path must be within the current working directory.",
+      "Legacy edit tool: replace all occurrences of old_string with new_string. Prefer run_edit_exact for source changes when you expect a specific number of matches. The file path must be within the current working directory.",
     parameters: {
       type: "object",
       properties: {
@@ -134,6 +135,42 @@ export const runEditToolDefinition: ChatCompletionTool = {
         },
       },
       required: ["path", "old_string", "new_string"],
+    },
+  },
+};
+
+/**
+ * runEditExactToolDefinition — run_edit_exact 工具的 OpenAI function calling 定义
+ */
+export const runEditExactToolDefinition: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "run_edit_exact",
+    description:
+      "Safely edit a file by replacing old_string only when the occurrence count matches expected_occurrences. Prefer this over run_edit for source changes.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "The path of the file to edit, relative to the current working directory.",
+        },
+        old_string: {
+          type: "string",
+          description: "The exact non-empty text to find and replace.",
+        },
+        new_string: {
+          type: "string",
+          description: "The text to replace old_string with.",
+        },
+        expected_occurrences: {
+          type: "number",
+          description:
+            "Required expected occurrence count. Use 1 for an exact single edit.",
+        },
+      },
+      required: ["path", "old_string", "new_string", "expected_occurrences"],
     },
   },
 };
@@ -293,5 +330,92 @@ export async function executeEdit(
       output: `Error editing "${filePath}": ${err instanceof Error ? err.message : String(err)}`,
       error: true,
     };
+  }
+}
+
+/**
+ * executeEditExact — 执行安全文件编辑
+ *
+ * 与 executeEdit 的 replaceAll 教学语义不同，这个工具要求调用方显式声明
+ * old_string 预期出现次数。只有实际次数完全一致时才写文件，避免模型误把
+ * 重复片段全部替换掉。
+ */
+export async function executeEditExact(
+  filePath: string,
+  oldString: string,
+  newString: string,
+  expectedOccurrences: number,
+  baseDir?: string,
+): Promise<ToolResult> {
+  if (!isPathSafe(filePath, baseDir)) {
+    return {
+      output: `Error: Path "${filePath}" is outside the working directory. File operations are restricted to the current working directory.`,
+      error: true,
+    };
+  }
+
+  if (oldString.length === 0) {
+    return {
+      output: "Error: old_string must be non-empty. No changes made.",
+      error: true,
+    };
+  }
+
+  if (
+    !Number.isInteger(expectedOccurrences) ||
+    expectedOccurrences <= 0
+  ) {
+    return {
+      output:
+        "Error: expected_occurrences must be a positive integer. No changes made.",
+      error: true,
+    };
+  }
+
+  try {
+    const targetPath = resolveSafePath(filePath, baseDir);
+    const content = await readFile(targetPath, "utf-8");
+    const actualOccurrences = countOccurrences(content, oldString);
+
+    if (actualOccurrences !== expectedOccurrences) {
+      return {
+        output:
+          `Error: expected ${expectedOccurrences} occurrence(s) of old_string in "${filePath}", ` +
+          `but found ${actualOccurrences}. No changes made.`,
+        error: true,
+      };
+    }
+
+    const newContent = content.split(oldString).join(newString);
+    await writeFile(targetPath, newContent, "utf-8");
+
+    return {
+      output:
+        `Successfully edited "${filePath}" (${actualOccurrences} replacement(s), ` +
+        `${content.length} → ${newContent.length} chars)`,
+      error: false,
+    };
+  } catch (err) {
+    if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+      return {
+        output: `Error: File not found: "${filePath}"`,
+        error: true,
+      };
+    }
+    return {
+      output: `Error editing "${filePath}": ${err instanceof Error ? err.message : String(err)}`,
+      error: true,
+    };
+  }
+}
+
+function countOccurrences(content: string, needle: string): number {
+  let count = 0;
+  let index = 0;
+  for (;;) {
+    const foundAt = content.indexOf(needle, index);
+    if (foundAt === -1) return count;
+    count++;
+    index = foundAt + needle.length;
   }
 }

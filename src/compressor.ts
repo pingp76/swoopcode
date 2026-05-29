@@ -19,6 +19,7 @@ import { resolve } from "node:path";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { MessageBlock } from "./message-block.js";
 import { estimateTokens, truncateToTokens } from "./message-block.js";
+import type { OutputStore } from "./output-store.js";
 
 // ---------------------------------------------------------------------------
 // 接口定义
@@ -44,6 +45,8 @@ export interface CompressionConfig {
   compressibleTools: string[];
   /** 大输出存储目录，默认是 Agent 全局运行根目录下的 .task_outputs */
   outputDir: string;
+  /** 可选 OutputStore：注入后用 output_id 取代裸路径引用 */
+  outputStore?: OutputStore;
 }
 
 /**
@@ -54,6 +57,8 @@ export interface CompressedToolResult {
   content: string;
   /** 如果存了文件，记录文件路径 */
   persistedPath?: string;
+  /** 如果通过 OutputStore 登记，记录稳定 output_id */
+  outputId?: string;
 }
 
 /**
@@ -97,8 +102,11 @@ export interface ContextCompressor {
     toolCallId: string,
     output: string,
   ): CompressedToolResult;
-  /** P0 衰减压缩：每轮 agent loop 开始时调用 */
-  decayOldBlocks(blocks: MessageBlock[], currentRound: number): MessageBlock[];
+  /** P0 衰减压缩：每次全 session LLM loop 前调用 */
+  decayOldBlocks(
+    blocks: MessageBlock[],
+    currentLoopIndex: number,
+  ): MessageBlock[];
   /** P2 全量压缩：上下文超过阈值时调用 */
   compactHistory(blocks: MessageBlock[]): CompactResult;
   /** 获取当前压缩状态 */
@@ -124,6 +132,11 @@ const DEFAULT_CONFIG: CompressionConfig = {
   ),
 };
 
+interface PersistedToolOutputRef {
+  relativePath?: string;
+  outputId?: string;
+}
+
 // ---------------------------------------------------------------------------
 // 工厂函数
 // ---------------------------------------------------------------------------
@@ -146,7 +159,7 @@ export function createContextCompressor(
   const recentFiles: string[] = [];
   const persistedPaths: Set<string> = new Set();
   // 追踪已存文件的 toolCallId → 文件相对路径，衰减压缩时用于追加路径引用
-  const persistedToolOutputs: Map<string, string> = new Map();
+  const persistedToolOutputs: Map<string, PersistedToolOutputRef> = new Map();
 
   // 存储目录路径由组装根注入；若单独使用压缩器，默认也写入 Agent 全局目录。
   const outputDir = cfg.outputDir;
@@ -172,10 +185,35 @@ export function createContextCompressor(
         return { content: output };
       }
 
-      // 超阈值，尝试存文件
-      const relativePath = `.task_outputs/${toolCallId}.txt`;
-      const filePath = resolve(outputDir, `${toolCallId}.txt`);
       try {
+        if (cfg.outputStore) {
+          const record = cfg.outputStore.writeText({
+            sourceKind: "tool_result",
+            sourceId: toolCallId,
+            toolName,
+            content: output,
+          });
+          const filePath = resolve(outputDir, record.relativePath);
+          persistedPaths.add(filePath);
+          persistedToolOutputs.set(toolCallId, { outputId: record.id });
+
+          const preview = truncateToTokens(output, cfg.thresholdToolOutput);
+          return {
+            content:
+              `<persisted-output tool-call-id="${toolCallId}" output-id="${record.id}">\n` +
+              `Full output saved as output_id: ${record.id}\n` +
+              `Read it with run_output_read({"output_id":"${record.id}"})\n` +
+              `Preview (first ~${cfg.thresholdToolOutput} tokens):\n` +
+              `${preview}\n` +
+              `</persisted-output>`,
+            persistedPath: filePath,
+            outputId: record.id,
+          };
+        }
+
+        // 未注入 OutputStore 时保留旧教学行为：直接写入 outputDir 下的文件。
+        const relativePath = `.task_outputs/${toolCallId}.txt`;
+        const filePath = resolve(outputDir, `${toolCallId}.txt`);
         // 确保目录存在
         if (!existsSync(outputDir)) {
           mkdirSync(outputDir, { recursive: true });
@@ -183,7 +221,7 @@ export function createContextCompressor(
         writeFileSync(filePath, output, "utf-8");
         persistedPaths.add(filePath);
         // 追踪 toolCallId → 文件路径，衰减压缩时用于追加路径引用
-        persistedToolOutputs.set(toolCallId, relativePath);
+        persistedToolOutputs.set(toolCallId, { relativePath });
 
         // 返回带预览的格式，嵌入 toolCallId 便于 LLM 标识
         const preview = truncateToTokens(output, cfg.thresholdToolOutput);
@@ -207,14 +245,16 @@ export function createContextCompressor(
     // -----------------------------------------------------------------------
     decayOldBlocks(
       blocks: MessageBlock[],
-      currentRound: number,
+      currentLoopIndex: number,
     ): MessageBlock[] {
       return blocks.map((block) => {
-        // 没有轮次信息的块，不处理
-        if (block.round === undefined) return block;
+        // 没有时间信息的块，不处理。loopIndex 是新版年龄基准，
+        // round 只作为旧测试和旧调用点的兼容 fallback。
+        const blockLoopIndex = block.loopIndex ?? block.round;
+        if (blockLoopIndex === undefined) return block;
 
-        // 判断是否为"旧"块
-        const age = currentRound - block.round;
+        // 判断是否为"旧"块：年龄表示已经经过多少次 LLM 思考循环。
+        const age = currentLoopIndex - blockLoopIndex;
         if (age <= cfg.decayThreshold) return block;
 
         // text 块和 summary 块：不修改
@@ -231,11 +271,11 @@ export function createContextCompressor(
               "tool_call_id" in tr
                 ? (tr as { tool_call_id: string }).tool_call_id
                 : undefined;
-            const persistedRelative = tcId
+            const persistedRef = tcId
               ? persistedToolOutputs.get(tcId)
               : undefined;
-            const finalContent = persistedRelative
-              ? `${truncated}\n[Full output: ${persistedRelative}]`
+            const finalContent = persistedRef
+              ? `${truncated}\n${formatPersistedOutputRef(persistedRef)}`
               : truncated;
 
             // 创建新的 tool 消息，保留 tool_call_id
@@ -326,7 +366,12 @@ export function createContextCompressor(
       const summaryText = `[Context Summary]\n${summaryLines.join("\n")}`;
 
       // 创建 summary 消息块
-      const firstRound = oldBlocks[0]?.round;
+      const firstOldBlock = oldBlocks[0];
+      const firstRound = firstOldBlock?.round;
+      const firstTurnIndex = firstOldBlock?.turnIndex;
+      const firstLoopRound = firstOldBlock?.loopRound;
+      const firstLoopIndex = firstOldBlock?.loopIndex;
+      const firstMessageSequence = firstOldBlock?.messageSequence;
       const summaryBlock: MessageBlock =
         firstRound !== undefined
           ? {
@@ -344,6 +389,13 @@ export function createContextCompressor(
                 content: summaryText,
               } as ChatCompletionMessageParam,
             };
+
+      if (firstTurnIndex !== undefined) summaryBlock.turnIndex = firstTurnIndex;
+      if (firstLoopRound !== undefined) summaryBlock.loopRound = firstLoopRound;
+      if (firstLoopIndex !== undefined) summaryBlock.loopIndex = firstLoopIndex;
+      if (firstMessageSequence !== undefined) {
+        summaryBlock.messageSequence = firstMessageSequence;
+      }
 
       // 更新内部状态
       hasCompacted = true;
@@ -373,8 +425,9 @@ export function createContextCompressor(
     // 清理
     // -----------------------------------------------------------------------
     cleanup(): void {
-      // 清空 .task_outputs/ 目录
-      if (existsSync(outputDir)) {
+      // 未注入 OutputStore 时，压缩器拥有自己写出的临时输出目录，可以整体清理。
+      // 注入 OutputStore 后，输出是登记过的 Agent artifact，不能由 compressor cleanup 删除。
+      if (!cfg.outputStore && existsSync(outputDir)) {
         try {
           rmSync(outputDir, { recursive: true, force: true });
         } catch {
@@ -385,6 +438,13 @@ export function createContextCompressor(
       persistedToolOutputs.clear();
     },
   };
+}
+
+function formatPersistedOutputRef(ref: PersistedToolOutputRef): string {
+  if (ref.outputId) {
+    return `[Full output: output_id ${ref.outputId}; read with run_output_read]`;
+  }
+  return `[Full output: ${ref.relativePath ?? "unknown"}]`;
 }
 
 // ---------------------------------------------------------------------------

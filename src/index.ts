@@ -51,11 +51,16 @@ import { createTaskManager } from "./tasks.js";
 import { createTaskToolProvider } from "./tools/tasks.js";
 import { createAsyncRunManager } from "./async-runs.js";
 import { createAsyncRunToolProvider } from "./tools/async-runs.js";
-import { createDefaultAsyncCommandPolicy } from "./tools/bash.js";
+import {
+  createExecutionPolicy,
+  createReadonlyCommandPolicy,
+} from "./execution-policy.js";
 import { createScheduleStore } from "./schedule-store.js";
 import { createScheduleManager } from "./schedules.js";
 import { createScheduleToolProvider } from "./tools/schedules.js";
 import { createScheduleCliCommand } from "./cli-commands.js";
+import { createOutputStore } from "./output-store.js";
+import { createOutputToolProvider } from "./tools/output.js";
 
 /**
  * main — 主函数
@@ -252,6 +257,11 @@ async function main() {
     projectRoot: projectContext.projectRoot,
     logger,
   });
+  const executionPolicy = createExecutionPolicy();
+  const readonlyCommandPolicy = createReadonlyCommandPolicy(executionPolicy);
+  const outputStore = createOutputStore({
+    outputDir: projectContext.taskOutputsDir,
+  });
 
   // 20.5. 创建 Async Run 管理器
   //       输出目录放在 taskOutputsDir/async-runs/
@@ -260,7 +270,9 @@ async function main() {
     taskOutputsDir: projectContext.taskOutputsDir,
     llm,
     logger,
-    commandPolicy: createDefaultAsyncCommandPolicy(),
+    executionPolicy,
+    commandPolicy: readonlyCommandPolicy,
+    outputStore,
     createAgentFn: createAgent,
     createCompressorFn: () =>
       createContextCompressor({
@@ -277,7 +289,7 @@ async function main() {
         undefined, // no async-run (prevent nesting)
         {
           projectRoot: projectContext.projectRoot,
-          commandPolicy: createDefaultAsyncCommandPolicy(),
+          commandPolicy: readonlyCommandPolicy,
           includeFileWrite: false,
           includeFileEdit: false,
           readPolicy: {
@@ -325,16 +337,9 @@ async function main() {
     asyncRunManager,
     projectRoot: projectContext.projectRoot,
     logger,
-    commandPolicy: createDefaultAsyncCommandPolicy(),
+    executionPolicy,
+    commandPolicy: readonlyCommandPolicy,
   });
-
-  // 注册 ScheduleManager 的 async run 完成回调
-  // 这样当 schedule 触发的 async run 进入终态时，occurrence 状态会自动更新
-  if (asyncRunManager.setOnFinish) {
-    asyncRunManager.setOnFinish(
-      (scheduleManager as unknown as { _onAsyncRunFinish: (record: import("./async-runs.js").AsyncRunRecord) => void })._onAsyncRunFinish,
-    );
-  }
 
   // 20.6. 创建 Schedule 工具提供者
   const scheduleProvider = createScheduleToolProvider(scheduleManager);
@@ -342,8 +347,12 @@ async function main() {
   // 20.7. 创建 Async Run 工具提供者
   const asyncRunProvider = createAsyncRunToolProvider(
     asyncRunManager,
-    createDefaultAsyncCommandPolicy(),
+    readonlyCommandPolicy,
   );
+
+  // 20.8. 创建 Output 工具提供者
+  //       只按 output_id 读取 OutputStore 登记过的大输出，不开放任意路径读取。
+  const outputProvider = createOutputToolProvider(outputStore);
 
   // 21. 创建子智能体工具提供者
   //     注入 permissionManager 和 commandPolicy，内部构建 scoped permission manager
@@ -372,7 +381,7 @@ async function main() {
         outputDir: projectContext.taskOutputsDir,
       }),
     permissionManager,
-    commandPolicy: createDefaultAsyncCommandPolicy(),
+    commandPolicy: readonlyCommandPolicy,
     hookRunner,
     getStableSystemPrompt: () =>
       systemPromptProvider.getSnapshot().systemPrompt,
@@ -391,12 +400,14 @@ async function main() {
     asyncRunProvider,
     { projectRoot: projectContext.projectRoot },
     scheduleProvider,
+    outputProvider,
   );
 
   // 23. 创建上下文压缩器
   const compressor = createContextCompressor({
     ...config.compression,
     outputDir: projectContext.taskOutputsDir,
+    outputStore,
   });
 
   // 24. 创建 Agent（注入权限管理器、确认回调、Hook Runner、System Prompt Provider 和 SessionEventBuffer）
