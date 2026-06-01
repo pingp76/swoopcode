@@ -6,5 +6,11 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     ignores: ["dist/", "coverage/"],
+    rules: {
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
+      ],
+    },
   },
 );

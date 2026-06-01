@@ -20,6 +20,15 @@ import {
   type LLMProviderId,
   type LLMProviderCapabilities,
 } from "./llm-providers.js";
+import {
+  resolveFoundationModelProfile,
+  type FoundationModelProfile,
+} from "./foundation-models.js";
+import {
+  resolveRuntimePolicy,
+  extractCompressionDefaultsFromPolicy,
+  type RuntimePolicy,
+} from "./runtime-policy.js";
 
 /**
  * Config — 应用配置的类型定义
@@ -44,6 +53,10 @@ export interface Config {
   logLevel: string;
   /** 上下文压缩配置 */
   compression: CompressionConfig;
+  /** 已解析的基座模型画像 */
+  modelProfile: FoundationModelProfile;
+  /** 已解析的运行时策略 */
+  runtimePolicy: RuntimePolicy;
 }
 
 /**
@@ -77,6 +90,24 @@ export function loadConfig(): Config {
   // 解析 LLM provider 配置（含优先级处理和环境变量覆盖）
   const resolved = resolveLLMProviderConfig(process.env);
 
+  // 解析基座模型画像
+  const explicitProfileId = process.env["LLM_MODEL_PROFILE"];
+  const modelProfile = resolveFoundationModelProfile({
+    provider: resolved.provider,
+    model: resolved.model,
+    ...(explicitProfileId !== undefined ? { explicitProfileId } : {}),
+  });
+
+  // 解析运行时策略
+  const runtimePolicy = resolveRuntimePolicy(
+    modelProfile,
+    resolved.model,
+    process.env,
+  );
+
+  // 压缩配置优先级：显式 env > RuntimePolicy 默认值 > 旧硬编码
+  const policyCompression = extractCompressionDefaultsFromPolicy(runtimePolicy);
+
   return {
     provider: resolved.provider,
     providerDisplayName: resolved.displayName,
@@ -87,11 +118,23 @@ export function loadConfig(): Config {
     // ?? 是空值合并运算符：只有当左边是 null 或 undefined 时才使用右边的默认值
     logLevel: process.env["LOG_LEVEL"] ?? "info",
     compression: {
-      thresholdToolOutput: Number(process.env["COMPRESS_TOOL_OUTPUT"]) || 2000,
-      decayThreshold: Number(process.env["COMPRESS_DECAY_THRESHOLD"]) || 3,
-      decayPreviewTokens: Number(process.env["COMPRESS_DECAY_PREVIEW"]) || 100,
-      maxContextTokens: Number(process.env["COMPRESS_MAX_CONTEXT"]) || 80000,
-      compactKeepRecent: Number(process.env["COMPACT_KEEP_RECENT"]) || 4,
+      thresholdToolOutput:
+        Number(process.env["COMPRESS_TOOL_OUTPUT"]) ||
+        policyCompression.thresholdToolOutput,
+      decayThreshold:
+        Number(process.env["COMPRESS_DECAY_THRESHOLD"]) ||
+        policyCompression.decayThreshold,
+      decayPreviewTokens:
+        Number(process.env["COMPRESS_DECAY_PREVIEW"]) ||
+        policyCompression.decayPreviewTokens,
+      maxContextTokens:
+        Number(process.env["COMPRESS_MAX_CONTEXT"]) ||
+        policyCompression.maxContextTokens,
+      compactKeepRecent:
+        Number(process.env["COMPACT_KEEP_RECENT"]) ||
+        policyCompression.compactKeepRecent,
     },
+    modelProfile,
+    runtimePolicy,
   };
 }

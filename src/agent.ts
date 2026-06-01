@@ -43,6 +43,7 @@ import type { TranscriptStore } from "./transcript.js";
 import type { AsyncRunManager } from "./async-runs.js";
 import type { ScheduleManager } from "./schedules.js";
 import type { MessageTimingInput } from "./timeline.js";
+import type { StableContextManager } from "./stable-context.js";
 import { createNoopHookRunner } from "./hooks.js";
 import { normalizeMessages } from "./normalize.js";
 import {
@@ -98,7 +99,7 @@ export function createAgent(deps: {
   todoManager?: TodoManager;
   maxRounds?: number;
   compressor: ContextCompressor;
-  maxContextTokens?: number;
+  maxContextTokens?: number | (() => number);
   /** 权限管理器（必需），在工具执行前检查权限 */
   permissionManager: PermissionManager;
   /** 用户确认回调（可选，子智能体不传，ask 决策降级为 deny） */
@@ -122,6 +123,8 @@ export function createAgent(deps: {
   scheduleManager?: Pick<ScheduleManager, "drainNotifications">;
   /** AbortSignal（可选，用于外部取消 Agent 运行，如 async run timeout） */
   abortSignal?: AbortSignal;
+  /** 稳定上下文管理器（可选，用于在 prepareMessages 中插入 repo map / pinned files） */
+  stableContextManager?: StableContextManager;
 }): Agent {
   const {
     llm,
@@ -142,6 +145,7 @@ export function createAgent(deps: {
     asyncRunManager,
     scheduleManager,
     abortSignal,
+    stableContextManager,
   } = deps;
 
   // 没有传入 hookRunner 时使用空操作实现，避免所有调用处都要做 if 判断
@@ -231,11 +235,15 @@ export function createAgent(deps: {
       // P2 全量压缩：上下文超过阈值时触发
       let finalBlocks = decayed;
       const tokenEstimate = estimateMessagesTokens(normalized);
-      if (tokenEstimate > maxContextTokens) {
+      const threshold =
+        typeof maxContextTokens === "function"
+          ? maxContextTokens()
+          : maxContextTokens;
+      if (tokenEstimate > threshold) {
         logger.info(
           "Context over threshold (%d > %d), compacting...",
           tokenEstimate,
-          maxContextTokens,
+          threshold,
         );
         const compacted = compressor.compactHistory(decayed);
         finalBlocks = compacted.blocks;
@@ -249,10 +257,32 @@ export function createAgent(deps: {
       if (result.length === 0 && normalized.length > 0) {
         const fallback = [...normalized];
         if (systemMsg) fallback.unshift(systemMsg);
+        // 在 fallback 路径也插入 stable context（如果可用）
+        if (stableContextManager) {
+          const stableMsgs = stableContextManager.buildMessages("");
+          if (systemMsg) {
+            fallback.splice(1, 0, ...stableMsgs);
+          } else {
+            fallback.unshift(...stableMsgs);
+          }
+        }
         return fallback;
       }
 
+      // 插入 stable context messages：
+      // system prompt -> stable context -> working set -> evidence -> history -> current query
+      // stable context 位于 system prompt 之后，保证 cache-friendly 的排序
+      const stableMsgs = stableContextManager
+        ? stableContextManager.buildMessages("")
+        : [];
+
       if (systemMsg) result.unshift(systemMsg);
+      // stable context 插入到 system prompt 之后
+      if (stableMsgs.length > 0 && systemMsg) {
+        result.splice(1, 0, ...stableMsgs);
+      } else if (stableMsgs.length > 0) {
+        result.unshift(...stableMsgs);
+      }
       return result;
     } catch (compressErr) {
       // 压缩管道任何环节出错，降级使用标准化后的消息
@@ -1042,15 +1072,19 @@ export function createAgent(deps: {
         // 将模型的回复加入历史
         // 即使 assistant 只返回 tool_calls、content 为 null，也必须写入 history。
         // 后续 tool_result 需要和这条 assistant tool_calls 消息配对。
-        appendMessage(
-          {
+        //
+        // 优先使用 adapter 构造的完整 assistant message（含 reasoning_content 等），
+        // 避免丢失 provider-specific 字段。如果 adapter 未提供（如旧 mock 测试），
+        // 再 fallback 到根据 content/toolCalls 手工构造。
+        const assistantMsg: ChatCompletionMessageParam =
+          response.assistantMessage ??
+          ({
             role: "assistant",
             content: response.content ?? null,
             tool_calls:
               response.toolCalls.length > 0 ? response.toolCalls : undefined,
-          } as ChatCompletionMessageParam,
-          timing,
-        );
+          } as ChatCompletionMessageParam);
+        appendMessage(assistantMsg, timing);
 
         // 5. 处理工具调用
         //    如果响应包含 tool_calls，即使 finishReason 异常，

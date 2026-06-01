@@ -34,6 +34,10 @@ describe("createLLMLogger", () => {
       content: "a long model response",
       toolCalls: [],
       finishReason: "stop",
+      assistantMessage: {
+        role: "assistant",
+        content: "a long model response",
+      } as import("openai/resources/chat/completions").ChatCompletionMessageParam,
     };
 
     logger.logResponse(response, 123);

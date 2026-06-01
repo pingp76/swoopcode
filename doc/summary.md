@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD21：基座模型能力画像与 Agent Runtime Policy 抽象层**（Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager）
 
 ## 教学注释增强
 
@@ -28,14 +28,20 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 src/
 ├── index.ts            # 组装根（Composition Root）：组件初始化和接线
 ├── repl.ts             # REPL 交互层：readline 循环 + Agent/命令分发
-├── cli-commands.ts     # CLI 命令注册与分发（/skill、/mode 等斜杠命令）
-├── config.ts           # 从 .env 加载配置（含压缩配置 + provider 解析）
+├── cli-commands.ts     # CLI 命令注册与分发（/skill、/mode、/m、/t、/c 等斜杠命令）
+├── config.ts           # 从 .env 加载配置（含压缩配置 + provider 解析 + policy 解析链）
 ├── llm-providers.ts    # LLM Provider Profile 抽象层：registry + resolver
+├── foundation-models.ts # 基座模型能力画像：registry + resolveFoundationModelProfile()
+├── runtime-policy.ts   # Runtime Policy 解析器：profile → policy + 环境变量覆盖
+├── runtime-policy-store.ts # Session-local 运行时策略可变存储 + CLI override
+├── context-budget.ts   # 上下文预算分配器：按压缩模式分配子预算
+├── llm-adapter.ts      # LLM 协议适配器：OpenAI Chat Completions 请求构建 + 响应解析
+├── stable-context.ts   # 稳定上下文管理器：repo map + pinned files + context pack 构建
 ├── project-context.ts  # 项目上下文：集中解析 projectRoot、AGENTS.md、agentHome 与运行数据路径
 ├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
 ├── log-rotation.ts     # 日志轮转工具：单文件大小上限 + 固定历史份数
 ├── atomic-write.ts     # 原子写入工具：同目录临时文件 + rename 覆盖 + JSON 语法校验
-├── llm.ts              # LLM 客户端（OpenAI SDK + streaming 聚合）+ LLM 日志记录
+├── llm.ts              # LLM 客户端（OpenAI SDK + streaming 聚合 + adapter 驱动）
 ├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 <agentHome>/logs/llm.log，超限轮转保留
 ├── command-safety.ts   # shell 命令硬性安全黑名单：普通 bash 与 ExecutionPolicy 共享
 ├── execution-policy.ts # 非交互执行边界：readonly/ci/workspace_write profile + command/resource 校验
@@ -66,7 +72,13 @@ src/
 ├── recovery.ts         # LLM 错误分类与恢复决策：backoff/compact/continue/fail
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
 ├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
-├── message-block.test.ts # 消息块测试（29 个测试用例）
+├── foundation-models.test.ts # Profile 注册表、匹配、fallback 测试（14 个测试用例）
+├── runtime-policy.test.ts # Policy 解析、env 覆盖、非法值报错测试（19 个测试用例）
+├── runtime-policy-store.test.ts # Override 合并、reset、snapshot 测试（15 个测试用例）
+├── context-budget.test.ts # 预算分配公式、总和约束、override 裁剪测试（9 个测试用例）
+├── llm-adapter.test.ts # Adapter 请求构建、reasoning 回放、streaming 聚合测试（15 个测试用例）
+├── stable-context.test.ts # Repo map、pin/unpin、预算裁剪、hash 稳定性测试（13 个测试用例）
+├── message-block.test.ts # 消息块测试（32 个测试用例）
 ├── compressor.test.ts    # 压缩器测试（26 个测试用例）
 ├── execution-policy.test.ts # ExecutionPolicy 测试（12 个测试用例）
 ├── atomic-write.test.ts # 原子写入测试（3 个测试用例）
@@ -74,11 +86,11 @@ src/
 ├── output-store.test.ts # OutputStore 测试（7 个测试用例）
 ├── permission.test.ts   # 权限管理器测试（74 个测试用例）
 ├── hooks.test.ts        # Hook Runner 单元测试（11 个测试用例）
-├── agent.test.ts        # Agent Hook/错误恢复/Transcript 集成测试（22 个测试用例）
+├── agent.test.ts        # Agent Hook/错误恢复/Transcript/Reasoning 集成测试（25 个测试用例）
 ├── memory.test.ts       # Memory 管理器测试（40 个测试用例）
 ├── todo.test.ts        # TODO 管理器测试（34 个测试用例）
 ├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
-├── normalize.test.ts   # 消息标准化测试（17 个测试用例）
+├── normalize.test.ts   # 消息标准化测试（20 个测试用例）
 ├── system-prompt.test.ts # System Prompt 测试（20 个测试用例）
 ├── session-events.test.ts # Session Event Buffer 测试（5 个测试用例）
 ├── cache-debug.test.ts  # Cache Debug 测试（7 个测试用例）
@@ -88,7 +100,8 @@ src/
 ├── transcript.test.ts  # Transcript 原始事件流测试（6 个测试用例）
 ├── task-store.test.ts  # TaskStore 持久化、索引和清理测试
 ├── tasks.test.ts       # TaskManager 状态机和依赖测试
-├── cli-commands.test.ts # CLI 命令测试（含 /task）
+├── cli-commands.test.ts # CLI 命令测试（含 /task、/m、/t）（16 个测试用例）
+├── config.test.ts      # Config 加载与 policy 解析链测试（5 个测试用例）
 ├── index.test.ts       # 占位测试
 ├── history.test.ts     # history 模块测试（22 个测试用例）
 ├── logger.test.ts      # logger 模块测试
@@ -251,8 +264,11 @@ skills/
 - **P1 即时压缩**：run_bash 工具的大输出自动存文件，只返回 preview
 - **P0 衰减压缩**：每次 LLM loop 前按全局 `loopIndex` 自动截断旧的工具结果
 - **P2 全量压缩**：上下文超过阈值时，将历史压缩为摘要
+- **Stable Context 插入**：`prepareMessages()` 在 system prompt 之后插入 `StableContextManager.buildMessages()` 的结果
 - **Cache Debug 追踪**：每轮调用 LLM 前计算 system prompt / tools / prefix hash，监控前缀稳定性
 - **Reminder 注入**：`systemPromptProvider.buildTurnReminders()` + `sessionEventBuffer.drain()` 以 user message 形式注入，不修改 system prompt
+- **Assistant Message 优先保存**：写入 history 时优先使用 `response.assistantMessage`（含 reasoning_content），fallback 到手工构造
+- **Reasoning 回放**：adapter 构造的 assistant message 保留 reasoning 字段，下一轮请求自动带回
 - JSON 解析失败的容错处理（将错误告知 LLM 让其自行修正）
 - **maxRounds 支持**：可选的最大循环轮数（子智能体使用），超过时强制截断并返回摘要
 - **todoManager 可选**：子智能体不传 todoManager，父智能体行为不变
@@ -297,6 +313,52 @@ skills/
 - **cleanup()**：未注入 OutputStore 时清空临时 `.task_outputs/` 目录；注入 OutputStore 后不删除已登记输出
 - **输出目录可注入**：大工具输出目录由 `ProjectContext.taskOutputsDir` 注入，默认位于 `agentHome/.task_outputs/`
 
+### Foundation Model Profile 基座模型画像 (`foundation-models.ts`)
+
+- **能力驱动而非模型名驱动**：`agent.ts` 不出现 `kimi`/`deepseek` 等具体模型分支，业务层只看 `RuntimePolicy` 中的策略字段
+- **Profile Registry**：含 `generic-openai-compatible`、`kimi-k2.6`、`kimi-code`、`deepseek-v4`、`minimax-m2.7`、`minimax-m3`、`mimo-v2.5-pro`、`qwen3.7-max`、`glm-5.1` 等画像
+- **匹配优先级**：`LLM_MODEL_PROFILE` 显式指定 > exact model id > prefix > provider default > generic fallback
+- **硬协议字段 vs 优化提示分离**：maxTokensField、thinking requestShape、reasoning responseFields 等硬字段必须保守；context budget、compression mode 等优化提示允许合理默认
+- **Profile 分级**：`verified` / `experimental` / `needs_review`，stale/high-risk profile 启动时产生 warning 但不阻断
+- **文档元数据**：每个 profile 包含 `sourceUrls`、`verifiedAt`、`updateRisk`、`status`，支持审计和后续核对
+
+### Runtime Policy 解析器 (`runtime-policy.ts`)
+
+- **三层抽象**：`FoundationModelProfile`（事实） → `RuntimePolicy`（决策） → `LLMRequestAdapter`（协议适配）
+- **策略解析**：从 profile 派生 context/thinking/request/reasoning/tools/cache/telemetry 策略
+- **环境变量覆盖**：支持 `LLM_CONTEXT_BUDGET`、`LLM_THINKING`、`LLM_REASONING_EFFORT`、`LLM_MAX_OUTPUT_TOKENS`、`LLM_PROTOCOL` 覆盖
+- **覆盖校验**：budget 不超窗、thinking 被模型支持、effort 合法、protocol 已实现
+- **压缩默认值派生**：`aggressive` / `balanced` / `long_context` 三种模式自动派生阈值
+- **Context Budget 分配**：调用 `resolveContextBudgets()` 自动分配 stable/working/evidence/conversation/output/headroom 子预算
+
+### Runtime Policy Store (`runtime-policy-store.ts`)
+
+- **Session-local 可变状态**：合并 base policy + CLI override，为 SubAgent/Async Run 提供 snapshot
+- **Mid-session 可调字段**：thinkingMode、reasoningEffort、contextBudgetTokens、maxOutputTokens、compressionMode
+- **禁止运行中修改的字段**：protocol、tools、cache、reasoning responseFields 等协议正确性字段
+- **Snapshot 规则**：已启动的 async run 使用创建时的 policy snapshot，不受后续 CLI 变更影响
+
+### LLM 协议适配器 (`llm-adapter.ts`)
+
+- **接口抽象**：`LLMRequestAdapter` 统一处理消息准备、请求构建、响应解析、streaming 聚合
+- **OpenAI Chat Completions Adapter**：`createOpenAIChatCompletionsAdapter(policy)` 实现第一版完整适配
+- **消息准备**：`prepareMessages()` 补充 reasoning_content 占位（Kimi 等模型需要）
+- **请求构建**：`buildRequest()` 处理 max_tokens vs max_completion_tokens 字段差异、extraBody 注入
+- **响应解析**：`parseNonStreamingResponse()` 提取 assistantMessage / reasoning / usage
+- **Streaming 聚合**：`parseStreamingChunk()` / `finishStreaming()` 聚合 content + tool_calls + reasoning delta
+- **Anthropic Adapter 占位**：未实现时返回 unsupported guard，不阻断启动
+
+### 稳定上下文管理器 (`stable-context.ts`)
+
+- **Stable Context Pack**：repo map + pinned files，位于 system prompt 之后、history 之前，利于 prompt cache
+- **Working Set Pack**：当前任务相关的设计文档（如 `doc/summary.md`），变化频率中等
+- **Evidence Pack**：动态证据（diff、test failure、tool output），靠近 current query，不污染稳定前缀
+- **Repo Map**：目录结构 + 关键配置文件列表，排除 `node_modules`、`.git`、二进制和敏感文件
+- **Pin 文件管理**：`/c 加 <path>` / `/c 删 <path>`，按路径排序保证确定性顺序
+- **预算裁剪**：按优先级 evidence → working set → stable pack → conversation 裁剪，超预算时截断或省略
+- **Hash 稳定性**：文件未变化时 content hash 不变，cache key 稳定
+- **安全边界**：只读取 projectRoot 内文件，不暴露 agentHome 内部路径
+
 ### LLM Provider Profile 抽象层 (`llm-providers.ts`)
 
 - **集中 profile 表**：声明 4 个 provider（`openai_compatible`、`minimax_cn`、`kimi_platform_cn`、`kimi_code_cn`）的默认 endpoint、默认模型、key 环境变量和能力标记
@@ -323,6 +385,8 @@ skills/
 - **格式化为易读结构**：角色标签对齐、JSON 美化、缩进
 - **文件策略**：固定写入 `<agentHome>/logs/llm.log`，每次启动追加 BOOT 标记；默认单文件超过 5MB 时轮转为 `llm.log.1`、`llm.log.2` 等，默认保留 5 份；默认路径是 `~/.learn-claude-code-ts/logs/llm.log`，不是项目根目录的 `logs/llm.log`
 - **请求-响应成对**：每组用空行 + 分隔线隔开
+- **Usage 记录**：响应日志中记录 prompt/completion/total/reasoning/cache hit/cache miss 等字段
+- **Reasoning 截断**：reasoning_content 日志默认只显示前 200 字符
 
 ### 消息标准化 (`normalize.ts`)
 
@@ -331,6 +395,8 @@ skills/
 - **补全/移动 tool_result**：每个 assistant 的 tool_call 都必须有对应 tool 消息；缺失则在该 assistant 后插入占位消息，位置错误的 tool_result 会被移动回对应 tool block
 - **丢弃孤立 tool_result**：没有任何 assistant tool_call 引用的 role=tool 消息不会进入最终 LLM 输入
 - **合并连续同角色消息**：将 user+user 或普通 assistant+assistant 合并为一条；带 `tool_calls` 的 assistant 不参与合并
+- **保留 provider 字段**：`reasoning_content`、`reasoning_details` 等 provider-specific 顶层字段不会被误删
+- **内部字段仍清理**：`_turnIndex/_loopRound/_loopIndex/_messageSequence/_round` 在 `flattenToMessages()` 中清除，不发给 LLM
 
 ### 工具系统 (`tools/`)
 
@@ -521,6 +587,12 @@ skills/
 | `AGENT_PROJECT_ROOT`       | 被操作项目根目录                    | 当前启动目录                  |
 | `AGENT_HOME`               | Agent 全局运行根目录                | `~/.learn-claude-code-ts`     |
 | `MEMORY_DIR`               | Memory 文件目录名（相对 agentHome） | `memory`                      |
+| `LLM_MODEL_PROFILE`        | 显式指定模型 profile                | `kimi-k2.6`                   |
+| `LLM_CONTEXT_BUDGET`       | 上下文预算覆盖（token 数）          | `180000`                      |
+| `LLM_THINKING`             | Thinking 模式覆盖                   | `enabled/disabled/adaptive`   |
+| `LLM_REASONING_EFFORT`     | Reasoning effort 覆盖               | `high/max/default`            |
+| `LLM_MAX_OUTPUT_TOKENS`    | 最大输出 token 覆盖                 | `32768`                       |
+| `LLM_PROTOCOL`             | 协议选择覆盖                        | `openai-chat-completions`     |
 
 ## 测试覆盖
 
@@ -559,7 +631,14 @@ skills/
 | `src/llm-providers.test.ts`    | 26     | provider 解析、默认值、覆盖优先级、错误提示、能力标记                                                                  |
 | `src/config.test.ts`           | 5      | loadConfig 解析 provider 字段、compression/logLevel 默认值、错误信息不泄漏 key                                         |
 | `src/llm.test.ts`              | 10     | non-streaming 路径、streaming content/tool_calls 聚合、llmLogger 调用                                                  |
-| `src/cli-commands.test.ts`     | 5      | /task 命令分发、/schedule list 当前项目默认和 --all-projects 跨项目摘要参数                                            |
+| `src/foundation-models.test.ts` | 14     | Profile 注册表、exact/prefix/fallback 匹配、provider 兼容校验、显式 profile、stale warning                            |
+| `src/runtime-policy.test.ts`   | 19     | Policy 默认值、env 覆盖、非法覆盖报错、协议 fallback、compression 派生                                                   |
+| `src/context-budget.test.ts`   | 9      | 三种模式预算分配、总和约束、override 处理、裁剪优先级、极小预算边界                                                    |
+| `src/runtime-policy-store.test.ts` | 15 | Override 合并、reset、snapshot、非法更新报错                                                                           |
+| `src/llm-adapter.test.ts`      | 15     | 请求构建、reasoning 占位、streaming 聚合、max token 字段、usage 解析                                                   |
+| `src/stable-context.test.ts`   | 13     | Repo map、pin/unpin、buildMessages、预算裁剪、hash 稳定性、安全边界                                                    |
+| `src/cli-commands.test.ts`     | 16     | /task /schedule /m /t 命令分发、中文参数、非法值报错                                                                   |
+| `src/config.test.ts`           | 5      | loadConfig 解析 provider 字段、policy 解析链、compression/logLevel 默认值                                              |
 | `src/index.test.ts`            | 1      | 占位                                                                                                                   |
 
 ## 设计模式
@@ -656,8 +735,12 @@ skills/
 
 （按需在后续 lesson 中实现，完成后更新此列表）
 
-- 流式输出（streaming response）
 - 更丰富的工具集（grep、glob、web fetch 等）
 - Skill 脚本执行支持（dependencies 字段、base path 引用脚本）
 - 用户级 skill 目录（`~/.claude/skills/`）
 - 对话创建 skill（LLM 自动在 skills/ 下创建目录和 SKILL.md）
+- Anthropic Messages Adapter（MiniMax M3 / Qwen3.7 等模型的 Anthropic-compatible 入口）
+- Task Shape Classifier（按请求类型自动调整 thinking 与 context budget）
+- 多模型路由（主模型、cheap subagent、verifier 分开配置）
+- 多模态 Tool Result（text/image/video blocks）
+- 成本感知调度（根据 usage 做预算提示）

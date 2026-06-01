@@ -61,6 +61,13 @@ import { createScheduleToolProvider } from "./tools/schedules.js";
 import { createScheduleCliCommand } from "./cli-commands.js";
 import { createOutputStore } from "./output-store.js";
 import { createOutputToolProvider } from "./tools/output.js";
+import { createStableContextManager } from "./stable-context.js";
+import { createRuntimePolicyStore } from "./runtime-policy-store.js";
+import {
+  createModelPolicyCliCommand,
+  createThinkingCliCommand,
+  createStableContextCliCommand,
+} from "./cli-commands.js";
 
 /**
  * main — 主函数
@@ -106,7 +113,21 @@ async function main() {
   // 4. 创建终端（统一 readline，供 REPL 和权限确认共享）
   const terminal = createTerminal();
 
-  // 5. 创建 LLM 客户端
+  // 5. 创建 Runtime Policy Store（session-local 可变策略存储）
+  const runtimePolicyStore = createRuntimePolicyStore(
+    config.modelProfile,
+    config.model,
+    process.env,
+  );
+
+  // 5.5. 创建 Stable Context Manager（长上下文模型使用）
+  const stableContextManager = createStableContextManager(
+    projectContext.projectRoot,
+    config.runtimePolicy.modelProfileId,
+    () => runtimePolicyStore.getPolicy().contextLoading!,
+  );
+
+  // 6. 创建 LLM 客户端
   const llmLogger = createLLMLogger({ logDir: projectContext.logsDir });
   const llm = createLLMClient(
     {
@@ -118,6 +139,7 @@ async function main() {
       capabilities: config.llmCapabilities,
     },
     llmLogger,
+    () => runtimePolicyStore.getPolicy(),
   );
 
   // 6. 创建会话管理器和原始 transcript 存储
@@ -502,7 +524,8 @@ async function main() {
     logger,
     todoManager,
     compressor,
-    maxContextTokens: config.compression.maxContextTokens,
+    maxContextTokens: () =>
+      runtimePolicyStore.getPolicy().context.effectiveBudgetTokens,
     permissionManager,
     askUserFn: terminal.askUser.bind(terminal),
     hookRunner,
@@ -512,6 +535,7 @@ async function main() {
     sessionId: mainSession.id,
     asyncRunManager,
     scheduleManager,
+    stableContextManager,
   });
 
   // 25. 注册 CLI 命令（接入 sessionEventBuffer）
@@ -527,6 +551,15 @@ async function main() {
   );
   commandRegistry.register(createTaskCliCommand(taskManager, logger));
   commandRegistry.register(createScheduleCliCommand(scheduleManager, logger));
+  commandRegistry.register(
+    createModelPolicyCliCommand(runtimePolicyStore, logger),
+  );
+  commandRegistry.register(
+    createThinkingCliCommand(runtimePolicyStore, logger),
+  );
+  commandRegistry.register(
+    createStableContextCliCommand(stableContextManager, logger),
+  );
 
   // 26. 创建并启动 REPL
   const repl = createRepl({
@@ -551,11 +584,15 @@ async function main() {
     process.exit(0);
   });
 
+  // 27. 启动日志：显示模型策略摘要
   logger.info(
-    "Agent started (provider: %s, model: %s, project: %s)",
+    "Agent started (provider: %s, model: %s, profile: %s, protocol: %s, contextBudget: %d, thinking: %s)",
     config.provider,
     config.model,
-    projectContext.projectRoot,
+    config.runtimePolicy.modelProfileId,
+    config.runtimePolicy.protocol.selected,
+    config.runtimePolicy.context.effectiveBudgetTokens,
+    config.runtimePolicy.request.thinkingMode,
   );
   repl.start();
 }

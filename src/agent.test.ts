@@ -36,17 +36,34 @@ function createMockLogger(): Logger {
 }
 
 /**
+ * Mock LLM 响应输入（允许省略 assistantMessage，内部自动补全）
+ */
+type MockResponseInput = Omit<LLMResponse, "assistantMessage"> &
+  Partial<Pick<LLMResponse, "assistantMessage">>;
+
+/**
  * 创建 mock LLM 客户端
  *
  * @param responses - 预设的响应序列，每次调用 chat() 返回下一个
  */
-function createMockLLM(responses: LLMResponse[]): LLMClient {
+function createMockLLM(responses: MockResponseInput[]): LLMClient {
   let callIndex = 0;
   return {
     async chat() {
       const resp = responses[callIndex++];
       if (!resp) throw new Error("No more mock responses");
-      return resp;
+      return {
+        ...resp,
+        assistantMessage:
+          resp.assistantMessage ??
+          ({
+            role: "assistant",
+            content: resp.content ?? null,
+            ...(resp.toolCalls.length > 0
+              ? { tool_calls: resp.toolCalls }
+              : {}),
+          } as ChatCompletionMessageParam),
+      } as LLMResponse;
     },
   };
 }
@@ -109,7 +126,7 @@ function makeToolCall(
 describe("Agent Hook 集成", () => {
   /** 创建测试用 Agent 的辅助函数 */
   function createTestAgent(deps: {
-    llmResponses: LLMResponse[];
+    llmResponses: MockResponseInput[];
     toolName?: string;
     toolExecutor?: ToolExecutor;
     hookHandlers?: Partial<Record<string, HookHandler[]>>;
@@ -511,7 +528,7 @@ describe("Agent Hook 集成", () => {
       error: false,
     });
     const capturedMessages: ChatCompletionMessageParam[][] = [];
-    const responses: LLMResponse[] = [
+    const responses: MockResponseInput[] = [
       {
         content: null,
         toolCalls: [
@@ -530,7 +547,18 @@ describe("Agent Hook 集成", () => {
         );
         const response = responses[callIndex++];
         if (!response) throw new Error("No more mock responses");
-        return response;
+        return {
+          ...response,
+          assistantMessage:
+            response.assistantMessage ??
+            ({
+              role: "assistant",
+              content: response.content ?? null,
+              ...(response.toolCalls.length > 0
+                ? { tool_calls: response.toolCalls }
+                : {}),
+            } as ChatCompletionMessageParam),
+        } as LLMResponse;
       },
     };
 
@@ -634,6 +662,10 @@ describe("Agent 错误恢复", () => {
           content: "success",
           toolCalls: [],
           finishReason: "stop",
+          assistantMessage: {
+            role: "assistant",
+            content: "success",
+          } as ChatCompletionMessageParam,
         };
       },
     };
@@ -705,6 +737,10 @@ describe("Agent 错误恢复", () => {
           content: "ok after compact",
           toolCalls: [],
           finishReason: "stop",
+          assistantMessage: {
+            role: "assistant",
+            content: "ok after compact",
+          } as ChatCompletionMessageParam,
         };
       },
     };
@@ -726,12 +762,20 @@ describe("Agent 错误恢复", () => {
             content: "partial output",
             toolCalls: [],
             finishReason: "length",
+            assistantMessage: {
+              role: "assistant",
+              content: "partial output",
+            } as ChatCompletionMessageParam,
           };
         }
         return {
           content: "continued",
           toolCalls: [],
           finishReason: "stop",
+          assistantMessage: {
+            role: "assistant",
+            content: "continued",
+          } as ChatCompletionMessageParam,
         };
       },
     };
@@ -765,6 +809,10 @@ describe("Agent 错误恢复", () => {
           content: `partial ${callCount}`,
           toolCalls: [],
           finishReason: "length",
+          assistantMessage: {
+            role: "assistant",
+            content: `partial ${callCount}`,
+          } as ChatCompletionMessageParam,
         };
       },
     };
@@ -796,12 +844,21 @@ describe("Agent 错误恢复", () => {
             content: null,
             toolCalls: [makeToolCall("call_1", "run_bash", '{"command":"ls"}')],
             finishReason: "length",
+            assistantMessage: {
+              role: "assistant",
+              content: null,
+              tool_calls: [makeToolCall("call_1", "run_bash", '{"command":"ls"}')],
+            } as ChatCompletionMessageParam,
           };
         }
         return {
           content: "done",
           toolCalls: [],
           finishReason: "stop",
+          assistantMessage: {
+            role: "assistant",
+            content: "done",
+          } as ChatCompletionMessageParam,
         };
       },
     };
@@ -1149,5 +1206,184 @@ describe("Agent async run integration", () => {
 
     await agent.run("write file");
     expect(toolExecutor).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ============================================================
+// Reasoning content preservation (PDD21 Phase 6-7)
+// ============================================================
+
+describe("Agent reasoning content preservation", () => {
+  it("prefers response.assistantMessage over manual construction", async () => {
+    const history = createHistory();
+    const capturedMessages: ChatCompletionMessageParam[][] = [];
+
+    const llm: LLMClient = {
+      async chat(messages) {
+        capturedMessages.push(
+          JSON.parse(JSON.stringify(messages)) as ChatCompletionMessageParam[],
+        );
+        return {
+          content: "ok",
+          toolCalls: [],
+          finishReason: "stop",
+          assistantMessage: {
+            role: "assistant",
+            content: "ok",
+            reasoning_content: "I thought about this carefully.",
+          } as ChatCompletionMessageParam,
+        };
+      },
+    };
+
+    const agent = createAgent({
+      llm,
+      history,
+      tools: createMockToolRegistry("run_bash", async () => ({
+        output: "ok",
+        error: false,
+      })),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+    });
+
+    await agent.run("hello");
+
+    // history 中的 assistant 消息应包含 reasoning_content
+    const entries = history.getEntries();
+    const assistantEntry = entries.find(
+      (e) => (e.message as { role: string }).role === "assistant",
+    );
+    expect(assistantEntry).toBeDefined();
+    expect(
+      (assistantEntry!.message as unknown as { reasoning_content?: string })
+        .reasoning_content,
+    ).toBe("I thought about this carefully.");
+  });
+
+  it("preserves reasoning_content through message pipeline to next LLM call", async () => {
+    const history = createHistory();
+    const capturedMessages: ChatCompletionMessageParam[][] = [];
+    let callIndex = 0;
+
+    const responses: LLMResponse[] = [
+      {
+        content: null,
+        toolCalls: [
+          makeToolCall("call_1", "run_bash", '{"command":"ls"}'),
+        ],
+        finishReason: "stop",
+        assistantMessage: {
+          role: "assistant",
+          content: null,
+          reasoning_content: "Need to list files first",
+          tool_calls: [
+            makeToolCall("call_1", "run_bash", '{"command":"ls"}'),
+          ],
+        } as ChatCompletionMessageParam,
+      },
+      {
+        content: "done",
+        toolCalls: [],
+        finishReason: "stop",
+        assistantMessage: {
+          role: "assistant",
+          content: "done",
+        } as ChatCompletionMessageParam,
+      },
+    ];
+
+    const llm: LLMClient = {
+      async chat(messages) {
+        capturedMessages.push(
+          JSON.parse(JSON.stringify(messages)) as ChatCompletionMessageParam[],
+        );
+        const resp = responses[callIndex++];
+        if (!resp) throw new Error("No more mock responses");
+        return resp;
+      },
+    };
+
+    const agent = createAgent({
+      llm,
+      history,
+      tools: createMockToolRegistry("run_bash", async () => ({
+        output: "file.txt",
+        error: false,
+      })),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+    });
+
+    await agent.run("list files");
+
+    // 第二次 LLM 调用应包含带 reasoning_content 的 assistant 消息
+    expect(capturedMessages).toHaveLength(2);
+    const secondCall = capturedMessages[1]!;
+    const assistantMsg = secondCall.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(
+      (assistantMsg as unknown as { reasoning_content?: string }).reasoning_content,
+    ).toBe("Need to list files first");
+  });
+
+  it("falls back to manual construction when assistantMessage is missing (backward compat)", async () => {
+    const history = createHistory();
+
+    // 构造一个不含 assistantMessage 的 response（模拟旧 mock）
+    const llm: LLMClient = {
+      async chat() {
+        return {
+          content: "legacy response",
+          toolCalls: [],
+          finishReason: "stop",
+          // 故意不设置 assistantMessage，测试 fallback 路径
+        } as unknown as LLMResponse;
+      },
+    };
+
+    const agent = createAgent({
+      llm,
+      history,
+      tools: createMockToolRegistry("run_bash", async () => ({
+        output: "ok",
+        error: false,
+      })),
+      logger: createMockLogger(),
+      compressor: createContextCompressor({
+        thresholdToolOutput: 2000,
+        decayThreshold: 3,
+        decayPreviewTokens: 100,
+        maxContextTokens: 80000,
+        compactKeepRecent: 4,
+      }),
+      permissionManager: createMockPermissionManager(),
+    });
+
+    const result = await agent.run("hello");
+
+    expect(result).toBe("legacy response");
+    const entries = history.getEntries();
+    const assistantEntry = entries.find(
+      (e) => (e.message as { role: string }).role === "assistant",
+    );
+    expect(assistantEntry).toBeDefined();
+    expect(
+      (assistantEntry!.message as { content: unknown }).content,
+    ).toBe("legacy response");
   });
 });

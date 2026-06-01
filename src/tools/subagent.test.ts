@@ -54,6 +54,20 @@ function createAlwaysToolCallLLM(): LLMClient {
           },
         ],
         finishReason: "stop",
+        assistantMessage: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_mock",
+              type: "function",
+              function: {
+                name: "run_bash",
+                arguments: '{"command":"echo still running"}',
+              },
+            },
+          ],
+        } as import("openai/resources/chat/completions").ChatCompletionMessageParam,
       };
     },
   };
@@ -178,6 +192,10 @@ describe("createSubagentToolProvider", () => {
         content: "Analysis complete: found 3 issues",
         toolCalls: [],
         finishReason: "stop",
+        assistantMessage: {
+          role: "assistant",
+          content: "Analysis complete: found 3 issues",
+        } as import("openai/resources/chat/completions").ChatCompletionMessageParam,
       },
     ]);
     const mockLogger = createMockLogger();
