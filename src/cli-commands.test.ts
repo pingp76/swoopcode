@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -321,6 +321,106 @@ describe("CLI thinking command", () => {
     );
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("does not support thinking mode"),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PDD21-1: /c 排 and /c why commands
+// ---------------------------------------------------------------------------
+
+import { createStableContextCliCommand } from "./cli-commands.js";
+import { createStableContextManager } from "./stable-context.js";
+import { createContextRanker } from "./context-ranking.js";
+
+describe("CLI stable context rank commands", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "cli-rank-test-"));
+    mkdirSync(join(tempDir, "src"));
+    writeFileSync(join(tempDir, "package.json"), '{"name":"test"}');
+    writeFileSync(join(tempDir, "README.md"), "# Test");
+    writeFileSync(join(tempDir, "src", "index.ts"), "export {}");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("dispatches /c 排 to show ranked files", () => {
+    const ranker = createContextRanker(tempDir);
+    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const registry = createCliCommandRegistry();
+    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+
+    expect(registry.dispatch("/c 排")).toBe(true);
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("Top ranked files"),
+    );
+  });
+
+  it("dispatches /c rank alias", () => {
+    const ranker = createContextRanker(tempDir);
+    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const registry = createCliCommandRegistry();
+    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+
+    expect(registry.dispatch("/c rank")).toBe(true);
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("Top ranked files"),
+    );
+  });
+
+  it("dispatches /c why <path> to explain file ranking", () => {
+    const ranker = createContextRanker(tempDir);
+    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const registry = createCliCommandRegistry();
+    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+
+    expect(registry.dispatch("/c why README.md")).toBe(true);
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("Context rank: README.md"),
+    );
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("score:"),
+    );
+  });
+
+  it("dispatches /c 因 <path> alias", () => {
+    const ranker = createContextRanker(tempDir);
+    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const registry = createCliCommandRegistry();
+    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+
+    expect(registry.dispatch("/c 因 README.md")).toBe(true);
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("Context rank: README.md"),
+    );
+  });
+
+  it("reports file not found for unknown path", () => {
+    const ranker = createContextRanker(tempDir);
+    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const registry = createCliCommandRegistry();
+    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+
+    registry.dispatch("/c why nonexistent.ts");
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("not found"),
+    );
+  });
+
+  it("reports no ranker when not configured", () => {
+    const manager = createStableContextManager(tempDir, "generic");
+    const registry = createCliCommandRegistry();
+    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+
+    registry.dispatch("/c 排");
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("not configured"),
     );
   });
 });

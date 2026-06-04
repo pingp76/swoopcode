@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD21：基座模型能力画像与 Agent Runtime Policy 抽象层**（Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager）
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD21：基座模型能力画像与 Agent Runtime Policy 抽象层**（Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager + ContextRanker + RepoClassifier + TaskIntentClassifier + 多维度评分）
 
 ## 教学注释增强
 
@@ -36,7 +36,9 @@ src/
 ├── runtime-policy-store.ts # Session-local 运行时策略可变存储 + CLI override
 ├── context-budget.ts   # 上下文预算分配器：按压缩模式分配子预算
 ├── llm-adapter.ts      # LLM 协议适配器：OpenAI Chat Completions 请求构建 + 响应解析
-├── stable-context.ts   # 稳定上下文管理器：repo map + pinned files + context pack 构建
+├── stable-context.ts   # 稳定上下文管理器：repo map + pinned files + context pack 构建 + ContextRanker 集成
+├── context-ranking.ts  # 通用内容重要性排序器：FileInventory + RepoClassifier + TaskIntentClassifier + 多维度评分
+├── context-ranking.test.ts # ContextRanker 测试（82 个测试用例，覆盖 7 种项目 fixture）
 ├── project-context.ts  # 项目上下文：集中解析 projectRoot、AGENTS.md、agentHome 与运行数据路径
 ├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
 ├── log-rotation.ts     # 日志轮转工具：单文件大小上限 + 固定历史份数
@@ -265,6 +267,7 @@ skills/
 - **P0 衰减压缩**：每次 LLM loop 前按全局 `loopIndex` 自动截断旧的工具结果
 - **P2 全量压缩**：上下文超过阈值时，将历史压缩为摘要
 - **Stable Context 插入**：`prepareMessages()` 在 system prompt 之后插入 `StableContextManager.buildMessages()` 的结果
+- **文件活动追踪**：`trackFileActivity()` 在 `handleToolCalls` 中记录 `run_read`/`run_write`/`run_edit`/`run_edit_exact` 触达的文件路径，作为 evidence 信号传给 ContextRanker；写/编辑工具成功后调用 `stableContextManager.notifyFileChanged()` 使 pinned 文件的 stable snapshot 失效
 - **Cache Debug 追踪**：每轮调用 LLM 前计算 system prompt / tools / prefix hash，监控前缀稳定性
 - **Reminder 注入**：`systemPromptProvider.buildTurnReminders()` + `sessionEventBuffer.drain()` 以 user message 形式注入，不修改 system prompt
 - **Assistant Message 优先保存**：写入 history 时优先使用 `response.assistantMessage`（含 reasoning_content），fallback 到手工构造
@@ -350,14 +353,40 @@ skills/
 
 ### 稳定上下文管理器 (`stable-context.ts`)
 
-- **Stable Context Pack**：repo map + pinned files，位于 system prompt 之后、history 之前，利于 prompt cache
-- **Working Set Pack**：当前任务相关的设计文档（如 `doc/summary.md`），变化频率中等
+- **Stable Snapshot 缓存**：stable pack 在首次 `buildMessages()` 时构建一次并缓存渲染后的字符串；后续调用直接复用缓存，确保 prompt cache 前缀字节级稳定
+- **显式失效机制**：`pinPath()`、`unpinPath()`、`rebuildRepoMap()`、`invalidateStableSnapshot()` 触发重建；`notifyFileChanged()` 在文件工具写/编辑成功后检查是否命中 pinned path，命中则 invalidate；`currentQuery`、`recentFiles`、`failingFiles`、`mtime`、`git diff` 永远不进入 stable
+- **预算锁定**：stable 预算在 snapshot 创建时锁定；如果用户调小预算导致放不下，触发重建而非静默裁剪
+- **Working Set Pack**：每轮重新构建，使用 ContextRanker + 动态信号（query/evidence）选择文件
 - **Evidence Pack**：动态证据（diff、test failure、tool output），靠近 current query，不污染稳定前缀
 - **Repo Map**：目录结构 + 关键配置文件列表，排除 `node_modules`、`.git`、二进制和敏感文件
-- **Pin 文件管理**：`/c 加 <path>` / `/c 删 <path>`，按路径排序保证确定性顺序
-- **预算裁剪**：按优先级 evidence → working set → stable pack → conversation 裁剪，超预算时截断或省略
+- **Pin 文件管理**：`/c 加 <path>` / `/c 删 <path>`，按路径排序保证确定性顺序；pin/unpin 自动失效 stable snapshot
+- **预算裁剪**：working set 先预估 token 再读取，超预算时截断而非整体丢弃；stable pack 不与 working set 重复装载
 - **Hash 稳定性**：文件未变化时 content hash 不变，cache key 稳定
 - **安全边界**：只读取 projectRoot 内文件，不暴露 agentHome 内部路径
+- **通用排序增强**：集成 ContextRanker，working set 使用 ranker 选择而非硬编码；stable pack 不使用动态信号；manifest 输出 rank reasons
+- **CLI 增强**：`/c 刷` 显式失效 stable snapshot；`/c 排` 显示 top ranked files；`/c why <path>` / `/c 因 <path>` 显示文件评分和原因
+
+### 通用内容重要性排序器 (`context-ranking.ts`)
+
+- **四层分离设计**：FileInventory（文件事实）→ RepoClassifier（生态分类）→ TaskIntentClassifier（任务意图）→ ContextRanker（多维度评分）
+- **FileInventory**：递归扫描项目目录，收集路径/大小/mtime/扩展名/角色/生态；排除 node_modules/.git/dist/build/coverage/binary/secret/.env/doc/todo.md/symlink
+- **文件角色识别**：通用角色（project_instruction/readme/project_summary/design_doc/manifest/build_config/entrypoint/source/test/schema/infra/ci_config/generated/secret），不依赖特定生态
+- **RepoClassifier**：manifest + 文件分布 + 目录结构组合判断；支持 typescript/javascript/python/rust/go/java/kotlin/cpp/infra/docs/mixed/unknown；mixed repo 识别 package roots
+- **TaskIntentClassifier**：关键词匹配 + evidence 信号推断；支持 orientation/implementation/debug/review/testing/documentation/refactor/unknown；提取 mentioned paths/terms/design doc IDs
+- **多维度评分**：8 个独立评分函数，每个分数都有 ScoreReason 解释
+  - roleScore (0..500)：通用角色基线
+  - ecosystemScore (0..350)：生态 profile 加分（只在 repo classifier 匹配后生效）
+  - taskRelevanceScore (0..700)：query 命中、路径/术语/设计文档 ID 匹配
+  - evidenceScore (0..900)：stack trace/failing test/git modified/recent read/open file
+  - graphScore (0..400)：import graph、test/source 配对、中心 config
+  - recencyScore (0..250)：mtime 衰减（不影响 stable pack）
+  - userSignalScore (0..1000)：用户显式 pin/open/query 提到
+  - noisePenalty (0..-1200)：generated/minified/binary/secret/large file/forbidden path
+- **轻量 import graph**：TS/JS/Python/Rust 简单字符串匹配；处理 TypeScript ESM `.js` → `.ts` 扩展名映射；test/source 配对
+- **Deterministic 排序**：score desc → normalized path asc
+- **安全边界**：`.env`/密钥/二进制永不自动读；doc/todo.md 永不自动读；symlink 跳过；projectRoot 外路径拒绝
+- **与 StableContextManager 集成**：`createStableContextManager` 接受可选 `ContextRanker` 参数；`buildMessages` 升级为接收 `BuildMessagesInput` 对象（兼容旧 string API）；新增 `getRankedFiles()`/`getRepoClassification()`/`explainFile()` 方法
+- **CLI 增强**：`/c 排` 显示 top ranked files；`/c why <path>` / `/c 因 <path>` 显示文件评分和原因
 
 ### LLM Provider Profile 抽象层 (`llm-providers.ts`)
 
@@ -636,8 +665,9 @@ skills/
 | `src/context-budget.test.ts`   | 9      | 三种模式预算分配、总和约束、override 处理、裁剪优先级、极小预算边界                                                    |
 | `src/runtime-policy-store.test.ts` | 15 | Override 合并、reset、snapshot、非法更新报错                                                                           |
 | `src/llm-adapter.test.ts`      | 15     | 请求构建、reasoning 占位、streaming 聚合、max token 字段、usage 解析                                                   |
-| `src/stable-context.test.ts`   | 13     | Repo map、pin/unpin、buildMessages、预算裁剪、hash 稳定性、安全边界                                                    |
-| `src/cli-commands.test.ts`     | 16     | /task /schedule /m /t 命令分发、中文参数、非法值报错                                                                   |
+| `src/stable-context.test.ts`   | 36     | Repo map、pin/unpin、buildMessages、预算裁剪、hash 稳定性、安全边界、ContextRanker 集成、stable pack 隔离、stable snapshot 缓存、notifyFileChanged |
+| `src/context-ranking.test.ts`  | 82     | 文件角色识别、生态识别、Repo 分类（TS/Python/Rust/Go/docs/infra/mixed）、任务意图、多维度评分、排序、文件扫描、import graph、完整 fixture |
+| `src/cli-commands.test.ts`     | 22     | /task /schedule /m /t /c 命令分发、中文参数、非法值报错、/c 排 /c why 排序命令 |
 | `src/config.test.ts`           | 5      | loadConfig 解析 provider 字段、policy 解析链、compression/logLevel 默认值                                              |
 | `src/index.test.ts`            | 1      | 占位                                                                                                                   |
 
@@ -658,6 +688,7 @@ skills/
 - **动态状态变化走消息**：mode 切换、memory reload、skill re-scan 等变化通过 `sessionEventBuffer` 以 user message 形式注入，不修改 system prompt
 - **工具定义稳定性**：`ToolRegistry` 通过 `orderedEntries` 保证顺序稳定，重复注册报错，不因 mode 动态删减工具
 - **Cache-safe fork**：子智能体复用父级 stable system prompt，工具定义保持稳定，执行层限制能力而非删除工具定义
+- **Stable Snapshot 缓存**：`StableContextManager` 将 stable pack 渲染后的字符串缓存为会话级快照，只在 pin/unpin/rebuild/invalidate 时失效重建；`currentQuery`、`recentFiles`、`mtime`、`git diff` 等动态信号永远不进入 stable，确保 prompt cache 前缀字节级稳定
 
 ## 重构经验
 

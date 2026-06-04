@@ -157,6 +157,38 @@ export function createAgent(deps: {
   // Cache Debug 追踪器：监控 system prompt / tools / prefix 稳定性
   const cacheDebugTracker = createCacheDebugTracker();
 
+  // PDD21-1 Fix: 文件活动追踪器 — 记录 run_read/run_write/run_edit 触达的文件路径
+  // 作为 evidence 信号传给 ContextRanker，让 evidenceScore 在正常工具调用后立即生效
+  // （compressor.recentFiles 只在 P2 compact 时填充，不能覆盖常规工具活动）
+  const recentFileActivity: string[] = [];
+  const FILE_ACTIVITY_LIMIT = 50;
+
+  function trackFileActivity(toolName: string, args: Record<string, unknown>): void {
+    // 只追踪文件操作工具
+    const fileTools = new Set(["run_read", "run_write", "run_edit", "run_edit_exact"]);
+    if (!fileTools.has(toolName)) return;
+
+    const filePath = typeof args["path"] === "string" ? args["path"] : null;
+    if (!filePath) return;
+
+    // 去重 + 限制大小
+    if (!recentFileActivity.includes(filePath)) {
+      if (recentFileActivity.length >= FILE_ACTIVITY_LIMIT) {
+        recentFileActivity.shift();
+      }
+      recentFileActivity.push(filePath);
+    }
+
+    // 写/编辑工具成功后通知 StableContextManager，
+    // 如果命中 pinned path 则 invalidate stable snapshot
+    if (
+      stableContextManager &&
+      (toolName === "run_write" || toolName === "run_edit" || toolName === "run_edit_exact")
+    ) {
+      stableContextManager.notifyFileChanged(filePath);
+    }
+  }
+
   // =====================================================================
   // 内部步骤函数
   //
@@ -195,19 +227,20 @@ export function createAgent(deps: {
     }
   }
 
-  /**
-   * prepareMessages — 消息处理管道
-   *
-   * 完整流程：从 history 读取带 timing 的条目 → 标注内部字段 → normalize → group → decay → [compact] → flatten。
-   * 如果压缩过程中任何环节出错，降级使用标准化后的消息。
-   *
-   * system prompt 独立于压缩管道：在最后拼接到消息列表头部。
-   * 因为 groupToBlocks 会跳过 system 消息，放入管道会导致丢失。
-   *
-   * @param currentLoopIndex - 当前 Agent 实例内全局 LLM loop 序号，用于衰减压缩判断
-   * @returns 最终给 LLM 的消息列表
-   */
-  function prepareMessages(currentLoopIndex: number): ChatCompletionMessageParam[] {
+   /**
+    * prepareMessages — 消息处理管道
+    *
+    * 完整流程：从 history 读取带 timing 的条目 → 标注内部字段 → normalize → group → decay → [compact] → flatten。
+    * 如果压缩过程中任何环节出错，降级使用标准化后的消息。
+    *
+    * system prompt 独立于压缩管道：在最后拼接到消息列表头部。
+    * 因为 groupToBlocks 会跳过 system 消息，放入管道会导致丢失。
+    *
+    * @param currentLoopIndex - 当前 Agent 实例内全局 LLM loop 序号，用于衰减压缩判断
+    * @param currentQuery - 当前用户查询（用于 ContextRanker 排序 working set）
+    * @returns 最终给 LLM 的消息列表
+    */
+   function prepareMessages(currentLoopIndex: number, currentQuery: string = ""): ChatCompletionMessageParam[] {
     // 从 history 获取带 timing 元信息的条目（不含 system prompt）
     const entries = history.getEntries();
 
@@ -259,7 +292,10 @@ export function createAgent(deps: {
         if (systemMsg) fallback.unshift(systemMsg);
         // 在 fallback 路径也插入 stable context（如果可用）
         if (stableContextManager) {
-          const stableMsgs = stableContextManager.buildMessages("");
+          const stableMsgs = stableContextManager.buildMessages({
+            currentQuery,
+            recentFiles: [...recentFileActivity, ...compressor.getState().recentFiles],
+          });
           if (systemMsg) {
             fallback.splice(1, 0, ...stableMsgs);
           } else {
@@ -272,8 +308,13 @@ export function createAgent(deps: {
       // 插入 stable context messages：
       // system prompt -> stable context -> working set -> evidence -> history -> current query
       // stable context 位于 system prompt 之后，保证 cache-friendly 的排序
+      // PDD21-1: 将文件活动追踪 + compressor 的 recentFiles 作为 evidence 信号传入，
+      // 让 ContextRanker 的 evidenceScore 能真正影响 working set 选择
       const stableMsgs = stableContextManager
-        ? stableContextManager.buildMessages("")
+        ? stableContextManager.buildMessages({
+            currentQuery,
+            recentFiles: [...recentFileActivity, ...compressor.getState().recentFiles],
+          })
         : [];
 
       if (systemMsg) result.unshift(systemMsg);
@@ -516,6 +557,11 @@ export function createAgent(deps: {
 
       // 执行工具
       const result = await executor(args);
+
+      // PDD21-1 Fix: 追踪文件活动 + 通知 StableContextManager
+      if (!result.error) {
+        trackFileActivity(fnName, args);
+      }
 
       // P1 即时压缩：compressor 内部根据工具名和输出大小决定是否压缩
       const compressed = compressor.compressToolResult(
@@ -953,7 +999,7 @@ export function createAgent(deps: {
         // 3. 消息处理管道
         // prepareMessages 是每轮 LLM 调用前的最后一道上下文整理：
         // 它会标准化消息、分块、衰减旧工具输出，并在必要时全量压缩。
-        let finalMsgs = prepareMessages(loopIndex);
+        let finalMsgs = prepareMessages(loopIndex, query);
         const toolDefs = tools.getToolDefinitions();
         logger.debug(
           "Calling LLM with %d messages, %d tools",
@@ -1041,7 +1087,7 @@ export function createAgent(deps: {
                 return formatFailureMessage(kind, error);
               }
               // compact 后需要重新构建消息列表，并同步重算 cache debug
-              finalMsgs = prepareMessages(loopIndex);
+              finalMsgs = prepareMessages(loopIndex, query);
               cacheState = cacheDebugTracker.inspect({
                 messages: finalMsgs,
                 tools: toolDefs,

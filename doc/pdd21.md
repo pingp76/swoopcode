@@ -1797,6 +1797,844 @@ prepared messages = system + stableContextMessages + normalized history/current 
 8. context loader 不读取 projectRoot 外文件。
 9. `agent.ts` 不出现 repo map 选择细节。
 
+
+## 通用内容重要性排序与上下文装载优化
+
+### 背景
+
+PDD21 已经实现了基座模型画像、RuntimePolicy、ContextBudget 和 StableContextManager 的第一版。当前 stable context loader 能生成 repo map、装载 pinned files 和 `doc/summary.md`，但文件选择仍偏保守。
+
+如果后续实现类似下面的权重函数：
+
+```ts
+function calculateImportance(file: File): number {
+  let score = 0;
+  if (file.name === "package.json") score += 1000;
+  if (file.name === "tsconfig.json") score += 900;
+  if (file.name.match(/README/i)) score += 800;
+  if (file.path.includes("src/App.")) score += 700;
+  if (file.path.includes("src/main.")) score += 600;
+  if (file.path.includes("src/index.")) score += 600;
+  if (file.isCurrentlyOpen) score += 500;
+  score += file.importedBy.length * 50;
+  const hoursSinceEdit = (Date.now() - file.lastModified) / 3600000;
+  score += Math.max(0, 200 - hoursSinceEdit * 10);
+  score -= file.path.split("/").length * 20;
+  if (file.path.includes(".test.") || file.path.includes(".spec.")) score -= 300;
+  return score;
+}
+```
+
+会产生明显的 JavaScript / TypeScript 项目偏置：
+
+- `package.json`、`tsconfig.json`、`src/App.*`、`src/main.*` 对 Node / 前端项目有效，但对 Python、Rust、Go、Java、Terraform、文档仓库并不通用。
+- 测试文件固定惩罚是错误的。修测试、debug、review diff、定位失败时，测试文件可能是最高优先级。
+- 路径深度固定惩罚也不稳。monorepo、Java package、Kubernetes manifests、Terraform modules 的重要文件经常很深。
+- 只用 `importedBy.length` 会偏向代码依赖图，无法覆盖 README、设计文档、schema、配置、CI、迁移、部署文件。
+
+本设计是 PDD21 的补充，目标是让 stable context loader 从“JS 代码仓库排序器”升级为“通用项目内容重要性排序器”。
+
+### 目标
+
+1. 为任意项目类型生成稳定、可解释、可测试的文件重要性排序。
+2. 对 JS/TS、Python、Rust、Go、Java/Kotlin、C/C++、文档仓库、Infra/IaC、API/schema 仓库都能给出合理默认。
+3. 让文件排序同时考虑三类信号：
+   - 项目静态结构：manifest、entrypoint、docs、schema、source、tests、infra。
+   - 当前任务动态相关性：用户 query、recent files、diff、失败日志、当前打开文件。
+   - 图结构与证据：import graph、test pairing、git changes、tool evidence。
+4. 与 PDD21 的 StableContextManager 集成，但不把文件选择逻辑写进 `agent.ts`。
+5. 保持 prompt cache 友好：稳定内容稳定排序，动态内容只影响 working set / evidence，不污染 stable pack。
+
+### 非目标
+
+1. 不实现全语言精确 AST 解析器。第一版使用轻量规则和可选的语言识别。
+2. 不把整个仓库全文塞进 prompt。
+3. 不读取 `doc/todo.md`，继续遵守项目指令。
+4. 不让动态排序修改 system prompt 或 tool definitions。
+5. 不为每个语言生态写复杂插件系统。第一版使用 registry + rule set，后续再扩展。
+
+### 核心结论
+
+文件重要性不应由一个硬编码函数决定，而应拆成四层：
+
+```text
+FileInventory
+  收集项目文件事实：路径、大小、mtime、扩展名、是否测试、是否生成物、是否敏感、hash。
+
+RepoClassifier
+  识别项目生态：typescript、python、rust、go、java、infra、docs、mixed、unknown。
+
+TaskIntentClassifier
+  根据用户 query 和最近 evidence 判断当前任务：orientation、implementation、debug、review、testing、docs、refactor。
+
+ContextRanker
+  组合通用信号 + 生态信号 + 任务信号 + evidence 信号，输出可解释排序。
+```
+
+最终 scoring 不再是“某些文件名写死加分”，而是：
+
+```text
+score =
+  roleScore
++ ecosystemScore
++ taskRelevanceScore
++ evidenceScore
++ graphScore
++ recencyScore
++ userSignalScore
+- noisePenalty
+```
+
+每个分数都必须记录 reason，方便 CLI / 日志解释为什么某个文件进入上下文。
+
+### 模块设计
+
+新增 `src/context-ranking.ts`。
+
+#### 类型
+
+```ts
+export type RepoEcosystem =
+  | "typescript"
+  | "javascript"
+  | "python"
+  | "rust"
+  | "go"
+  | "java"
+  | "kotlin"
+  | "cpp"
+  | "infra"
+  | "docs"
+  | "mixed"
+  | "unknown";
+
+export type TaskIntent =
+  | "orientation"
+  | "implementation"
+  | "debug"
+  | "review"
+  | "testing"
+  | "documentation"
+  | "refactor"
+  | "unknown";
+
+export type FileRole =
+  | "project_instruction"
+  | "readme"
+  | "project_summary"
+  | "design_doc"
+  | "manifest"
+  | "lockfile"
+  | "build_config"
+  | "entrypoint"
+  | "source"
+  | "test"
+  | "schema"
+  | "migration"
+  | "infra"
+  | "ci_config"
+  | "generated"
+  | "binary"
+  | "secret"
+  | "unknown";
+
+export interface FileFacts {
+  path: string;
+  name: string;
+  extension: string;
+  sizeBytes: number;
+  lineCount?: number;
+  lastModifiedMs?: number;
+  contentHash?: string;
+  roles: FileRole[];
+  ecosystems: RepoEcosystem[];
+  isCurrentlyOpen?: boolean;
+  isRecentlyRead?: boolean;
+  isGitModified?: boolean;
+  isGitStaged?: boolean;
+  isIgnored?: boolean;
+  imports: string[];
+  importedBy: string[];
+  pairedFiles: string[];
+}
+
+export interface RepoClassification {
+  primary: RepoEcosystem;
+  all: RepoEcosystem[];
+  confidence: number;
+  reasons: string[];
+  roots: string[];
+}
+
+export interface TaskContext {
+  query: string;
+  intent: TaskIntent;
+  explicitlyMentionedPaths: string[];
+  explicitlyMentionedTerms: string[];
+  recentFiles: string[];
+  openFiles: string[];
+  changedFiles: string[];
+  failingFiles: string[];
+  stackTraceFiles: string[];
+}
+
+export interface ScoreReason {
+  signal: string;
+  points: number;
+  note: string;
+}
+
+export interface RankedFile {
+  path: string;
+  score: number;
+  facts: FileFacts;
+  reasons: ScoreReason[];
+}
+```
+
+#### 接口
+
+```ts
+export interface ContextRanker {
+  classifyRepo(files: FileFacts[]): RepoClassification;
+  classifyTask(input: {
+    query: string;
+    recentFiles: string[];
+    openFiles: string[];
+    changedFiles: string[];
+    failingFiles: string[];
+    stackTraceFiles: string[];
+  }): TaskContext;
+  rankFiles(input: {
+    files: FileFacts[];
+    repo: RepoClassification;
+    task: TaskContext;
+    maxResults?: number;
+  }): RankedFile[];
+}
+
+export function createContextRanker(projectRoot: string): ContextRanker;
+```
+
+### 文件事实收集
+
+第一版 inventory 只需要同步扫描项目目录，和 `stable-context.ts` 的安全边界一致。
+
+#### 必须排除
+
+默认自动装载时排除：
+
+```text
+node_modules/
+.git/
+dist/
+build/
+coverage/
+.next/
+.nuxt/
+target/
+vendor/
+__pycache__/
+.pytest_cache/
+*.log
+*.lock
+*.png, *.jpg, *.gif, *.pdf, *.zip, *.tar, *.gz
+.env
+.env.*
+```
+
+注意：
+
+- lockfile 默认不进 stable context，但可以作为 repo classification 信号。
+- 二进制、图片、压缩包默认不装载。
+- `.env` 和密钥文件永远不自动装载，即使用户 query 命中也要提示不能自动读取。
+- `doc/todo.md` 永远不自动装载。
+
+#### 文件角色识别
+
+角色识别是通用排序的核心。
+
+| Role | 示例 | 默认用途 |
+| ---- | ---- | -------- |
+| `project_instruction` | `AGENTS.md`, `CLAUDE.md` | 已进入 system prompt，不重复装载，可在 repo map 标注 |
+| `readme` | `README.md` | orientation 高优先级 |
+| `project_summary` | `doc/summary.md` | stable / working set 高优先级 |
+| `design_doc` | `doc/pdd*.md`, `docs/*.md` | 被 query 命中时高优先级 |
+| `manifest` | `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `pom.xml` | repo classification + orientation |
+| `build_config` | `tsconfig.json`, `vite.config.ts`, `Makefile`, `CMakeLists.txt`, `build.gradle` | implementation/debug 相关 |
+| `entrypoint` | `src/main.*`, `main.go`, `app.py`, `cmd/*/main.go`, `src/lib.rs` | orientation/implementation |
+| `source` | `src/**/*.ts`, `*.py`, `*.rs`, `*.go`, `*.java` | working set 候选 |
+| `test` | `*.test.ts`, `test_*.py`, `*_test.go`, `src/test/**` | testing/debug/review 时加分 |
+| `schema` | `openapi.yaml`, `*.proto`, `schema.graphql`, Prisma schema | API 任务高优先级 |
+| `infra` | `Dockerfile`, `compose.yaml`, `*.tf`, k8s yaml | deploy/infra 任务高优先级 |
+| `ci_config` | `.github/workflows/*.yml` | CI/debug/review 高优先级 |
+| `generated` | `dist/**`, generated marker | 默认降权或排除 |
+
+### RepoClassifier
+
+不能只看 `package.json`。分类应按 manifest + 文件分布 + 目录结构组合判断。
+
+#### 生态信号
+
+```text
+typescript:
+  package.json + tsconfig.json
+  src/**/*.ts 或 src/**/*.tsx
+  vite.config.ts / next.config.* / tsup.config.*
+
+javascript:
+  package.json
+  src/**/*.js 或 src/**/*.jsx
+
+python:
+  pyproject.toml / requirements.txt / setup.py / poetry.lock
+  **/*.py
+  tests/ 或 test_*.py
+
+rust:
+  Cargo.toml
+  src/main.rs / src/lib.rs
+  tests/**/*.rs
+
+go:
+  go.mod
+  **/*.go
+  *_test.go
+
+java:
+  pom.xml / build.gradle
+  src/main/java/**
+  src/test/java/**
+
+kotlin:
+  build.gradle.kts
+  src/main/kotlin/**
+
+cpp:
+  CMakeLists.txt / Makefile
+  src/**/*.cc / src/**/*.cpp / include/**/*.h
+
+infra:
+  Dockerfile / compose.yaml / *.tf / k8s/*.yaml / helm charts
+
+docs:
+  README.md + docs/**/*.md
+  缺少明显代码 manifest，Markdown 占比高
+```
+
+#### mixed repo
+
+如果多个生态 confidence 都很高，primary 为 `mixed`，并记录 `all`：
+
+```ts
+{
+  primary: "mixed",
+  all: ["typescript", "python", "infra"],
+  confidence: 0.92,
+  roots: ["frontend", "backend", "deploy"]
+}
+```
+
+monorepo 不应使用全局路径深度惩罚。应先识别 package roots，再在每个 root 内判断 entrypoint / tests / manifest。
+
+### TaskIntentClassifier
+
+任务类型决定动态权重。
+
+#### 规则
+
+```text
+orientation:
+  用户问“解释项目、架构、怎么运行、有哪些模块”
+
+implementation:
+  用户要求“实现、添加、修改、开发”
+
+debug:
+  用户提到 error、失败、报错、stack trace、测试不通过
+
+review:
+  用户说 review、检查、审查、有没有问题
+
+testing:
+  用户说测试、补测试、修测试、coverage
+
+documentation:
+  用户说文档、README、PDD、说明
+
+refactor:
+  用户说重构、整理、拆分、抽象
+```
+
+#### 任务对文件的影响
+
+| Intent | 加分对象 | 降权对象 |
+| ------ | -------- | -------- |
+| orientation | README、summary、manifest、entrypoint、repo map | 深层测试、generated |
+| implementation | 设计文档、相关 source、接口/schema、相邻测试 | 无关 docs |
+| debug | failing files、stack trace、recent diff、相关测试、配置 | 无关 README |
+| review | changed files、相关测试、边界模块、配置、schema | 未改动远端模块 |
+| testing | test files、test helpers、source paired files、test config | 无关 entrypoint |
+| documentation | README、docs、PDD、summary、API schema | 大段 source |
+| refactor | 被引用多的 source、接口、测试、模块边界文件 | generated |
+
+### Scoring 设计
+
+#### 分数范围
+
+避免一个信号压倒一切。建议每类信号封顶：
+
+```text
+roleScore            0..500
+ecosystemScore       0..350
+taskRelevanceScore   0..700
+evidenceScore        0..900
+graphScore           0..400
+recencyScore         0..250
+userSignalScore      0..1000
+noisePenalty         0..1200
+```
+
+用户显式提到路径或 pin 文件可以最高优先级，但仍受安全边界约束。
+
+#### 通用 roleScore
+
+```text
+project_summary       +420
+readme                +380
+design_doc            +300
+manifest              +280
+entrypoint            +260
+schema                +240
+build_config          +220
+ci_config             +180
+source                +140
+test                  +120
+infra                 +120
+lockfile              +30
+generated             -500
+binary                -800
+secret                -1200
+```
+
+这些不是最终排序，只是通用基线。
+
+#### ecosystemScore
+
+生态规则只在 repo classifier 匹配后生效。
+
+例：
+
+```text
+typescript:
+  package.json             +250
+  tsconfig.json            +220
+  src/main.ts              +220
+  src/index.ts             +200
+  vite.config.ts           +180
+
+python:
+  pyproject.toml           +250
+  requirements.txt         +180
+  app.py                   +220
+  src/**/__init__.py       +80
+  tests/conftest.py        +160
+
+rust:
+  Cargo.toml               +250
+  src/lib.rs               +240
+  src/main.rs              +220
+
+go:
+  go.mod                   +250
+  main.go                  +220
+  cmd/*/main.go            +220
+
+java:
+  pom.xml                  +230
+  build.gradle             +230
+  src/main/java/**         +160
+
+infra:
+  Dockerfile               +220
+  compose.yaml             +220
+  *.tf                     +180
+  .github/workflows/*.yml  +170
+```
+
+关键点：JS/TS 规则只是一个 ecosystem profile，不能写进通用 scoring 主体。
+
+#### taskRelevanceScore
+
+query 命中必须优先：
+
+```text
+exact path mentioned         +1000
+basename mentioned           +600
+symbol/name term matched     +300
+directory mentioned          +250
+design doc id mentioned      +800
+```
+
+测试文件处理必须按 task intent 调整：
+
+```text
+if intent in ["debug", "testing", "review"]:
+  test file +250
+else if intent == "orientation":
+  test file -120
+else:
+  test file 0
+```
+
+#### evidenceScore
+
+工具证据比静态猜测更重要。
+
+```text
+stack trace file             +900
+failing test file            +850
+git changed file             +700
+git staged file              +720
+recent run_read file         +500
+recent tool output mentions  +350
+current open file            +450
+```
+
+Evidence score 属于动态信号，只应影响 working set / evidence pack，不应重新排序 stable pack。
+
+#### graphScore
+
+第一版可以轻量实现：
+
+- TS/JS：用 import/export 字符串规则提取相对 imports。
+- Python：识别 `import x`、`from x import y`，只做同项目近似映射。
+- Go：识别 import blocks，结合 `go.mod` module name 做近似。
+- Rust：识别 `mod`、`use crate::`、`use super::`。
+- Java/Kotlin：识别 package/import，做路径近似。
+- 其他：不构建 graph，graphScore = 0。
+
+分数：
+
+```text
+importedByCount capped at 8: importedByCount * 35
+importsCount capped at 8: importsCount * 10
+paired test/source relation: +160 when task needs tests
+central manifest/config referenced by many roots: +160
+```
+
+不要只靠 `importedBy.length`，否则 README、schema、CI、infra 永远吃亏。
+
+#### recencyScore
+
+最近修改有用，但不要每小时导致 stable pack 频繁重排。
+
+规则：
+
+```text
+if file.isGitModified or file.isGitStaged:
+  use evidenceScore, not recencyScore
+
+if lastModifiedMs exists:
+  hours = ...
+  recencyScore = clamp(0, 180, 180 - hours * 4)
+```
+
+Recency 只影响 working set 排序，不影响 stable pack 排序。
+
+#### noisePenalty
+
+```text
+generated marker             -800
+minified file                -700
+binary                       -1000
+secret/env                   -1200
+very large file > 1MB        -300 unless explicitly pinned
+path in excluded dir         -1000
+doc/todo.md                  -1000
+```
+
+### 稳定排序与 Pack 分层
+
+#### Stable Pack
+
+Stable pack 只允许稳定信号决定排序：
+
+```text
+project_instruction marker only, no content
+repo map
+README
+doc/summary.md
+manifest/build config summary
+pinned files by normalized path
+```
+
+排序 tie-breaker：
+
+```text
+1. stable tier
+2. roleScore + ecosystemScore
+3. normalized path ascending
+```
+
+不使用：
+
+- mtime
+- open file
+- git diff
+- failing test
+- query terms
+
+#### Working Set Pack
+
+Working set 使用完整 scoring：
+
+```text
+query-mentioned files
+current design docs
+changed files
+recent files
+graph-neighbor files
+paired tests/source files
+```
+
+排序 tie-breaker：
+
+```text
+1. score desc
+2. evidence count desc
+3. normalized path ascending
+```
+
+#### Evidence Pack
+
+Evidence pack 不装全文文件，装证据摘要：
+
+```text
+git diff stat
+changed file list
+failing test names
+stack trace frames
+tool output preview + output_id
+```
+
+Evidence pack 里的文件列表可以引用 `RankedFile`，但内容摘要应由 evidence manager 控制。
+
+### 与 StableContextManager 的集成
+
+修改 `src/stable-context.ts`：
+
+```ts
+import { createContextRanker } from "./context-ranking.js";
+
+export interface StableContextManager {
+  getState(): StableContextState;
+  setEnabled(enabled: boolean): void;
+  rebuildRepoMap(): StableContextPack;
+  pinPath(filePath: string): void;
+  unpinPath(filePath: string): void;
+  buildMessages(input: {
+    currentQuery: string;
+    recentFiles: string[];
+    openFiles: string[];
+    changedFiles: string[];
+    failingFiles: string[];
+    stackTraceFiles: string[];
+  }): ChatCompletionMessageParam[];
+}
+```
+
+第一版如果 `agent.ts` 暂时没有 open files / failing files，可以传空数组。不要因此把 API 设计成只接收 string。
+
+#### buildMessages 流程
+
+```text
+1. inventory = scan projectRoot
+2. repo = ranker.classifyRepo(inventory.files)
+3. task = ranker.classifyTask(current query + runtime evidence)
+4. ranked = ranker.rankFiles({ files, repo, task })
+5. stable assets = stable selection rules
+6. working assets = top ranked dynamic candidates within budget
+7. evidence assets = evidence manager output
+8. build deterministic manifests with reasons and hashes
+```
+
+#### Manifest 增强
+
+Context manifest 应包含排序原因摘要：
+
+```text
+<working-set-manifest>
+  assets: 4
+  tokens: 18320
+  repo: mixed(typescript, docs)
+  task: review
+  - src/stable-context.ts score=1280 reasons=git_changed, query_term, source
+  - src/stable-context.test.ts score=1110 reasons=git_changed, paired_test, review_task
+</working-set-manifest>
+```
+
+这样 LLM 能知道为什么这些文件被装载，debug 也更容易。
+
+### CLI 增强
+
+在 `/c` 命令上增加两个子命令：
+
+```text
+/c 排              # 显示当前 query-less 的 top ranked files
+/c why <path>      # 显示某个文件的重要性分数和原因
+```
+
+中文 alias：
+
+```text
+/c 因 <path>
+```
+
+`/c why` 输出示例：
+
+```text
+Context rank: src/stable-context.ts
+  score: 1280
+  role: source +140
+  ecosystem: typescript source +120
+  task: query matched "stable-context" +300
+  evidence: git modified +700
+  graph: imported by index.ts +35
+  penalty: none
+```
+
+CLI 输出只用于用户查看，不进入 system prompt。
+
+### 与 RuntimePolicy 的关系
+
+PDD21 的 `RuntimePolicy.contextLoading` 继续负责预算。通用内容重要性排序层只决定“预算内放什么”。
+
+```text
+RuntimePolicy decides:
+  stablePackBudgetTokens
+  workingSetBudgetTokens
+  evidenceBudgetTokens
+
+ContextRanker decides:
+  file order
+  file role
+  file explanation
+  stable vs working candidacy
+```
+
+不要把不同模型的 profile 写进 ranker。模型只影响预算和压缩策略，不影响“Rust 的 Cargo.toml 是 manifest”这个事实。
+
+### 安全边界
+
+1. 所有路径必须用 `path.relative(projectRoot, resolved)` 校验，拒绝 `..` 开头和绝对 relative。
+2. 自动扫描只读取 metadata；读取内容前必须确认文件未被排除且在预算内。
+3. `.env`、密钥、二进制永不自动读。
+4. Symlink 第一版可以跳过，避免绕过 projectRoot。
+5. `doc/todo.md` 永不自动读。
+6. generated 文件默认跳过，除非用户显式 pin，且仍要受大小和安全限制。
+
+### 实现计划
+
+#### Phase 1: Context Ranking 模块
+
+新增：
+
+- `src/context-ranking.ts`
+- `src/context-ranking.test.ts`
+
+实现：
+
+1. `scanFileFacts(projectRoot)` 或由 `createContextRanker()` 内部扫描。
+2. 文件角色识别。
+3. Repo classification。
+4. Task intent classification。
+5. Scoring + reasons。
+6. Deterministic sorting。
+
+测试 fixture 至少覆盖：
+
+```text
+typescript project
+python project
+rust project
+go project
+docs-only project
+infra project
+mixed monorepo
+```
+
+#### Phase 2: StableContextManager 集成
+
+修改：
+
+- `src/stable-context.ts`
+- `src/stable-context.test.ts`
+
+实现：
+
+1. 使用 `ContextRanker` 选择 working set。
+2. Stable pack 不使用动态信号。
+3. Working set 使用 query / recent / changed / failing 信号。
+4. Manifest 输出 rank reasons。
+5. 保持现有 `/c 加` pinned files 行为。
+
+#### Phase 3: Agent Evidence 输入
+
+修改：
+
+- `src/agent.ts`
+- `src/compressor.ts` 或新增 evidence collector
+
+实现：
+
+1. 将 recent read files、changed files、failing files 传入 `buildMessages()`。
+2. 第一版可以只传 `recentFiles` 和空 evidence。
+3. 后续再接入 git diff、test failure、OutputStore handles。
+
+注意：`agent.ts` 只传事实，不参与排序。
+
+#### Phase 4: CLI 与日志
+
+修改：
+
+- `src/cli-commands.ts`
+- `src/cli-commands.test.ts`
+- `src/llm-logger.ts`
+
+实现：
+
+1. `/c 排`
+2. `/c why <path>` / `/c 因 <path>`
+3. LLM logger 记录 pack manifest 的 rank reasons。
+
+### 验收标准
+
+1. 在只有 Python 文件的 fixture 中，`pyproject.toml`、`app.py`、`tests/conftest.py` 能得到合理分数，`package.json` 不会被假设存在。
+2. 在 Rust fixture 中，`Cargo.toml`、`src/lib.rs`、`src/main.rs` 排名高于无关深层文件。
+3. 在 docs-only fixture 中，README、`docs/*.md`、summary 排名高，不会因为缺少代码 manifest 而退化。
+4. 在 infra fixture 中，`Dockerfile`、`compose.yaml`、`*.tf`、workflow yaml 能被识别。
+5. 在 review intent 下，changed test files 不被惩罚。
+6. 在 orientation intent 下，测试文件可降权，但不能固定 -300。
+7. 在 monorepo fixture 中，深层 package entrypoint 不因路径深度被错误淘汰。
+8. `/c why <path>` 能解释 score 来源。
+9. Stable pack 排序不受 mtime、open file、git diff 影响。
+10. Working set 排序可以受 query、diff、failing tests 影响。
+11. `doc/todo.md`、`.env`、二进制、projectRoot 外路径不会被自动装载。
+12. 所有新增/修改代码通过 `npm run typecheck`、相关 vitest、`npm run lint`。
+
+### 给实现 Agent 的注意事项
+
+1. 先把本章节的要求拆成 checklist，再编码。
+2. 不要在 `agent.ts` 写文件名规则。
+3. 不要把 JS/TS 规则写成全局默认，只能作为 ecosystem profile。
+4. 不要让 test file 固定扣分。
+5. 每个分数必须可解释，否则 ranking 很难 review。
+6. 排序必须 deterministic，同分时按 normalized path 排。
+7. 保持实现轻量，第一版不引入外部 parser。
+8. 修改实现后更新 `doc/summary.md`，因为这是项目当前状态源。
+
+
 ## Cache Telemetry
 
 当前 `cache-debug.ts` 是本地稳定前缀 hash，不是真实 provider cache hit rate。PDD21 后新增两个概念：

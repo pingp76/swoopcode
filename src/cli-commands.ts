@@ -794,9 +794,13 @@ import type { StableContextManager } from "./stable-context.js";
  * - /c 开           启用 stable context loader
  * - /c 关           禁用 stable context loader
  * - /c 扫           rebuild repo map
+ * - /c 刷            invalidate stable snapshot (rebuild on next LLM call)
  * - /c 加 <path>    pin 文件
  * - /c 删 <path>    unpin 文件
  * - /c 列            列出已加载的资产
+ * - /c 排            显示当前 top ranked files（PDD21-1）
+ * - /c why <path>    显示某个文件的重要性分数和原因（PDD21-1）
+ * - /c 因 <path>     why 的中文别名（PDD21-1）
  */
 export function createStableContextCliCommand(
   manager: StableContextManager,
@@ -847,6 +851,13 @@ export function createStableContextCliCommand(
         return;
       }
 
+      if (subcommand === "刷" || subcommand === "refresh") {
+        manager.invalidateStableSnapshot();
+        logger.info("Stable snapshot invalidated, will rebuild on next LLM call");
+        console.log("Stable snapshot invalidated. Will rebuild on next LLM call.");
+        return;
+      }
+
       if (subcommand === "加" || subcommand === "add" || subcommand === "pin") {
         const filePath = args[1];
         if (!filePath) {
@@ -886,8 +897,56 @@ export function createStableContextCliCommand(
         return;
       }
 
+      // PDD21-1: /c 排 — 显示当前 query-less 的 top ranked files
+      if (subcommand === "排" || subcommand === "rank") {
+        const ranked = manager.getRankedFiles(15);
+        if (ranked.length === 0) {
+          console.log("No ranked files available (ContextRanker not configured).");
+          return;
+        }
+        const repo = manager.getRepoClassification();
+        const lines: string[] = ["Top ranked files:"];
+        if (repo) {
+          lines.push(`  repo: ${repo.primary}${repo.primary === "mixed" ? ` (${repo.all.join(", ")})` : ""}`);
+          lines.push(`  confidence: ${repo.confidence.toFixed(2)}`);
+        }
+        lines.push("");
+        for (const rf of ranked) {
+          const topReasons = rf.reasons
+            .filter((r) => r.points > 0)
+            .slice(0, 2)
+            .map((r) => r.note)
+            .join(", ");
+          lines.push(`  ${rf.path}  score=${rf.score}  [${topReasons}]`);
+        }
+        console.log(lines.join("\n"));
+        return;
+      }
+
+      // PDD21-1: /c why <path> / /c 因 <path> — 显示某个文件的重要性分数和原因
+      if (subcommand === "why" || subcommand === "因" || subcommand === "为什么") {
+        const filePath = args[1];
+        if (!filePath) {
+          console.log("Usage: /c why <path>  or  /c 因 <path>");
+          return;
+        }
+        const result = manager.explainFile(filePath);
+        if (!result) {
+          console.log(`File "${filePath}" not found in ranking (may be excluded or not scanned).`);
+          return;
+        }
+        const lines: string[] = [`Context rank: ${result.path}`];
+        lines.push(`  score: ${result.score}`);
+        for (const reason of result.reasons) {
+          const sign = reason.points >= 0 ? "+" : "";
+          lines.push(`  ${reason.signal}: ${reason.note} ${sign}${reason.points}`);
+        }
+        console.log(lines.join("\n"));
+        return;
+      }
+
       console.log(
-        "Usage: /c [开|关|扫|加 <path>|删 <path>|列]",
+        "Usage: /c [开|关|扫|刷|加 <path>|删 <path>|列|排|why <path>]",
       );
     },
   };

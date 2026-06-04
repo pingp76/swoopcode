@@ -62,6 +62,7 @@ import { createScheduleCliCommand } from "./cli-commands.js";
 import { createOutputStore } from "./output-store.js";
 import { createOutputToolProvider } from "./tools/output.js";
 import { createStableContextManager } from "./stable-context.js";
+import { createContextRanker } from "./context-ranking.js";
 import { createRuntimePolicyStore } from "./runtime-policy-store.js";
 import {
   createModelPolicyCliCommand,
@@ -120,11 +121,14 @@ async function main() {
     process.env,
   );
 
-  // 5.5. 创建 Stable Context Manager（长上下文模型使用）
+  // 5.5. 创建 ContextRanker 和 Stable Context Manager（长上下文模型使用）
+  // ContextRanker 为任意项目类型生成通用内容重要性排序
+  const contextRanker = createContextRanker(projectContext.projectRoot);
   const stableContextManager = createStableContextManager(
     projectContext.projectRoot,
     config.runtimePolicy.modelProfileId,
     () => runtimePolicyStore.getPolicy().contextLoading!,
+    contextRanker,
   );
 
   // 6. 创建 LLM 客户端
