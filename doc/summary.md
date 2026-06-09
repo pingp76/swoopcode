@@ -10,7 +10,8 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD21：基座模型能力画像与 Agent Runtime Policy 抽象层**（Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager + ContextRanker + RepoClassifier + TaskIntentClassifier + 多维度评分）
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD21：基座模型能力画像与 Agent Runtime Policy 抽象层**（Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager + ContextRanker + RepoClassifier + TaskIntentClassifier + 多维度评分）+ **PDD22 第一批：Eval Core + 当前项目 In-process Driver**（CodingAgentDriver 抽象、EvalCase/EvalStep/EvalAssertion 类型、临时 workspace、TraceRecorder、portable/instrumented 断言、ScriptedLLM、ScriptedTerminal、Fake Tool Registry、runEvalCase runner）
++ **PDD22 第二批：Deterministic Suite + Real Core Tools + CLI Driver**（真实 bash/read/write/edit/editExact 核心工具注册表、CLI 黑盒 driver、instrumented 断言补齐 toolNotCalled/toolArgsContain/allToolsSucceeded/permissionPromptShown、≥5 个 deterministic suite 用例、test:eval 脚本、README 文档）
 
 ## 教学注释增强
 
@@ -127,6 +128,28 @@ src/
     ├── schedules.test.ts # Schedule 工具测试（4 个测试用例）
     ├── registry.ts     # 工具注册表（顺序稳定 + 重复注册报错 + 过滤选项）
     └── registry.test.ts # 工具注册表测试（11 个测试用例）
+├── eval/
+│   ├── core/
+│   │   ├── case-schema.ts    # EvalCase、EvalStep、EvalAssertion、EvalRunResult 类型
+│   │   ├── driver.ts         # CodingAgentDriver 中立接口
+│   │   ├── workspace.ts      # 临时 workspace 与路径边界
+│   │   ├── trace.ts          # TraceRecorder、RuntimeEvent
+│   │   ├── assertions.ts     # portable + instrumented assertion 执行器
+│   │   ├── runner.ts         # runEvalCase/runEvalSuite 核心 runner
+│   │   └── trace-writer.ts   # JSON trace 输出
+│   ├── drivers/
+│   │   ├── learn-claude-code/
+│   │   │   ├── in-process-driver.ts  # 当前项目 createAgent() driver
+│   │   │   ├── core-tool-runtime.ts  # 真实核心工具注册表（bash/read/write/edit/editExact）
+│   │   │   ├── scripted-llm.ts       # ScriptedLLMClient
+│   │   │   ├── scripted-terminal.ts  # ScriptedTerminal（支持 permission 事件记录）
+│   │   │   └── tool-trace.ts         # ToolRegistry tracing wrapper
+│   │   └── cli/
+│   │       └── cli-driver.ts         # CLI 黑盒 driver（spawn + stdin/stdout）
+│   ├── cases/
+│   │   └── deterministic.test.ts     # Deterministic suite（≥5 个 core tool + CLI smoke case）
+│   ├── runner.test.ts        # core + in-process driver 集成测试
+│   └── README.md             # Eval 系统使用文档
 skills/
 ├── code-review/
 │   └── SKILL.md        # 代码审查 skill（示例）
@@ -251,6 +274,20 @@ skills/
 - **Profile 当前边界**：tool schema 仍只公开 `readonly`；旧文件中的 `ci` command 可按 ci profile 校验；`workspace_write` 仍是 reserved，创建或触发都会失败
 - **输出引用**：Schedule occurrence 保存 `outputId` 与旧 `outputRef`；工具展示和 notification 优先提示 `run_output_read(output_id)`，旧 occurrence 只有 `outputRef` 时仍可展示但不会自动变成可读 handle
 - **REPL 命令**：`/schedule list [--all] [--all-projects]`、`/schedule show <id>`、`/schedule cancel <id>`、`/schedule delete <id>`、`/schedule occurrences <id>`
+
+### Eval Core 与 In-process Driver (`src/eval/`)
+
+- **Eval Core 设计原则**：中立 runner + driver 边界抽象，Eval Core 不直接依赖当前项目内部模块（agent.ts、llm.ts、ToolRegistry 等），只认识 `CodingAgentDriver` 接口
+- **CodingAgentDriver 接口**：`startCase` → `send` → `readEvents` → `close` 生命周期；同一 case 内多 step 复用同一 driver 实例
+- **EvalCase / EvalStep / EvalAssertion 类型**：TypeScript 对象描述 case，不引入 YAML/JSON schema 解析依赖；断言分 portable（finalOutputContains、fileExists、fileContains 等）和 instrumented（toolCalled、transcriptEventTypes 等）两类
+- **临时 workspace**：`createEvalWorkspace()` 在 OS tmp 目录创建独立目录，支持 `initialFiles`、路径边界检查（拒绝 `..` 和绝对路径）、自动清理（`keepOnFailure` 可选保留）
+- **TraceRecorder / writeEvalTrace**：结构化事件收集 + JSON 输出；支持 `EVAL_TRACE_DIR` 环境变量覆盖输出目录
+- **runEvalCase() 生命周期**：validate → create workspace → create driver → step loop → collect events → run assertions → write trace → cleanup
+- **当前项目 in-process driver**：内部组装 `createAgent()`，注入 ScriptedLLMClient、ScriptedTerminal、Fake Tool Registry、静音 Logger、新建 History/Compressor/PermissionManager/TranscriptStore
+- **ScriptedLLMClient**：按顺序消耗预设 response，每次 `chat()` 自动序列化 tool args 并发射 `llm_call`/`llm_response` 事件；response 耗尽时抛错
+- **ScriptedTerminal**：自动消耗 `permissionAnswers` 和 `questions` 队列，支持 `defaultPermissionAnswer` 默认值
+- **Fake Tool Registry**：第一批只支持 fake tools，不接入真实 bash/files；工具定义和 executor 由 case 注入，执行时发射标准化 tool_call/tool_result 事件
+- **断言执行器**：`runAssertions()` 遍历断言列表，返回结构化 `EvalAssertionResult`（passed + message + evidence）；instrumented 断言基于 `runtimeEvents` 中 source="agent" 的事件判断
 
 ### Agent 核心循环 (`agent.ts`)
 
@@ -647,6 +684,7 @@ skills/
 | `src/tools/registry.test.ts`   | 11     | 重复注册报错、工具定义顺序稳定性、完整 registry 创建、过滤选项、OutputStore 注册                                      |
 | `src/async-runs.test.ts`       | 32     | start 校验、finishRun 生命周期、timeout、深拷贝、冲突检测、notification drain、readOutput、OutputStore 输出登记       |
 | `src/tools/async-runs.test.ts` | 16     | 4 个工具定义、参数校验、JSON 输出格式、错误传播、output_id 展示                                                       |
+| `src/eval/runner.test.ts`      | 7      | fake driver 无工具 case、in-process driver 无工具 case、fake tool call case、多 query history 复用、断言失败、workspace initial files、case id 校验 |
 | `src/execution-policy.test.ts` | 12     | readonly/ci/workspace_write profile、命令白名单、资源边界                                                             |
 | `src/output-store.test.ts`     | 7      | output_id 生成、index 校验、分片读取、路径边界                                                                         |
 | `src/tools/output.test.ts`     | 4      | run_output_read 参数校验、分片读取、错误传播                                                                           |
