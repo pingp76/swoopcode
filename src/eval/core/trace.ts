@@ -16,6 +16,7 @@ import type {
   EvalAssertionResult,
   EvalCaseMode,
   EvalRunError,
+  EvalJudgeResult,
 } from "./case-schema.js";
 
 /**
@@ -39,9 +40,10 @@ export interface TraceRecorder {
     caseId: string;
     title: string;
     mode: EvalCaseMode;
-    workspaceRoot?: string;
+    workspaceRoot?: string | undefined;
     assertions: EvalAssertionResult[];
-    error?: EvalRunError;
+    error?: EvalRunError | undefined;
+    judge?: EvalJudgeResult | undefined;
   }): EvalTrace;
 }
 
@@ -139,6 +141,9 @@ export function createTraceRecorder(): TraceRecorder {
       }
       if (options.error !== undefined) {
         trace.error = options.error;
+      }
+      if (options.judge !== undefined) {
+        trace.judge = options.judge;
       }
       return trace;
     },

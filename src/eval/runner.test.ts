@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import type { LLMClient } from "../llm.js";
 import type { CodingAgentDriver } from "./core/driver.js";
 import type { AgentRuntimeEvent, EvalCase } from "./core/case-schema.js";
 import { runEvalCase } from "./core/runner.js";
@@ -297,5 +298,60 @@ describe("Eval Runner", () => {
     await expect(runEvalCase(badCase, createDriver)).rejects.toThrow(
       /id must only contain/,
     );
+  });
+
+  it("should include judge result in result and trace when judge is enabled", async () => {
+    const scriptedJudgeLLM: LLMClient = {
+      async chat() {
+        return {
+          content: JSON.stringify({
+            passed: true,
+            score: 8,
+            summary: "Good work.",
+            strengths: [],
+            problems: [],
+            evidence: [],
+            needsHumanReview: false,
+          }),
+          toolCalls: [],
+          finishReason: "stop",
+          assistantMessage: { role: "assistant", content: "judge" },
+        };
+      },
+    };
+
+    const evalCase: EvalCase = {
+      id: "judge-integration",
+      title: "Judge integration test",
+      steps: [{ query: "Say hello." }],
+      driver: {
+        kind: "learn-claude-code-in-process",
+        llm: {
+          kind: "scripted",
+          scriptedResponses: [
+            { content: "Hello.", toolCalls: [], finishReason: "stop" },
+          ],
+        },
+        tools: { kind: "fake", fakeTools: [] },
+      },
+      assertions: [{ kind: "finalOutputContains", text: "Hello" }],
+      judge: {
+        rubric: {
+          goal: "Agent should greet.",
+          passCriteria: ["Friendly"],
+          failCriteria: ["Rude"],
+        },
+      },
+      trace: { enabled: true },
+    };
+
+    const result = await runEvalCase(evalCase, createDriver, scriptedJudgeLLM);
+
+    expect(result.passed).toBe(true);
+    expect(result.judge).toBeDefined();
+    expect(result.judge?.passed).toBe(true);
+    expect(result.judge?.score).toBe(8);
+    // tracePath 应存在，因为 trace.enabled = true
+    expect(result.tracePath).toBeTruthy();
   });
 });

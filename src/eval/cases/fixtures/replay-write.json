@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "caseId": "replay-write-file",
+  "provider": "scripted_fixture",
+  "model": "replay-fixture-v1",
+  "recordedAt": "2026-06-05T00:00:00.000Z",
+  "responses": [
+    {
+      "content": null,
+      "toolCalls": [
+        {
+          "id": "call_1",
+          "name": "run_write",
+          "args": { "path": "hello.txt", "content": "hello world" }
+        }
+      ],
+      "finishReason": "tool_calls"
+    },
+    {
+      "content": "File written successfully.",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ]
+}

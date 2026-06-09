@@ -164,10 +164,75 @@ export interface EvalStep {
   assertions?: EvalAssertion[];
 }
 
+/** Judge 评分标准 */
+export interface EvalJudgeRubric {
+  goal: string;
+  passCriteria: string[];
+  failCriteria: string[];
+  scoring?: {
+    minPassingScore: number;
+    maxScore: number;
+  };
+}
+
 /** Judge 计划（第三批实现） */
 export interface EvalJudgePlan {
-  rubric: unknown;
+  rubric: EvalJudgeRubric;
+  /**
+   * 预留字段：指定 judge 使用的模型。
+   * 当前实现由 runner 调用方传入 judgeLLM 参数决定模型，此字段未被读取。
+   */
   model?: string;
+}
+
+/** Judge 输入 */
+export interface EvalJudgeInput {
+  caseId: string;
+  title: string;
+  description: string | undefined;
+  userQueries: string[];
+  finalOutputs: string[];
+  runtimeEvents: AgentRuntimeEvent[];
+  hardAssertionResults: EvalAssertionResult[];
+  rubric: EvalJudgeRubric;
+}
+
+/** Judge 输出 */
+export interface EvalJudgeResult {
+  enabled: boolean;
+  passed: boolean;
+  score: number;
+  summary: string;
+  strengths: string[];
+  problems: string[];
+  evidence: Array<{
+    kind: "runtime_event" | "final_output" | "assertion" | "workspace";
+    ref: string;
+    note: string;
+  }>;
+  needsHumanReview: boolean;
+}
+
+/** Suite 报告 */
+export interface EvalSuiteReport {
+  version: 1;
+  startedAt: string;
+  endedAt: string;
+  mode: "scripted" | "replay" | "live" | "mixed";
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  judgeEnabled: boolean;
+  cases: Array<{
+    id: string;
+    title: string;
+    passed: boolean;
+    hardPassed: boolean;
+    judgePassed?: boolean;
+    tracePath?: string;
+    failureSummary?: string;
+  }>;
 }
 
 /** Trace 计划 */
@@ -355,6 +420,10 @@ export interface AgentOutputEvent extends BaseRuntimeEvent {
 export interface ToolRuntimeEvent extends BaseRuntimeEvent {
   kind: "tool_call" | "tool_result";
   toolName: string;
+  /**
+   * 预留字段：OpenAI 格式的 tool_call ID，用于 tool_call/tool_result 配对。
+   * 当前实现中 eval 层的事件未填充此字段（agent.ts 内部有 tool_call_id，但未透传到 eval runtime events）。
+   */
   toolCallId?: string;
   args?: Record<string, unknown>;
   result?: unknown;
@@ -416,6 +485,7 @@ export interface EvalRunResult {
   assertions: EvalAssertionResult[];
   tracePath?: string;
   error?: EvalRunError;
+  judge?: EvalJudgeResult;
 }
 
 /** Eval 运行错误 */
@@ -456,6 +526,6 @@ export interface EvalTrace {
   runtimeEvents: AgentRuntimeEvent[];
   rawDriverEvents?: unknown[];
   assertions: EvalAssertionResult[];
-  judge?: unknown;
+  judge?: EvalJudgeResult;
   error?: EvalRunError;
 }

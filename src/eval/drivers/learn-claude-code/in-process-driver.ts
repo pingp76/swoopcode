@@ -47,6 +47,8 @@ import { createScriptedLLMClient } from "./scripted-llm.js";
 import { createScriptedTerminal } from "./scripted-terminal.js";
 import { createCoreEvalToolRegistry } from "./core-tool-runtime.js";
 import { wrapToolRegistryForTrace } from "./tool-trace.js";
+import { createReplayLLMClient } from "../../replay/replay-llm.js";
+import { createLiveEvalLLMClient } from "../../live/live-llm.js";
 
 /**
  * createLearnClaudeCodeInProcessDriver — 创建当前项目 in-process driver
@@ -130,12 +132,32 @@ export async function createLearnClaudeCodeInProcessDriver(
         tools = createFakeToolRegistry(plan.tools?.fakeTools ?? [], emitEvent);
       }
 
-      // 创建 Scripted LLM（此时已知 caseId）
-      llm = createScriptedLLMClient({
-        caseId: context.caseId,
-        responses: plan.llm.scriptedResponses ?? [],
-        emitEvent,
-      });
+      // 根据 llm.kind 创建对应的 LLM 客户端
+      if (plan.llm.kind === "replay") {
+        if (!plan.llm.replayFile) {
+          throw new Error(
+            `EvalCase ${context.caseId}: replay mode requires replayFile`,
+          );
+        }
+        llm = await createReplayLLMClient({
+          caseId: context.caseId,
+          replayFile: plan.llm.replayFile,
+          emitEvent,
+        });
+      } else if (plan.llm.kind === "live") {
+        const liveOptions: { emitEvent: typeof emitEvent; maxCalls?: number } = { emitEvent };
+        if (plan.llm.live?.maxCalls !== undefined) {
+          liveOptions.maxCalls = plan.llm.live.maxCalls;
+        }
+        llm = createLiveEvalLLMClient(liveOptions);
+      } else {
+        // scripted 及默认
+        llm = createScriptedLLMClient({
+          caseId: context.caseId,
+          responses: plan.llm.scriptedResponses ?? [],
+          emitEvent,
+        });
+      }
 
       // 创建 PermissionManager，项目目录设为当前 workspace
       permissionManager = createPermissionManager(context.workspaceRoot);

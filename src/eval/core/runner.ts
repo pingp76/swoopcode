@@ -24,6 +24,7 @@
  * - 同一 case 内多个 step 复用同一个 driver 实例
  */
 
+import type { LLMClient } from "../../llm.js";
 import type {
   EvalCase,
   EvalRunResult,
@@ -38,17 +39,20 @@ import { createEvalWorkspace } from "./workspace.js";
 import { createTraceRecorder } from "./trace.js";
 import { runAssertions } from "./assertions.js";
 import { writeEvalTrace } from "./trace-writer.js";
+import { runJudge } from "../judge/judge.js";
 
 /**
  * runEvalCase — 执行单个 eval case
  *
  * @param evalCase - 要执行的 case
  * @param createDriver - driver 工厂函数，根据 driver plan 创建具体 driver 实例
+ * @param judgeLLM - 可选的 judge LLM，用于 case 执行后的开放式质量评价
  * @returns 结构化执行结果
  */
 export async function runEvalCase(
   evalCase: EvalCase,
   createDriver: (plan: EvalCase["driver"]) => Promise<CodingAgentDriver>,
+  judgeLLM?: LLMClient,
 ): Promise<EvalRunResult> {
   // 1. 校验 case 结构合法性
   validateEvalCase(evalCase);
@@ -62,6 +66,7 @@ export async function runEvalCase(
   // 用于收集所有运行时事件（包括 driver 返回的和 traceRecorder 收集的）
   const allRuntimeEvents: AgentRuntimeEvent[] = [];
   let runError: EvalRunError | undefined;
+  let isSkipped = false;
 
   // 辅助函数：将事件同时写入 runner 的数组和 traceRecorder
   // 按 event.id 去重，防止 send() 增量事件与 readEvents() 全量快照重叠
@@ -120,8 +125,14 @@ export async function runEvalCase(
     // 11. 关闭 driver
     await driver.close();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    runError = { message };
+    if (!runError) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Live 模式缺少 API key 时，标记为 skipped 而非 error，使 report 统计有意义
+      if (message.includes("[LiveEval] Missing LLM API key")) {
+        isSkipped = true;
+      }
+      runError = { message };
+    }
   }
 
   // 9. 执行断言
@@ -133,8 +144,6 @@ export async function runEvalCase(
     runtimeEvents: allRuntimeEvents,
     workspaceRoot: workspace.root,
   };
-
-
 
   // 合并 case 级断言和 step 级断言
   // step 级断言如果没有显式 stepId，自动绑定到当前 step，避免误匹配到最后一步
@@ -152,18 +161,52 @@ export async function runEvalCase(
 
   const assertionResults = await runAssertions(allAssertions, assertionCtx);
 
-  // 计算总体状态
-  const hardPassed = assertionResults.every((r) => r.passed);
-  let status: EvalRunStatus;
-  if (runError) {
-    status = "error";
-  } else if (hardPassed) {
-    status = "passed";
-  } else {
-    status = "failed";
+  // 可选 judge：hard assertions 后调用 LLM judge 做补充评价
+  // judge 不覆盖 hard assertion 的失败结果，但 hard 通过后 judge 失败会使 case 整体 failed
+  let judgeResult: EvalRunResult["judge"];
+  if (evalCase.judge !== undefined && judgeLLM !== undefined) {
+    try {
+      const judgeInput = {
+        caseId: evalCase.id,
+        title: evalCase.title,
+        description: evalCase.description,
+        userQueries: evalCase.steps.map((s) => s.query),
+        finalOutputs: stepTraces.map((s) => s.finalOutput ?? ""),
+        runtimeEvents: allRuntimeEvents,
+        hardAssertionResults: assertionResults,
+        rubric: evalCase.judge.rubric,
+      };
+      judgeResult = await runJudge(judgeInput, judgeLLM);
+    } catch {
+      // judge 执行失败不影响 hard result，记录为 judge 解析失败
+      judgeResult = {
+        enabled: true,
+        passed: false,
+        score: 0,
+        summary: "Judge execution failed",
+        strengths: [],
+        problems: ["Judge threw an unexpected error"],
+        evidence: [],
+        needsHumanReview: true,
+      };
+    }
   }
 
-  // 组装 trace
+  // 计算总体状态：hard assertions 失败 或 judge 失败（在 hard 已通过的前提下）都使 case failed
+  const hardPassed = assertionResults.every((r) => r.passed);
+  const judgeFailed = judgeResult !== undefined && judgeResult.passed === false;
+  let status: EvalRunStatus;
+  if (isSkipped) {
+    status = "skipped";
+  } else if (runError) {
+    status = "error";
+  } else if (!hardPassed || judgeFailed) {
+    status = "failed";
+  } else {
+    status = "passed";
+  }
+
+  // 组装 trace（judge 完成后才 build，确保 judge 结果入 trace）
   const traceOptions: {
     caseId: string;
     title: string;
@@ -171,6 +214,7 @@ export async function runEvalCase(
     workspaceRoot?: string;
     assertions: EvalAssertionResult[];
     error?: EvalRunError;
+    judge?: EvalRunResult["judge"];
   } = {
     caseId: evalCase.id,
     title: evalCase.title,
@@ -180,6 +224,9 @@ export async function runEvalCase(
   };
   if (runError !== undefined) {
     traceOptions.error = runError;
+  }
+  if (judgeResult !== undefined) {
+    traceOptions.judge = judgeResult;
   }
   const trace = traceRecorder.buildTrace(traceOptions);
 
@@ -204,17 +251,7 @@ export async function runEvalCase(
   }
 
   // 13. 返回结果
-  const result: {
-    caseId: string;
-    title: string;
-    status: EvalRunStatus;
-    passed: boolean;
-    steps: typeof stepTraces;
-    runtimeEvents: typeof allRuntimeEvents;
-    assertions: typeof assertionResults;
-    tracePath?: string;
-    error?: EvalRunError;
-  } = {
+  const result: EvalRunResult = {
     caseId: evalCase.id,
     title: evalCase.title,
     status,
@@ -229,6 +266,10 @@ export async function runEvalCase(
   if (runError !== undefined) {
     result.error = runError;
   }
+  if (judgeResult !== undefined) {
+    result.judge = judgeResult;
+  }
+
   return result;
 }
 
