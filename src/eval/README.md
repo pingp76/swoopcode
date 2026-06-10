@@ -248,6 +248,53 @@ driver: {
 }
 ```
 
+## Live Regression
+
+Live regression 是比 smoke 更全面的真实 LLM 验证，覆盖核心工具的端到端能力。默认 **不运行**。
+
+### 启用条件
+
+```bash
+# 跑 live regression
+EVAL_LIVE_REGRESSION=1 npm run test:eval:live:regression
+```
+
+> **注意**：`test:eval:live`（smoke，2 个 case）和 `test:eval:live:regression`（regression，6 个 case）是两个**独立 suite**，互不依赖。`EVAL_LIVE=1` 只影响 smoke suite 的开关；`EVAL_LIVE_REGRESSION=1` 只影响 regression suite 的开关。跑 regression 时不需要设置 `EVAL_LIVE`。
+
+### 第一轮 case 列表（6 个）
+
+| Case ID | 场景 |
+|---------|------|
+| `live-core-read-structured-summary` | 读取结构化文件并基于内容回答 |
+| `live-core-write-report-with-sentinels` | 创建新文件并写入精确 sentinel 内容 |
+| `live-core-edit-existing-config` | 编辑已有文件并保留不相关内容 |
+| `live-core-bash-readonly-command` | 执行只读 bash 命令并报告输出 |
+| `live-core-permission-denied-write` | 权限被拒绝后不继续写入 |
+| `live-core-multi-turn-stateful-edit` | 多轮上下文共享：先观察再修改 |
+
+### 设计原则
+
+- 只使用 core tools（read/write/edit/editExact/bash），不依赖 TODO/Task/Memory/Skill/SubAgent/Async/Schedule
+- 每个 case 限制 `maxCalls`/`maxRounds`（通常 8-12），Vitest timeout 30-60s（multi-turn case 用 60s）
+- 断言以结构性为主，Judge 做开放式质量补充评价
+- 只使用临时 workspace，不留副作用
+
+### Judge 开关
+
+5 个 case 已内置 judge rubric，但 judge 默认关闭。额外启用：
+
+```bash
+EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 npm run test:eval:live:regression
+```
+
+这会额外产生 5 次 LLM judge 调用（bash case 无 judge），建议在发布前或主循环大改后开启。
+
+Judge 默认使用和 Agent **相同的模型**。如果想用不同模型（例如轻量模型降低成本），通过 `JUDGE_MODEL` 覆盖：
+
+```bash
+EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 JUDGE_MODEL=gpt-4o-mini npm run test:eval:live:regression
+```
+
 ## Judge 评估
 
 Judge 在 hard assertions 执行后，用另一个 LLM 对 case 做开放式质量评价。
@@ -291,10 +338,11 @@ Judge 输出 `EvalJudgeResult`：
 
 ### Judge JSON 解析鲁棒性
 
-Judge LLM 可能返回 markdown code block、额外文本或无效 JSON。解析器采用三层降级：
+Judge LLM 可能返回 markdown code block、额外文本或无效 JSON。解析器采用四层降级：
 1. 直接 `JSON.parse()`
 2. 正则提取 ` ```json ... ``` ` 代码块
-3. 返回 `judge_failed` 结果（不影响 hard result）
+3. 括号深度计数器 + 字符串引号跟踪提取嵌套 JSON
+4. 返回 `judge_failed` 结果（不影响 hard result）
 
 ## Suite Report
 
@@ -323,6 +371,15 @@ npx vitest run src/eval/cases/replay-suite.test.ts
 
 # Live smoke（需要 EVAL_LIVE=1 和 API key）
 npm run test:eval:live
+
+# Live regression（需要 EVAL_LIVE_REGRESSION=1）
+EVAL_LIVE_REGRESSION=1 npm run test:eval:live:regression
+
+# Live regression + Judge（额外启用 LLM judge 评价，增加 5 次 LLM 调用）
+EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 npm run test:eval:live:regression
+
+# 用不同模型做 judge（默认和 Agent 同模型）
+EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 JUDGE_MODEL=gpt-4o-mini npm run test:eval:live:regression
 
 # Judge suite（scripted judge，不依赖真实模型）
 npm run test:eval:judge
@@ -366,8 +423,10 @@ src/eval/
 │   ├── deterministic.test.ts     # Deterministic suite
 │   └── replay-suite.test.ts      # Replay suite
 ├── live/
-│   ├── live-llm.ts               # Live LLM wrapper
-│   └── live-suite.test.ts        # Live smoke suite
+│   ├── live-llm.ts                     # Live LLM wrapper
+│   ├── live-suite.test.ts              # Live smoke suite
+│   ├── live-regression-suite.test.ts   # Live regression suite（core tools）
+│   └── _driver-factory.ts              # Live suite 共享 driver + judge LLM 工厂
 ├── judge/
 │   ├── judge.ts                  # LLM judge 实现
 │   └── judge-suite.test.ts       # Judge 集成测试

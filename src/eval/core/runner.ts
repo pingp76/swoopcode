@@ -150,8 +150,9 @@ export async function runEvalCase(
   const stepAssertions = evalCase.steps.flatMap((step, idx) => {
     const stepId = step.id ?? `step_${idx}`;
     return (step.assertions ?? []).map((a) => {
-      // 使用运行时类型检查：只有带 stepId 属性的断言才需要绑定
-      if ("stepId" in a && a.stepId === undefined) {
+      // 如果断言没有 stepId 属性，或者 stepId 显式为 undefined，
+      // 则自动绑定到当前 step，避免误匹配到最后一步
+      if (!("stepId" in a) || a.stepId === undefined) {
         return { ...a, stepId };
       }
       return a;
@@ -341,9 +342,11 @@ function validateEvalCase(evalCase: EvalCase): void {
       }
     }
     if (plan.llm.kind === "live") {
-      if (process.env["EVAL_LIVE"] !== "1") {
+      const liveEnabled =
+        process.env["EVAL_LIVE"] === "1" || process.env["EVAL_LIVE_REGRESSION"] === "1";
+      if (!liveEnabled) {
         throw new Error(
-          `EvalCase ${evalCase.id}: live mode requires EVAL_LIVE=1 environment variable`,
+          `EvalCase ${evalCase.id}: live mode requires EVAL_LIVE=1 or EVAL_LIVE_REGRESSION=1 environment variable`,
         );
       }
     }

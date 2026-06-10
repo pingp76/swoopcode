@@ -13,6 +13,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 **已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD21：基座模型能力画像与 Agent Runtime Policy 抽象层**（Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager + ContextRanker + RepoClassifier + TaskIntentClassifier + 多维度评分）+ **PDD22 第一批：Eval Core + 当前项目 In-process Driver**（CodingAgentDriver 抽象、EvalCase/EvalStep/EvalAssertion 类型、临时 workspace、TraceRecorder、portable/instrumented 断言、ScriptedLLM、ScriptedTerminal、Fake Tool Registry、runEvalCase runner）
 + **PDD22 第二批：Deterministic Suite + Real Core Tools + CLI Driver**（真实 bash/read/write/edit/editExact 核心工具注册表、CLI 黑盒 driver、instrumented 断言补齐 toolNotCalled/toolArgsContain/allToolsSucceeded/permissionPromptShown、≥5 个 deterministic suite 用例、test:eval 脚本、README 文档）
 + **PDD22 第三批：Replay + Live Smoke + Judge/Report**（replay fixture 驱动、opt-in live smoke、LLM judge 含 prompt builder + 鲁棒 JSON parser、suite report 聚合含 JSON/Markdown 输出、replay/live/judge suite 测试、test:eval:live / test:eval:judge 脚本）
++ **PDD22 第四批：Live Regression — Core Tools 第一轮**（6 个核心工具回归 case：读结构化文件、写入 sentinel 报告、编辑保留不相关内容、只读 bash、权限拒绝、多轮上下文共享；`EVAL_LIVE_REGRESSION=1` 独立开关；`EVAL_JUDGE=1` 启用 LLM judge，`JUDGE_MODEL` 覆盖 judge 模型；`_driver-factory.ts` 共享 driver + judge LLM 工厂；runner.ts 修复 step assertion stepId 绑定 bug）
 
 ## 教学注释增强
 
@@ -154,8 +155,10 @@ src/
 │   │   ├── deterministic.test.ts     # Deterministic suite（≥5 个 core tool + CLI smoke case）
 │   │   └── replay-suite.test.ts      # Replay suite
 │   ├── live/
-│   │   ├── live-llm.ts               # Live LLM wrapper
-│   │   └── live-suite.test.ts        # Live smoke suite
+│   │   ├── live-llm.ts                     # Live LLM wrapper
+│   │   ├── live-suite.test.ts              # Live smoke suite（需 `EVAL_LIVE=1`）
+│   │   ├── live-regression-suite.test.ts   # Live regression suite（core tools，需 `EVAL_LIVE_REGRESSION=1`）
+│   │   └── _driver-factory.ts              # Live suite 共享 driver + judge LLM 工厂
 │   ├── judge/
 │   │   ├── judge.ts                  # LLM judge 实现
 │   │   └── judge-suite.test.ts       # Judge 集成测试
@@ -303,9 +306,10 @@ skills/
 - **ScriptedTerminal**：自动消耗 `permissionAnswers` 和 `questions` 队列，支持 `defaultPermissionAnswer` 默认值
 - **Fake Tool Registry**：第一批只支持 fake tools，不接入真实 bash/files；工具定义和 executor 由 case 注入，执行时发射标准化 tool_call/tool_result 事件
 - **断言执行器**：`runAssertions()` 遍历断言列表，返回结构化 `EvalAssertionResult`（passed + message + evidence）；instrumented 断言基于 `runtimeEvents` 中 source="agent" 的事件判断
-- **Judge 评估**：`runJudge()` 构建含 rubric + trace summary 的 prompt，调用独立 LLM 做开放式质量评价；输出 `EvalJudgeResult`（passed/score/summary/strengths/problems/evidence/needsHumanReview）；hard assertions 始终优先，judge 不覆盖 status
-- **Judge JSON 解析鲁棒性**：三层降级——直接 `JSON.parse()` → 正则提取 markdown code block → 返回 `judge_failed` fallback（score=0, passed=false, 不影响 hard result）
-- **Suite Report**：`runEvalSuite()` 顺序运行多个 case，聚合 `EvalSuiteReport`（version/total/passed/failed/skipped/mode/cases[]）；`writeJsonReport()` 输出机器可读 JSON，`writeMarkdownReport()` 输出人读 Markdown（分 Passed/Failed 章节）
+- **Judge 评估**：`runJudge()` 构建含 rubric + trace summary 的 prompt，调用独立 LLM 做开放式质量评价；输出 `EvalJudgeResult`（passed/score/summary/strengths/problems/evidence/needsHumanReview）；hard assertions 始终优先，judge 失败也导致 case `status = "failed"`
+- **Judge JSON 解析鲁棒性**：三层降级——直接 `JSON.parse()` → 正则提取 markdown code block → 括号深度计数器提取嵌套 JSON → 返回 `judge_failed` fallback（score=0, passed=false, 不影响 hard result）；`VALID_EVIDENCE_KINDS` Set 过滤非法 evidence kind
+- **Suite Report**：`runEvalSuite()` 顺序运行多个 case，聚合 `EvalSuiteReport`（version/total/passed/failed/skipped/mode/cases[]）；`writeJsonReport()` 输出机器可读 JSON，`writeMarkdownReport()` 输出人读 Markdown（分 Passed/Failed 章节）；passed case 含 judge 失败时附加 ` (judge failed)`
+- **Live Regression Suite**：6 个 core-tools-only case 覆盖真实 LLM 下的读/写/编辑/bash/权限/多轮能力；每个 case 限制 `maxCalls`/`maxRounds`，Vitest timeout 30-60s；启用开关 `EVAL_LIVE=1`（同时跑 smoke + regression）或 `EVAL_LIVE_REGRESSION=1`（仅 regression）；`EVAL_JUDGE=1` 启用 LLM judge 评价，`JUDGE_MODEL` 环境变量可覆盖 judge 模型（默认和 Agent 同模型）
 
 ### Agent 核心循环 (`agent.ts`)
 
@@ -706,7 +710,8 @@ skills/
 | `src/eval/cases/replay-suite.test.ts` | 2 | replay fixture 读取、caseId 校验、ScriptedLLM 路径复用 |
 | `src/eval/replay/replay-llm.test.ts`  | 4 | fixture version mismatch、caseId mismatch、文件不存在、JSON 解析失败 |
 | `src/eval/judge/judge-suite.test.ts`  | 6 | judge 正常评分通过、JSON 解析失败 fallback、hard assertions 失败时 judge 仍运行、rubric 传入、score 边界 |
-| `src/eval/live/live-suite.test.ts`    | 2 | live LLM wrapper 事件发射、maxCalls 限制（默认 skip，需 `EVAL_LIVE=1`） |
+| `src/eval/live/live-suite.test.ts`           | 2      | live LLM wrapper 事件发射、maxCalls 限制（默认 skip，需 `EVAL_LIVE=1`） |
+| `src/eval/live/live-regression-suite.test.ts` | 6 | 读结构化文件、写入 sentinel 报告、编辑保留内容、只读 bash、权限拒绝、多轮上下文共享（默认 skip，需 `EVAL_LIVE_REGRESSION=1`）；5 个 case 内置 judge rubric，`EVAL_JUDGE=1` 启用 |
 | `src/execution-policy.test.ts` | 12     | readonly/ci/workspace_write profile、命令白名单、资源边界                                                             |
 | `src/output-store.test.ts`     | 7      | output_id 生成、index 校验、分片读取、路径边界                                                                         |
 | `src/tools/output.test.ts`     | 4      | run_output_read 参数校验、分片读取、错误传播                                                                           |

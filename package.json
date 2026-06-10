@@ -15,6 +15,7 @@
     "test:coverage": "vitest run --coverage",
     "test:eval": "vitest run src/eval/cases/deterministic.test.ts",
     "test:eval:live": "vitest run src/eval/live/live-suite.test.ts",
+    "test:eval:live:regression": "vitest run src/eval/live/live-regression-suite.test.ts",
     "test:eval:judge": "vitest run src/eval/judge/judge-suite.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",

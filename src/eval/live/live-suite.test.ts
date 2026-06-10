@@ -8,19 +8,9 @@
  */
 
 import { describe, it, expect } from "vitest";
-import type { CodingAgentDriver } from "../core/driver.js";
 import type { EvalCase } from "../core/case-schema.js";
 import { runEvalCase } from "../core/runner.js";
-import { createLearnClaudeCodeInProcessDriver } from "../drivers/learn-claude-code/in-process-driver.js";
-
-async function createDriver(plan: EvalCase["driver"]): Promise<CodingAgentDriver> {
-  if (plan.kind === "learn-claude-code-in-process") {
-    return createLearnClaudeCodeInProcessDriver(
-      plan as Extract<EvalCase["driver"], { kind: "learn-claude-code-in-process" }>,
-    );
-  }
-  throw new Error(`Unsupported driver kind: ${(plan as unknown as Record<string, unknown>).kind}`);
-}
+import { createLiveDriver } from "./_driver-factory.js";
 
 const liveEnabled = process.env["EVAL_LIVE"] === "1";
 
@@ -47,7 +37,7 @@ suite("Live Smoke Suite", () => {
         ],
       };
 
-      const result = await runEvalCase(evalCase, createDriver);
+      const result = await runEvalCase(evalCase, createLiveDriver);
 
       // live case 只做结构性断言，不强制文本匹配（真实 LLM 输出不稳定）
       expect(result.status).toBe("passed");
@@ -84,7 +74,7 @@ suite("Live Smoke Suite", () => {
         ],
       };
 
-      const result = await runEvalCase(evalCase, createDriver);
+      const result = await runEvalCase(evalCase, createLiveDriver);
 
       expect(result.status).toBe("passed");
       expect(result.passed).toBe(true);
