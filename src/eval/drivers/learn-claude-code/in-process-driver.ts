@@ -216,6 +216,15 @@ export async function createLearnClaudeCodeInProcessDriver(
         if (fullOptions.seedMemories !== undefined) {
           runtimeOptions.seedMemories = fullOptions.seedMemories;
         }
+        const mcpServers = fullOptions.mcpServers ?? plan.mcpServers;
+        if (mcpServers !== undefined) {
+          runtimeOptions.mcpServers = mcpServers;
+        }
+        const mcpClientTimeoutMs =
+          fullOptions.mcpClientTimeoutMs ?? plan.mcpClientTimeoutMs;
+        if (mcpClientTimeoutMs !== undefined) {
+          runtimeOptions.mcpClientTimeoutMs = mcpClientTimeoutMs;
+        }
         if (fullOptions.startScheduleManager !== undefined) {
           runtimeOptions.startScheduleManager =
             fullOptions.startScheduleManager;

@@ -61,6 +61,7 @@ import { createTranscriptStore } from "../../../transcript.js";
 import type {
   AgentRuntimeEvent,
   EvalFullToolGroup,
+  EvalMcpServerPlan,
   EvalSeedMemory,
 } from "../../core/case-schema.js";
 import {
@@ -68,6 +69,11 @@ import {
   type AsyncRunManager,
 } from "../../../async-runs.js";
 import { wrapToolRegistryForTrace } from "./tool-trace.js";
+import {
+  combineToolRegistries,
+  createEvalMcpRuntime,
+  type EvalMcpRuntime,
+} from "./mcp-runtime.js";
 
 /** Full runtime 创建参数。 */
 export interface CreateFullEvalRuntimeOptions {
@@ -80,6 +86,8 @@ export interface CreateFullEvalRuntimeOptions {
   enabledTools?: EvalFullToolGroup[];
   seedSkills?: Record<string, string>;
   seedMemories?: Record<string, EvalSeedMemory>;
+  mcpServers?: EvalMcpServerPlan[];
+  mcpClientTimeoutMs?: number;
   permissionMode?: PermissionMode;
   startScheduleManager?: boolean;
 }
@@ -98,6 +106,7 @@ export interface FullEvalRuntime {
   outputStore: OutputStore;
   skillManager: SkillManager;
   memoryManager: MemoryManager;
+  mcpRuntime: EvalMcpRuntime | undefined;
   asyncRunManager: AsyncRunManager | undefined;
   scheduleManager: ScheduleManager | undefined;
   cleanup(options?: { keepAgentHome?: boolean }): Promise<void>;
@@ -113,6 +122,7 @@ const DEFAULT_FULL_TOOL_GROUPS: ReadonlySet<EvalFullToolGroup> = new Set([
   "async",
   "schedule",
   "output",
+  "mcp",
 ]);
 
 const VALID_SEEDED_SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -212,6 +222,7 @@ export async function createFullEvalRuntime(
 
   let asyncRunManager: AsyncRunManager | undefined;
   let scheduleManager: ScheduleManager | undefined;
+  let mcpRuntime: EvalMcpRuntime | undefined;
   const toolTraceOptions =
     options.getStepId === undefined
       ? undefined
@@ -303,6 +314,24 @@ export async function createFullEvalRuntime(
       ? createScheduleToolProvider(scheduleManager)
       : undefined;
 
+  if (
+    isEnabled(enabledGroups, "mcp") &&
+    options.mcpServers &&
+    options.mcpServers.length > 0
+  ) {
+    const mcpOptions: Parameters<typeof createEvalMcpRuntime>[0] = {
+      servers: options.mcpServers,
+      emitEvent: options.emitEvent,
+    };
+    if (options.getStepId !== undefined) {
+      mcpOptions.getStepId = options.getStepId;
+    }
+    if (options.mcpClientTimeoutMs !== undefined) {
+      mcpOptions.clientTimeoutMs = options.mcpClientTimeoutMs;
+    }
+    mcpRuntime = await createEvalMcpRuntime(mcpOptions);
+  }
+
   const subagentProvider = isEnabled(enabledGroups, "subagent")
     ? createSubagentToolProvider({
         llm: options.llm,
@@ -335,8 +364,12 @@ export async function createFullEvalRuntime(
     scheduleProvider,
     outputProvider,
   );
+  const combinedTools =
+    mcpRuntime === undefined
+      ? rawTools
+      : combineToolRegistries([rawTools, mcpRuntime.tools]);
   const tools = wrapToolRegistryForTrace(
-    rawTools,
+    combinedTools,
     options.emitEvent,
     toolTraceOptions,
   );
@@ -366,10 +399,12 @@ export async function createFullEvalRuntime(
     outputStore,
     skillManager,
     memoryManager,
+    mcpRuntime,
     asyncRunManager,
     scheduleManager,
     async cleanup(cleanupOptions) {
       scheduleManager?.stop();
+      await mcpRuntime?.cleanup();
       const abandonedRuns = asyncRunManager?.shutdown?.(
         "Full eval runtime cleanup",
       );

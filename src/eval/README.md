@@ -352,6 +352,58 @@ EVAL_LIVE_FULL=1 EVAL_JUDGE=1 npm run test:eval:live:full
 
 Release 组 4 个 case 均内置 judge rubric。开启后会额外产生 4 次 judge LLM 调用。
 
+## MCP Harness Prototype
+
+MCP suite 使用 eval 内置 fixture server，覆盖 MCP lifecycle、tool、resource、error、timeout 与 server crash trace。fixture server 遵循 MCP 2025-06-18 的最小 JSON-RPC 子集；当前 transport 由 driver 以 in-process 方式模拟，case schema 保留 `transport: "stdio" | "http"` 字段，便于未来替换为真实 MCP client。in-process driver 支持顶层 `driver.mcpServers`，也兼容 `tools.full.mcpServers`。
+
+> 当前项目尚未实现生产级 MCP runtime / 第三方 MCP server 接入。下面这些 MCP suite 现在全部 `describe.skip`，只作为 harness 草案保留，不作为真实 MCP 功能验收。
+
+### 确定性 MCP
+
+```bash
+npx vitest run src/eval/mcp/fixture-server.test.ts
+npx vitest run src/eval/mcp/mcp-suite.test.ts
+```
+
+### Live MCP（当前无条件 skip）
+
+```bash
+EVAL_LIVE_MCP=1 npm run test:eval:live:mcp
+EVAL_LIVE_MCP=1 EVAL_JUDGE=1 npm run test:eval:live:mcp
+```
+
+Live MCP case 目前也无条件 skip。等真实 MCP runtime 落地后，再恢复 `EVAL_LIVE_MCP=1` 的 opt-in 运行。
+
+## Agent Team Harness Prototype
+
+Team suite 使用 `learn-claude-code-team` driver。第一版是顺序 supervisor 拓扑：planner、implementer、reviewer、researcher 等成员依次运行，每个成员都是一个真实 Agent 实例，有独立 history 和受限工具集，共享临时 workspace 与同一个 LLM client。
+
+当前 Team member 工具组支持 `core`、`read`、`bash`、`todo`、`mcp`。写入/编辑工具成功后 driver 会发射 `artifact_produced` 事件，`teamArtifactContains` 会同时检查该事件和 workspace 文件内容。
+
+> 当前项目尚未实现生产级 Agent Team runtime。下面这些 Team suite 现在全部 `describe.skip`，只作为 harness 草案保留，不作为真实 Team 功能验收。
+
+### 确定性 Team
+
+```bash
+npx vitest run src/eval/team/team-assertions.test.ts
+npx vitest run src/eval/team/team-suite.test.ts
+```
+
+### Live Team（当前无条件 skip）
+
+```bash
+EVAL_LIVE_TEAM=1 npm run test:eval:live:team
+EVAL_LIVE_TEAM=1 EVAL_JUDGE=1 npm run test:eval:live:team
+```
+
+### Live Team + MCP（当前无条件 skip）
+
+```bash
+EVAL_LIVE_TEAM=1 EVAL_LIVE_MCP=1 npm run test:eval:live:team:mcp
+```
+
+Team+MCP mixed case 目前也无条件 skip。等真实 Team/MCP runtime 落地后，再恢复显式 opt-in 运行。
+
 ## Judge 评估
 
 Judge 在 hard assertions 执行后，用另一个 LLM 对 case 做开放式质量评价。
@@ -454,6 +506,15 @@ EVAL_LIVE_FULL=1 npm run test:eval:live:full
 # Live full regression + Judge（额外启用 LLM judge 评价，增加 4 次 LLM 调用）
 EVAL_LIVE_FULL=1 EVAL_JUDGE=1 npm run test:eval:live:full
 
+# Live MCP（当前无条件 skip，待真实 MCP runtime 后恢复）
+EVAL_LIVE_MCP=1 npm run test:eval:live:mcp
+
+# Live Team（当前无条件 skip，待真实 Agent Team runtime 后恢复）
+EVAL_LIVE_TEAM=1 npm run test:eval:live:team
+
+# Live Team + MCP mixed（当前无条件 skip）
+EVAL_LIVE_TEAM=1 EVAL_LIVE_MCP=1 npm run test:eval:live:team:mcp
+
 # 用不同模型做 judge（默认和 Agent 同模型）
 EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 JUDGE_MODEL=gpt-4o-mini npm run test:eval:live:regression
 
@@ -470,6 +531,9 @@ npx vitest run src/eval/
 - **`workspaceDiffContains`**：workspace diff 断言暂未实现
 - **复杂 CLI 交互**：REPL 类 CLI 的 readyPattern / prompt 匹配属于后续增强
 - **并行 suite**：`runEvalSuite` 当前顺序执行，未来可并行化
+- **MCP transport**：当前 MCP fixture 以 in-process client/server 模拟 transport，尚未接真实第三方 MCP server
+- **Team 并发**：Team driver 第一版按成员顺序执行，不做并行调度或分布式 team
+- **MCP/Team 测试状态**：MCP 与 Agent Team 相关 suite 当前全部 `describe.skip`，避免误读为真实功能已实现
 
 ## 目录结构
 
@@ -489,6 +553,8 @@ src/eval/
 │   │   ├── core-tool-runtime.ts       # 真实核心工具注册表
 │   │   ├── full-tool-runtime.ts       # 临时 agentHome 下的完整工具运行时
 │   │   ├── full-tool-runtime.test.ts  # full runtime 确定性测试
+│   │   ├── mcp-runtime.ts             # MCP fixture adapter
+│   │   ├── team-driver.ts             # 顺序 supervisor Team driver
 │   │   ├── scripted-llm.ts            # Scripted LLM
 │   │   ├── scripted-terminal.ts       # Scripted Terminal
 │   │   └── tool-trace.ts              # 工具追踪包装器
@@ -505,7 +571,20 @@ src/eval/
 │   ├── live-llm.ts                     # Live LLM wrapper
 │   ├── live-suite.test.ts              # Live smoke suite
 │   ├── live-regression-suite.test.ts   # Live regression suite（core tools）
-│   └── live-full-suite.test.ts         # Live full-system regression suite
+│   ├── live-full-suite.test.ts         # Live full-system regression suite
+│   ├── live-mcp-suite.test.ts          # Live MCP suite
+│   └── live-team-suite.test.ts         # Live Team / Team+MCP suite
+├── mcp/
+│   ├── fixture-server.ts          # MCP JSON-RPC fixture server
+│   ├── fixture-server.test.ts     # MCP fixture protocol tests
+│   ├── mcp-trace.ts               # MCP trace helper
+│   └── mcp-suite.test.ts          # MCP deterministic harness tests
+├── team/
+│   ├── team-schema.ts             # Team judge input type entry
+│   ├── team-trace.ts              # Team trace summary helper
+│   ├── team-assertions.ts         # Team event helper utilities
+│   ├── team-assertions.test.ts    # Team helper tests
+│   └── team-suite.test.ts         # Team deterministic harness tests
 ├── judge/
 │   ├── judge.ts                  # LLM judge 实现
 │   └── judge-suite.test.ts       # Judge 集成测试

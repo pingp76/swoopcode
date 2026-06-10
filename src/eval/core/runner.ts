@@ -314,7 +314,7 @@ export async function runEvalCase(
  * 4. driver 必须存在，并且 kind 非空
  * 5. learn-claude-code-in-process driver 的 scripted 模式必须提供 scriptedResponses
  * 6. replay 模式必须提供 replayFile
- * 7. live 模式必须显式 opt-in（EVAL_LIVE/EVAL_LIVE_REGRESSION/EVAL_LIVE_FULL）
+ * 7. live 模式必须显式 opt-in（EVAL_LIVE/EVAL_LIVE_REGRESSION/EVAL_LIVE_FULL/EVAL_LIVE_MCP/EVAL_LIVE_TEAM）
  * 8. workspace.initialFiles 路径必须是相对路径，不能包含 .. 逃逸
  * 9. fake tool 名称不能重复
  * 10. assertion 中引用的 stepId 必须存在（含自动生成的 step_${index}）
@@ -378,12 +378,40 @@ function validateEvalCase(evalCase: EvalCase): void {
       const liveEnabled =
         process.env["EVAL_LIVE"] === "1" ||
         process.env["EVAL_LIVE_REGRESSION"] === "1" ||
-        process.env["EVAL_LIVE_FULL"] === "1";
+        process.env["EVAL_LIVE_FULL"] === "1" ||
+        process.env["EVAL_LIVE_MCP"] === "1" ||
+        process.env["EVAL_LIVE_TEAM"] === "1";
       if (!liveEnabled) {
         throw new Error(
-          `EvalCase ${evalCase.id}: live mode requires EVAL_LIVE=1, EVAL_LIVE_REGRESSION=1, or EVAL_LIVE_FULL=1 environment variable`,
+          `EvalCase ${evalCase.id}: live mode requires EVAL_LIVE=1, EVAL_LIVE_REGRESSION=1, EVAL_LIVE_FULL=1, EVAL_LIVE_MCP=1, or EVAL_LIVE_TEAM=1 environment variable`,
         );
       }
+    }
+  }
+
+  if (evalCase.driver.kind === "learn-claude-code-team") {
+    const plan = evalCase.driver as Extract<
+      EvalCase["driver"],
+      { kind: "learn-claude-code-team" }
+    >;
+    if (plan.llm.kind === "live") {
+      const liveEnabled =
+        process.env["EVAL_LIVE_TEAM"] === "1" ||
+        process.env["EVAL_LIVE"] === "1";
+      if (!liveEnabled) {
+        throw new Error(
+          `EvalCase ${evalCase.id}: team live mode requires EVAL_LIVE_TEAM=1 or EVAL_LIVE=1 environment variable`,
+        );
+      }
+    }
+    const memberIds = new Set<string>();
+    for (const member of plan.members) {
+      if (memberIds.has(member.id)) {
+        throw new Error(
+          `EvalCase ${evalCase.id}: duplicate team member id "${member.id}"`,
+        );
+      }
+      memberIds.add(member.id);
     }
   }
 

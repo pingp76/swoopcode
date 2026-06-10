@@ -19,6 +19,7 @@ export type EvalCaseMode = "scripted" | "replay" | "live";
 /** Driver 计划：被测 Agent 的唯一入口 */
 export type EvalDriverPlan =
   | LearnClaudeCodeInProcessDriverPlan
+  | LearnClaudeCodeTeamDriverPlan
   | CliDriverPlan
   | CustomDriverPlan;
 
@@ -28,8 +29,37 @@ export interface LearnClaudeCodeInProcessDriverPlan {
   llm: EvalLLMPlan;
   terminal?: EvalTerminalPlan;
   tools?: EvalToolPlan;
+  mcpServers?: EvalMcpServerPlan[];
+  mcpClientTimeoutMs?: number;
   maxRounds?: number;
 }
+
+/** 当前项目 Agent Team driver 计划 */
+export interface LearnClaudeCodeTeamDriverPlan {
+  kind: "learn-claude-code-team";
+  llm: EvalLLMPlan;
+  terminal?: EvalTerminalPlan;
+  workspace: "eval";
+  agentHome: "temp";
+  topology: "supervisor";
+  members: EvalTeamMemberPlan[];
+  maxAgents?: number;
+  maxTeamSteps?: number;
+  tools?: EvalToolPlan;
+  mcpServers?: EvalMcpServerPlan[];
+}
+
+/** Team 成员计划：eval harness 按角色顺序启动真实 Agent。 */
+export interface EvalTeamMemberPlan {
+  id: string;
+  role: string;
+  tools: EvalTeamToolGroup[];
+  maxRounds?: number;
+  failAfterFirstToolCall?: boolean;
+}
+
+/** Team 成员允许使用的工具能力组。 */
+export type EvalTeamToolGroup = "core" | "read" | "bash" | "todo" | "mcp";
 
 /** CLI 黑盒 driver 计划（第二批实现） */
 export interface CliDriverPlan {
@@ -157,7 +187,8 @@ export type EvalFullToolGroup =
   | "subagent"
   | "async"
   | "schedule"
-  | "output";
+  | "output"
+  | "mcp";
 
 /** full-tools eval 的预置 memory 内容 */
 export interface EvalSeedMemory {
@@ -172,8 +203,51 @@ export interface EvalFullToolOptions {
   agentHome?: "temp";
   seedSkills?: Record<string, string>;
   seedMemories?: Record<string, EvalSeedMemory>;
+  mcpServers?: EvalMcpServerPlan[];
+  mcpClientTimeoutMs?: number;
   permissionMode?: "auto" | "default" | "plan";
   startScheduleManager?: boolean;
+}
+
+// ============================================================================
+// MCP Fixture 计划
+// ============================================================================
+
+/** Eval 内置 MCP fixture server 计划。 */
+export interface EvalMcpServerPlan {
+  id: string;
+  kind: "fixture";
+  transport: "stdio" | "http";
+  capabilities?: {
+    tools?: boolean;
+    resources?: boolean;
+    prompts?: boolean;
+  };
+  tools?: EvalMcpFixtureTool[];
+  resources?: EvalMcpFixtureResource[];
+  behavior?: {
+    delayMs?: number;
+    crashAfterRequest?: string;
+    failInitialize?: boolean;
+  };
+}
+
+/** MCP fixture tool 定义与固定返回。 */
+export interface EvalMcpFixtureTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  result:
+    | { contentText: string }
+    | { errorCode: number; errorMessage: string; data?: unknown };
+}
+
+/** MCP fixture resource 定义。 */
+export interface EvalMcpFixtureResource {
+  uri: string;
+  name: string;
+  mimeType?: string;
+  text: string;
 }
 
 // ============================================================================
@@ -316,6 +390,22 @@ export type EvalAssertion =
   | AllToolsSucceededAssertion
   | TranscriptEventTypesAssertion
   | PermissionPromptShownAssertion
+  | McpServerStartedAssertion
+  | McpServerStoppedAssertion
+  | McpToolListedAssertion
+  | McpToolCalledAssertion
+  | McpToolResultContainsAssertion
+  | McpResourceReadAssertion
+  | McpErrorCodeAssertion
+  | TeamAgentSpawnedAssertion
+  | TeamRoleUsedAssertion
+  | TeamHandoffOccurredAssertion
+  | TeamAgentToolCalledAssertion
+  | TeamAgentToolNotCalledAssertion
+  | TeamAgentFailedAssertion
+  | TeamArtifactContainsAssertion
+  | TeamAllAgentsCompletedAssertion
+  | TeamNoUnauthorizedWritesAssertion
   | CustomAssertion;
 
 /** 最终输出包含指定文本 */
@@ -451,6 +541,111 @@ export interface PermissionPromptShownAssertion {
   kind: "permissionPromptShown";
 }
 
+/** MCP server 已启动 */
+export interface McpServerStartedAssertion {
+  kind: "mcpServerStarted";
+  serverId: string;
+}
+
+/** MCP server 已停止 */
+export interface McpServerStoppedAssertion {
+  kind: "mcpServerStopped";
+  serverId: string;
+}
+
+/** MCP tool 已通过 tools/list 暴露 */
+export interface McpToolListedAssertion {
+  kind: "mcpToolListed";
+  serverId: string;
+  toolName: string;
+}
+
+/** MCP tool 已被调用 */
+export interface McpToolCalledAssertion {
+  kind: "mcpToolCalled";
+  serverId: string;
+  toolName: string;
+}
+
+/** MCP tool 返回内容包含指定文本 */
+export interface McpToolResultContainsAssertion {
+  kind: "mcpToolResultContains";
+  serverId: string;
+  toolName: string;
+  text: string;
+}
+
+/** MCP resource 已被读取 */
+export interface McpResourceReadAssertion {
+  kind: "mcpResourceRead";
+  serverId: string;
+  uri: string;
+}
+
+/** MCP error code 已出现 */
+export interface McpErrorCodeAssertion {
+  kind: "mcpErrorCode";
+  serverId: string;
+  code: number;
+}
+
+/** Team 成员已启动 */
+export interface TeamAgentSpawnedAssertion {
+  kind: "teamAgentSpawned";
+  agentId: string;
+}
+
+/** Team 某个角色已被使用 */
+export interface TeamRoleUsedAssertion {
+  kind: "teamRoleUsed";
+  role: string;
+}
+
+/** Team 发生指定 handoff */
+export interface TeamHandoffOccurredAssertion {
+  kind: "teamHandoffOccurred";
+  from: string;
+  to: string;
+}
+
+/** Team 指定成员调用过某个工具 */
+export interface TeamAgentToolCalledAssertion {
+  kind: "teamAgentToolCalled";
+  agentId: string;
+  toolName: string;
+}
+
+/** Team 指定成员未调用某个工具 */
+export interface TeamAgentToolNotCalledAssertion {
+  kind: "teamAgentToolNotCalled";
+  agentId: string;
+  toolName: string;
+}
+
+/** Team 指定成员失败 */
+export interface TeamAgentFailedAssertion {
+  kind: "teamAgentFailed";
+  agentId: string;
+}
+
+/** Team 产物包含指定文本 */
+export interface TeamArtifactContainsAssertion {
+  kind: "teamArtifactContains";
+  path: string;
+  text: string;
+}
+
+/** Team 所有成员都完成 */
+export interface TeamAllAgentsCompletedAssertion {
+  kind: "teamAllAgentsCompleted";
+}
+
+/** Team 未出现未授权写入 */
+export interface TeamNoUnauthorizedWritesAssertion {
+  kind: "teamNoUnauthorizedWrites";
+  allowedRoles?: string[];
+}
+
 /** 自定义断言（通过函数实现） */
 export interface CustomAssertion {
   kind: "custom";
@@ -478,6 +673,8 @@ export type AgentRuntimeEvent =
   | PermissionRuntimeEvent
   | LogRuntimeEvent
   | RuntimePathEvent
+  | McpRuntimeEvent
+  | TeamRuntimeEvent
   | RawRuntimeEvent
   | DriverErrorEvent;
 
@@ -547,6 +744,47 @@ export interface RuntimePathEvent extends BaseRuntimeEvent {
   source: "driver";
   label: "workspaceRoot" | "agentHome";
   path: string;
+}
+
+/** MCP fixture/client 运行时事件 */
+export interface McpRuntimeEvent extends BaseRuntimeEvent {
+  kind:
+    | "mcp_server_start"
+    | "mcp_initialize"
+    | "mcp_tools_list"
+    | "mcp_tool_call"
+    | "mcp_tool_result"
+    | "mcp_resource_read"
+    | "mcp_error"
+    | "mcp_server_stop";
+  source: "driver";
+  serverId: string;
+  toolName?: string;
+  resourceUri?: string;
+  errorCode?: number;
+  message?: string;
+}
+
+/** Agent Team 运行时事件 */
+export interface TeamRuntimeEvent extends BaseRuntimeEvent {
+  kind:
+    | "team_start"
+    | "agent_spawned"
+    | "agent_message"
+    | "agent_tool_call"
+    | "handoff"
+    | "artifact_produced"
+    | "agent_completed"
+    | "agent_failed"
+    | "team_completed";
+  source: "driver";
+  teamId: string;
+  agentId?: string;
+  role?: string;
+  targetAgentId?: string;
+  toolName?: string;
+  artifactPath?: string;
+  textPreview?: string;
 }
 
 /** 原始运行时事件（扩展预留） */

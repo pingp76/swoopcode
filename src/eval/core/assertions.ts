@@ -20,6 +20,8 @@ import type {
   EvalAssertionContext,
   AgentRuntimeEvent,
   ToolRuntimeEvent,
+  McpRuntimeEvent,
+  TeamRuntimeEvent,
   EvalStepTrace,
 } from "./case-schema.js";
 
@@ -100,6 +102,38 @@ async function runSingleAssertion(
       return runTranscriptEventTypes(assertion, ctx);
     case "permissionPromptShown":
       return runPermissionPromptShown(assertion, ctx);
+    case "mcpServerStarted":
+      return runMcpServerStarted(assertion, ctx);
+    case "mcpServerStopped":
+      return runMcpServerStopped(assertion, ctx);
+    case "mcpToolListed":
+      return runMcpToolListed(assertion, ctx);
+    case "mcpToolCalled":
+      return runMcpToolCalled(assertion, ctx);
+    case "mcpToolResultContains":
+      return runMcpToolResultContains(assertion, ctx);
+    case "mcpResourceRead":
+      return runMcpResourceRead(assertion, ctx);
+    case "mcpErrorCode":
+      return runMcpErrorCode(assertion, ctx);
+    case "teamAgentSpawned":
+      return runTeamAgentSpawned(assertion, ctx);
+    case "teamRoleUsed":
+      return runTeamRoleUsed(assertion, ctx);
+    case "teamHandoffOccurred":
+      return runTeamHandoffOccurred(assertion, ctx);
+    case "teamAgentToolCalled":
+      return runTeamAgentToolCalled(assertion, ctx);
+    case "teamAgentToolNotCalled":
+      return runTeamAgentToolNotCalled(assertion, ctx);
+    case "teamAgentFailed":
+      return runTeamAgentFailed(assertion, ctx);
+    case "teamArtifactContains":
+      return await runTeamArtifactContains(assertion, ctx);
+    case "teamAllAgentsCompleted":
+      return runTeamAllAgentsCompleted(assertion, ctx);
+    case "teamNoUnauthorizedWrites":
+      return runTeamNoUnauthorizedWrites(assertion, ctx);
     case "workspaceDiffContains":
       return runWorkspaceDiffContains(assertion, ctx);
     case "custom":
@@ -547,6 +581,335 @@ function runPermissionPromptShown(
   };
 }
 
+function runMcpServerStarted(
+  assertion: { serverId: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findMcpEvents(ctx.runtimeEvents, "mcp_server_start").filter(
+    (event) => event.serverId === assertion.serverId,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "mcpServerStarted",
+    passed,
+    message: passed
+      ? `MCP server "${assertion.serverId}" started`
+      : `MCP server "${assertion.serverId}" did not start`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runMcpServerStopped(
+  assertion: { serverId: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findMcpEvents(ctx.runtimeEvents, "mcp_server_stop").filter(
+    (event) => event.serverId === assertion.serverId,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "mcpServerStopped",
+    passed,
+    message: passed
+      ? `MCP server "${assertion.serverId}" stopped`
+      : `MCP server "${assertion.serverId}" did not stop`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runMcpToolListed(
+  assertion: { serverId: string; toolName: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findMcpEvents(ctx.runtimeEvents, "mcp_tools_list").filter(
+    (event) =>
+      event.serverId === assertion.serverId &&
+      event.toolName === assertion.toolName,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "mcpToolListed",
+    passed,
+    message: passed
+      ? `MCP tool "${assertion.toolName}" was listed by "${assertion.serverId}"`
+      : `MCP tool "${assertion.toolName}" was not listed by "${assertion.serverId}"`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runMcpToolCalled(
+  assertion: { serverId: string; toolName: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findMcpEvents(ctx.runtimeEvents, "mcp_tool_call").filter(
+    (event) =>
+      event.serverId === assertion.serverId &&
+      event.toolName === assertion.toolName,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "mcpToolCalled",
+    passed,
+    message: passed
+      ? `MCP tool "${assertion.toolName}" was called on "${assertion.serverId}"`
+      : `MCP tool "${assertion.toolName}" was not called on "${assertion.serverId}"`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runMcpToolResultContains(
+  assertion: { serverId: string; toolName: string; text: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findMcpEvents(ctx.runtimeEvents, "mcp_tool_result").filter(
+    (event) =>
+      event.serverId === assertion.serverId &&
+      event.toolName === assertion.toolName &&
+      (event.message ?? "").includes(assertion.text),
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "mcpToolResultContains",
+    passed,
+    message: passed
+      ? `MCP tool "${assertion.toolName}" result contains "${assertion.text}"`
+      : `MCP tool "${assertion.toolName}" result does not contain "${assertion.text}"`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runMcpResourceRead(
+  assertion: { serverId: string; uri: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findMcpEvents(ctx.runtimeEvents, "mcp_resource_read").filter(
+    (event) =>
+      event.serverId === assertion.serverId &&
+      event.resourceUri === assertion.uri,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "mcpResourceRead",
+    passed,
+    message: passed
+      ? `MCP resource "${assertion.uri}" was read from "${assertion.serverId}"`
+      : `MCP resource "${assertion.uri}" was not read from "${assertion.serverId}"`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runMcpErrorCode(
+  assertion: { serverId: string; code: number },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findMcpEvents(ctx.runtimeEvents, "mcp_error").filter(
+    (event) =>
+      event.serverId === assertion.serverId &&
+      event.errorCode === assertion.code,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "mcpErrorCode",
+    passed,
+    message: passed
+      ? `MCP error code ${assertion.code} observed on "${assertion.serverId}"`
+      : `MCP error code ${assertion.code} was not observed on "${assertion.serverId}"`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runTeamAgentSpawned(
+  assertion: { agentId: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findTeamEvents(ctx.runtimeEvents, "agent_spawned").filter(
+    (event) => event.agentId === assertion.agentId,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "teamAgentSpawned",
+    passed,
+    message: passed
+      ? `Team agent "${assertion.agentId}" spawned`
+      : `Team agent "${assertion.agentId}" did not spawn`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runTeamRoleUsed(
+  assertion: { role: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findTeamEvents(ctx.runtimeEvents).filter(
+    (event) => event.role === assertion.role,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "teamRoleUsed",
+    passed,
+    message: passed
+      ? `Team role "${assertion.role}" was used`
+      : `Team role "${assertion.role}" was not used`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runTeamHandoffOccurred(
+  assertion: { from: string; to: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findTeamEvents(ctx.runtimeEvents, "handoff").filter(
+    (event) =>
+      event.agentId === assertion.from && event.targetAgentId === assertion.to,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "teamHandoffOccurred",
+    passed,
+    message: passed
+      ? `Team handoff occurred from "${assertion.from}" to "${assertion.to}"`
+      : `Team handoff did not occur from "${assertion.from}" to "${assertion.to}"`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runTeamAgentToolCalled(
+  assertion: { agentId: string; toolName: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findTeamEvents(ctx.runtimeEvents, "agent_tool_call").filter(
+    (event) =>
+      event.agentId === assertion.agentId &&
+      event.toolName === assertion.toolName,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "teamAgentToolCalled",
+    passed,
+    message: passed
+      ? `Team agent "${assertion.agentId}" called "${assertion.toolName}"`
+      : `Team agent "${assertion.agentId}" did not call "${assertion.toolName}"`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runTeamAgentToolNotCalled(
+  assertion: { agentId: string; toolName: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findTeamEvents(ctx.runtimeEvents, "agent_tool_call").filter(
+    (event) =>
+      event.agentId === assertion.agentId &&
+      event.toolName === assertion.toolName,
+  );
+  const passed = matches.length === 0;
+  return {
+    kind: "teamAgentToolNotCalled",
+    passed,
+    message: passed
+      ? `Team agent "${assertion.agentId}" did not call "${assertion.toolName}"`
+      : `Team agent "${assertion.agentId}" called "${assertion.toolName}" ${matches.length} time(s)`,
+    evidence: { count: matches.length },
+  };
+}
+
+function runTeamAgentFailed(
+  assertion: { agentId: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matches = findTeamEvents(ctx.runtimeEvents, "agent_failed").filter(
+    (event) => event.agentId === assertion.agentId,
+  );
+  const passed = matches.length > 0;
+  return {
+    kind: "teamAgentFailed",
+    passed,
+    message: passed
+      ? `Team agent "${assertion.agentId}" failed`
+      : `Team agent "${assertion.agentId}" did not fail`,
+    evidence: { count: matches.length },
+  };
+}
+
+async function runTeamArtifactContains(
+  assertion: { path: string; text: string },
+  ctx: EvalAssertionContext,
+): Promise<EvalAssertionResult> {
+  const artifactEvents = findTeamEvents(
+    ctx.runtimeEvents,
+    "artifact_produced",
+  ).filter((event) => event.artifactPath === assertion.path);
+  const fileResult = await runFileContains(assertion, ctx);
+  const passed = artifactEvents.length > 0 && fileResult.passed;
+  return {
+    ...fileResult,
+    kind: "teamArtifactContains",
+    passed,
+    message: passed
+      ? `Team artifact ${assertion.path} was produced and contains "${assertion.text}"`
+      : `Team artifact ${assertion.path} missing artifact event or does not contain "${assertion.text}"`,
+    evidence: {
+      artifactEvents: artifactEvents.length,
+      fileEvidence: fileResult.evidence,
+    },
+  };
+}
+
+function runTeamAllAgentsCompleted(
+  _assertion: unknown,
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const spawned = findTeamEvents(ctx.runtimeEvents, "agent_spawned")
+    .map((event) => event.agentId)
+    .filter((agentId): agentId is string => agentId !== undefined);
+  const completed = new Set(
+    findTeamEvents(ctx.runtimeEvents, "agent_completed")
+      .map((event) => event.agentId)
+      .filter((agentId): agentId is string => agentId !== undefined),
+  );
+  const failed = findTeamEvents(ctx.runtimeEvents, "agent_failed")
+    .map((event) => event.agentId)
+    .filter((agentId): agentId is string => agentId !== undefined);
+  const missing = spawned.filter((agentId) => !completed.has(agentId));
+  const passed =
+    spawned.length > 0 && missing.length === 0 && failed.length === 0;
+  return {
+    kind: "teamAllAgentsCompleted",
+    passed,
+    message: passed
+      ? "All team agents completed"
+      : `Team completion mismatch. Missing: ${missing.join(", ") || "none"}; failed: ${failed.join(", ") || "none"}`,
+    evidence: { spawned, missing, failed },
+  };
+}
+
+function runTeamNoUnauthorizedWrites(
+  assertion: { allowedRoles?: string[] },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const writeTools = new Set(["run_write", "run_edit", "run_edit_exact"]);
+  const allowedRoles = new Set(assertion.allowedRoles ?? ["implementer"]);
+  const unauthorized = findTeamEvents(ctx.runtimeEvents, "agent_tool_call")
+    .filter((event) => writeTools.has(event.toolName ?? ""))
+    .filter((event) => !allowedRoles.has(event.role ?? ""))
+    .map((event) => ({
+      agentId: event.agentId,
+      role: event.role,
+      toolName: event.toolName,
+    }));
+  const passed = unauthorized.length === 0;
+  return {
+    kind: "teamNoUnauthorizedWrites",
+    passed,
+    message: passed
+      ? "No unauthorized team writes detected"
+      : `Unauthorized team writes detected: ${unauthorized
+          .map((event) => `${event.agentId ?? "unknown"}:${event.toolName}`)
+          .join(", ")}`,
+    evidence: { unauthorized },
+  };
+}
+
 function runNoToolErrors(
   _assertion: unknown,
   ctx: EvalAssertionContext,
@@ -672,4 +1035,37 @@ function stringifyResult(result: unknown): string {
   } catch {
     return String(result);
   }
+}
+
+function findMcpEvents(
+  events: AgentRuntimeEvent[],
+  kind?: McpRuntimeEvent["kind"],
+): McpRuntimeEvent[] {
+  return events.filter(
+    (event): event is McpRuntimeEvent =>
+      event.kind.startsWith("mcp_") &&
+      (kind === undefined || event.kind === kind),
+  );
+}
+
+function findTeamEvents(
+  events: AgentRuntimeEvent[],
+  kind?: TeamRuntimeEvent["kind"],
+): TeamRuntimeEvent[] {
+  const teamKinds = new Set<TeamRuntimeEvent["kind"]>([
+    "team_start",
+    "agent_spawned",
+    "agent_message",
+    "agent_tool_call",
+    "handoff",
+    "artifact_produced",
+    "agent_completed",
+    "agent_failed",
+    "team_completed",
+  ]);
+  return events.filter(
+    (event): event is TeamRuntimeEvent =>
+      teamKinds.has(event.kind as TeamRuntimeEvent["kind"]) &&
+      (kind === undefined || event.kind === kind),
+  );
 }
