@@ -11,9 +11,15 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import type { LLMClient } from "../llm.js";
 import type { CodingAgentDriver } from "./core/driver.js";
-import type { AgentRuntimeEvent, EvalCase } from "./core/case-schema.js";
+import type {
+  AgentRuntimeEvent,
+  EvalCase,
+  RuntimePathEvent,
+} from "./core/case-schema.js";
 import { runEvalCase } from "./core/runner.js";
 import { createLearnClaudeCodeInProcessDriver } from "./drivers/learn-claude-code/in-process-driver.js";
 
@@ -65,13 +71,20 @@ function createFakeDriver(scriptedFinalOutputs: string[]): CodingAgentDriver {
 // Driver 工厂
 // ---------------------------------------------------------------------------
 
-async function createDriver(plan: EvalCase["driver"]): Promise<CodingAgentDriver> {
+async function createDriver(
+  plan: EvalCase["driver"],
+): Promise<CodingAgentDriver> {
   if (plan.kind === "learn-claude-code-in-process") {
     return createLearnClaudeCodeInProcessDriver(
-      plan as Extract<EvalCase["driver"], { kind: "learn-claude-code-in-process" }>,
+      plan as Extract<
+        EvalCase["driver"],
+        { kind: "learn-claude-code-in-process" }
+      >,
     );
   }
-  throw new Error(`Unsupported driver kind: ${(plan as unknown as Record<string, unknown>).kind}`);
+  throw new Error(
+    `Unsupported driver kind: ${(plan as unknown as Record<string, unknown>).kind}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +124,11 @@ describe("Eval Runner", () => {
         llm: {
           kind: "scripted",
           scriptedResponses: [
-            { content: "Hello from eval.", toolCalls: [], finishReason: "stop" },
+            {
+              content: "Hello from eval.",
+              toolCalls: [],
+              finishReason: "stop",
+            },
           ],
         },
         tools: { kind: "fake", fakeTools: [] },
@@ -177,7 +194,9 @@ describe("Eval Runner", () => {
     expect(result.steps[0]?.finalOutput).toContain("ok");
 
     // 验证 instrumented assertion：toolCalled
-    const toolCalledResult = result.assertions.find((a) => a.kind === "toolCalled");
+    const toolCalledResult = result.assertions.find(
+      (a) => a.kind === "toolCalled",
+    );
     expect(toolCalledResult?.passed).toBe(true);
   });
 
@@ -194,8 +213,16 @@ describe("Eval Runner", () => {
         llm: {
           kind: "scripted",
           scriptedResponses: [
-            { content: "I will remember alpha.", toolCalls: [], finishReason: "stop" },
-            { content: "You asked me to remember alpha.", toolCalls: [], finishReason: "stop" },
+            {
+              content: "I will remember alpha.",
+              toolCalls: [],
+              finishReason: "stop",
+            },
+            {
+              content: "You asked me to remember alpha.",
+              toolCalls: [],
+              finishReason: "stop",
+            },
           ],
         },
         tools: { kind: "fake", fakeTools: [] },
@@ -237,9 +264,7 @@ describe("Eval Runner", () => {
         },
         tools: { kind: "fake", fakeTools: [] },
       },
-      assertions: [
-        { kind: "finalOutputContains", text: "Hello" },
-      ],
+      assertions: [{ kind: "finalOutputContains", text: "Hello" }],
     };
 
     const result = await runEvalCase(evalCase, createDriver);
@@ -265,7 +290,11 @@ describe("Eval Runner", () => {
         llm: {
           kind: "scripted",
           scriptedResponses: [
-            { content: "The note is about eval runner.", toolCalls: [], finishReason: "stop" },
+            {
+              content: "The note is about eval runner.",
+              toolCalls: [],
+              finishReason: "stop",
+            },
           ],
         },
         tools: { kind: "fake", fakeTools: [] },
@@ -354,4 +383,64 @@ describe("Eval Runner", () => {
     // tracePath 应存在，因为 trace.enabled = true
     expect(result.tracePath).toBeTruthy();
   });
+
+  it("should keep full-tools agentHome when keepOnFailure is enabled and assertions fail", async () => {
+    const evalCase: EvalCase = {
+      id: "full-tools-keep-agent-home-on-failure",
+      title: "Full tools keep agentHome on failure",
+      workspace: {
+        keepOnFailure: true,
+      },
+      steps: [{ query: "Answer with done." }],
+      driver: {
+        kind: "learn-claude-code-in-process",
+        llm: {
+          kind: "scripted",
+          scriptedResponses: [
+            { content: "done", toolCalls: [], finishReason: "stop" },
+          ],
+        },
+        tools: {
+          kind: "full",
+          full: {
+            agentHome: "temp",
+            enabledTools: ["core"],
+          },
+        },
+      },
+      assertions: [{ kind: "finalOutputContains", text: "never-present" }],
+    };
+
+    const result = await runEvalCase(evalCase, createDriver);
+    const agentHome = findRuntimePath(result.runtimeEvents, "agentHome");
+    const workspaceRoot = findRuntimePath(
+      result.runtimeEvents,
+      "workspaceRoot",
+    );
+
+    try {
+      expect(result.status).toBe("failed");
+      expect(agentHome).toBeTruthy();
+      expect(workspaceRoot).toBeTruthy();
+      expect(existsSync(agentHome!)).toBe(true);
+      expect(existsSync(workspaceRoot!)).toBe(true);
+    } finally {
+      if (agentHome) {
+        await rm(agentHome, { recursive: true, force: true });
+      }
+      if (workspaceRoot) {
+        await rm(workspaceRoot, { recursive: true, force: true });
+      }
+    }
+  });
 });
+
+function findRuntimePath(
+  events: AgentRuntimeEvent[],
+  label: "workspaceRoot" | "agentHome",
+): string | undefined {
+  return events.find(
+    (event): event is RuntimePathEvent =>
+      event.kind === "runtime_path" && event.label === label,
+  )?.path;
+}

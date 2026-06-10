@@ -49,14 +49,14 @@ const myCase: EvalCase = {
 
 ### 关键字段
 
-| 字段 | 说明 |
-|------|------|
-| `id` | 唯一标识，只允许 `[a-z0-9._-]` |
-| `driver` | Driver 计划：in-process 或 CLI |
-| `steps` | 用户输入序列，每个 step 可独立断言 |
-| `workspace` | 可选的临时 workspace 配置（`initialFiles`、`keepOnFailure`） |
-| `assertions` | case 级断言，所有 step 完成后执行 |
-| `trace` | 可选的 trace 配置（`enabled`、`outputDir`） |
+| 字段         | 说明                                                         |
+| ------------ | ------------------------------------------------------------ |
+| `id`         | 唯一标识，只允许 `[a-z0-9._-]`                               |
+| `driver`     | Driver 计划：in-process 或 CLI                               |
+| `steps`      | 用户输入序列，每个 step 可独立断言                           |
+| `workspace`  | 可选的临时 workspace 配置（`initialFiles`、`keepOnFailure`） |
+| `assertions` | case 级断言，所有 step 完成后执行                            |
+| `trace`      | 可选的 trace 配置（`enabled`、`outputDir`）                  |
 
 ### Driver 类型
 
@@ -73,7 +73,28 @@ driver: {
 ```
 
 - `tools.kind = "core"`：使用真实的 bash/read/write/edit/editExact 工具，限制在临时 workspace 内
+- `tools.kind = "full"`：使用当前项目完整工具系统（TODO/Task/Memory/Skill/SubAgent/Async/Schedule/Output），并强制使用临时 `agentHome`
 - `tools.kind = "fake"`：使用自定义 fake 工具，无副作用，适合测试 runner 本身
+
+Full-tools 示例：
+
+```ts
+driver: {
+  kind: "learn-claude-code-in-process",
+  llm: { kind: "live", live: { maxCalls: 12 } },
+  tools: {
+    kind: "full",
+    full: {
+      agentHome: "temp",
+      enabledTools: ["core", "todo", "skill"],
+      seedSkills: {
+        "eval-format/SKILL.md": "When asked for status, write SKILL_USED_22.",
+      },
+    },
+  },
+  maxRounds: 12,
+}
+```
 
 #### CLI Driver
 
@@ -112,29 +133,34 @@ workspace: {
 
 #### Portable Assertions（不依赖 driver 内部事件）
 
-| Assertion | 说明 |
-|-----------|------|
-| `finalOutputContains` | 最终输出包含指定文本 |
-| `finalOutputMatches` | 最终输出匹配正则表达式 |
-| `exitCodeIs` | 退出码等于指定值（CLI driver 用） |
-| `allStepsCompleted` | 所有步骤都执行完毕 |
-| `fileExists` | 文件存在 |
-| `fileContains` | 文件包含指定文本 |
-| `noWritesOutsideWorkspace` | 没有向 workspace 外写入 |
+| Assertion                  | 说明                              |
+| -------------------------- | --------------------------------- |
+| `finalOutputContains`      | 最终输出包含指定文本              |
+| `finalOutputMatches`       | 最终输出匹配正则表达式            |
+| `exitCodeIs`               | 退出码等于指定值（CLI driver 用） |
+| `allStepsCompleted`        | 所有步骤都执行完毕                |
+| `fileExists`               | 文件存在                          |
+| `fileNotExists`            | 文件不存在                        |
+| `fileContains`             | 文件包含指定文本                  |
+| `noWritesOutsideWorkspace` | 没有向 workspace 外写入           |
 
 #### Instrumented Assertions（需要 driver 提供 runtime events）
 
-| Assertion | 说明 |
-|-----------|------|
-| `toolCalled` | 指定工具被调用过（可设 `minCount`） |
-| `toolNotCalled` | 指定工具未被调用 |
-| `toolCallCount` | 指定工具调用次数等于指定值 |
-| `toolArgsContain` | 指定工具的参数包含指定文本 |
-| `noToolErrors` | 没有工具错误（tool_call/tool_result 中 error） |
-| `allToolsSucceeded` | 所有 tool_result 的 error 不为 true |
-| `transcriptEventTypes` | transcript 事件类型序列匹配 |
-| `permissionPromptShown` | 权限确认弹窗已展示 |
-| `custom` | 自定义断言函数 |
+| Assertion               | 说明                                           |
+| ----------------------- | ---------------------------------------------- |
+| `toolCalled`            | 指定工具被调用过（可设 `minCount`）            |
+| `toolNotCalled`         | 指定工具未被调用                               |
+| `toolCalledOneOf`       | 一组工具中至少一个被调用过                     |
+| `toolCallCount`         | 指定工具调用次数等于指定值                     |
+| `toolArgsContain`       | 指定工具的参数包含指定文本                     |
+| `toolResultContains`    | 指定工具结果包含指定文本                       |
+| `stepToolCalled`        | 指定 step 中工具被调用过                       |
+| `stepToolNotCalled`     | 指定 step 中工具未被调用                       |
+| `noToolErrors`          | 没有工具错误（tool_call/tool_result 中 error） |
+| `allToolsSucceeded`     | 所有 tool_result 的 error 不为 true            |
+| `transcriptEventTypes`  | transcript 事件类型序列匹配                    |
+| `permissionPromptShown` | 权限确认弹窗已展示                             |
+| `custom`                | 自定义断言函数                                 |
 
 > **注意**：instrumented assertions 依赖 driver 发射 `tool_call` / `tool_result` / `permission_prompt` 等事件。in-process driver 通过 `wrapToolRegistryForTrace` 和 `scripted-terminal` 自动发射这些事件；CLI 黑盒 driver 可能不支持全部 instrumented assertions。
 
@@ -263,14 +289,14 @@ EVAL_LIVE_REGRESSION=1 npm run test:eval:live:regression
 
 ### 第一轮 case 列表（6 个）
 
-| Case ID | 场景 |
-|---------|------|
-| `live-core-read-structured-summary` | 读取结构化文件并基于内容回答 |
+| Case ID                                 | 场景                               |
+| --------------------------------------- | ---------------------------------- |
+| `live-core-read-structured-summary`     | 读取结构化文件并基于内容回答       |
 | `live-core-write-report-with-sentinels` | 创建新文件并写入精确 sentinel 内容 |
-| `live-core-edit-existing-config` | 编辑已有文件并保留不相关内容 |
-| `live-core-bash-readonly-command` | 执行只读 bash 命令并报告输出 |
-| `live-core-permission-denied-write` | 权限被拒绝后不继续写入 |
-| `live-core-multi-turn-stateful-edit` | 多轮上下文共享：先观察再修改 |
+| `live-core-edit-existing-config`        | 编辑已有文件并保留不相关内容       |
+| `live-core-bash-readonly-command`       | 执行只读 bash 命令并报告输出       |
+| `live-core-permission-denied-write`     | 权限被拒绝后不继续写入             |
+| `live-core-multi-turn-stateful-edit`    | 多轮上下文共享：先观察再修改       |
 
 ### 设计原则
 
@@ -294,6 +320,37 @@ Judge 默认使用和 Agent **相同的模型**。如果想用不同模型（例
 ```bash
 EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 JUDGE_MODEL=gpt-4o-mini npm run test:eval:live:regression
 ```
+
+## Live Full Regression
+
+Live full regression 使用 `tools.kind = "full"` 验证当前单 Agent 的复杂工具系统。默认 **不运行**，并且每个 case 都使用临时 workspace 与临时 `agentHome`，不会读取或写入用户真实 `~/.learn-claude-code-ts`。
+
+### 启用条件
+
+```bash
+EVAL_LIVE_FULL=1 npm run test:eval:live:full
+```
+
+### Release case 列表（4 个）
+
+| Case ID                                      | 场景                                          |
+| -------------------------------------------- | --------------------------------------------- |
+| `live-full-todo-guided-file-change`          | 使用 TODO 管理短任务并完成文件修改            |
+| `live-full-memory-confirmed-create-and-read` | 用户明确要求记忆后创建 memory，并在下一轮读回 |
+| `live-full-skill-guided-output`              | 加载临时 seed skill，并按 skill 指示写文件    |
+| `live-full-subagent-readonly-analysis`       | 父 Agent 委托只读 subagent 分析文件并整合结果 |
+
+其中 skill release case 使用 `SKILL_USED_22` 作为 seed skill 行为标记，调试 trace 时可以用它快速确认模型确实加载并遵循了临时 skill。
+
+Nightly 组已预留 Task Group、Async Run + Output、Schedule create/read/cancel 三类 case，当前默认 `describe.skip`，用于后续人工或夜间运行策略。
+
+### Judge 开关
+
+```bash
+EVAL_LIVE_FULL=1 EVAL_JUDGE=1 npm run test:eval:live:full
+```
+
+Release 组 4 个 case 均内置 judge rubric。开启后会额外产生 4 次 judge LLM 调用。
 
 ## Judge 评估
 
@@ -325,12 +382,19 @@ import { loadConfig } from "../../config.js";
 import { createLLMClient } from "../../llm.js";
 
 const config = loadConfig();
-const judgeLLM = createLLMClient({ /* ResolvedLLMConfig */ }, undefined, config.runtimePolicy);
+const judgeLLM = createLLMClient(
+  {
+    /* ResolvedLLMConfig */
+  },
+  undefined,
+  config.runtimePolicy,
+);
 const result = await runEvalCase(evalCase, createDriver, judgeLLM);
 console.log(result.judge?.summary);
 ```
 
 Judge 输出 `EvalJudgeResult`：
+
 - `passed` / `score` / `summary`
 - `strengths` / `problems`
 - `evidence` — 带引用的事件/输出/断言证据
@@ -339,6 +403,7 @@ Judge 输出 `EvalJudgeResult`：
 ### Judge JSON 解析鲁棒性
 
 Judge LLM 可能返回 markdown code block、额外文本或无效 JSON。解析器采用四层降级：
+
 1. 直接 `JSON.parse()`
 2. 正则提取 ` ```json ... ``` ` 代码块
 3. 括号深度计数器 + 字符串引号跟踪提取嵌套 JSON
@@ -349,7 +414,11 @@ Judge LLM 可能返回 markdown code block、额外文本或无效 JSON。解析
 运行多个 case 并聚合报告：
 
 ```ts
-import { runEvalSuite, writeJsonReport, writeMarkdownReport } from "./core/report.js";
+import {
+  runEvalSuite,
+  writeJsonReport,
+  writeMarkdownReport,
+} from "./core/report.js";
 
 const report = await runEvalSuite(cases, createDriver, judgeLLM);
 await writeJsonReport(report, "./report.json");
@@ -357,6 +426,7 @@ await writeMarkdownReport(report, "./report.md");
 ```
 
 Report 输出两种格式：
+
 - **JSON**：机器读取，含每个 case 的 `hardPassed`、`judgePassed`、`tracePath`、`failureSummary`
 - **Markdown**：人读，分 Passed / Failed 章节
 
@@ -377,6 +447,12 @@ EVAL_LIVE_REGRESSION=1 npm run test:eval:live:regression
 
 # Live regression + Judge（额外启用 LLM judge 评价，增加 5 次 LLM 调用）
 EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 npm run test:eval:live:regression
+
+# Live full regression（需要 EVAL_LIVE_FULL=1）
+EVAL_LIVE_FULL=1 npm run test:eval:live:full
+
+# Live full regression + Judge（额外启用 LLM judge 评价，增加 4 次 LLM 调用）
+EVAL_LIVE_FULL=1 EVAL_JUDGE=1 npm run test:eval:live:full
 
 # 用不同模型做 judge（默认和 Agent 同模型）
 EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 JUDGE_MODEL=gpt-4o-mini npm run test:eval:live:regression
@@ -409,11 +485,13 @@ src/eval/
 │   └── trace-writer.ts   # JSON 输出
 ├── drivers/
 │   ├── learn-claude-code/
-│   │   ├── in-process-driver.ts  # 当前项目 driver
-│   │   ├── core-tool-runtime.ts  # 真实核心工具注册表
-│   │   ├── scripted-llm.ts       # Scripted LLM
-│   │   ├── scripted-terminal.ts  # Scripted Terminal
-│   │   └── tool-trace.ts         # 工具追踪包装器
+│   │   ├── in-process-driver.ts       # 当前项目 driver
+│   │   ├── core-tool-runtime.ts       # 真实核心工具注册表
+│   │   ├── full-tool-runtime.ts       # 临时 agentHome 下的完整工具运行时
+│   │   ├── full-tool-runtime.test.ts  # full runtime 确定性测试
+│   │   ├── scripted-llm.ts            # Scripted LLM
+│   │   ├── scripted-terminal.ts       # Scripted Terminal
+│   │   └── tool-trace.ts              # 工具追踪包装器
 │   └── cli/
 │       └── cli-driver.ts         # CLI 黑盒 driver
 ├── cases/
@@ -423,10 +501,11 @@ src/eval/
 │   ├── deterministic.test.ts     # Deterministic suite
 │   └── replay-suite.test.ts      # Replay suite
 ├── live/
+│   ├── _driver-factory.ts             # Live suite 共享 driver + judge LLM 工厂
 │   ├── live-llm.ts                     # Live LLM wrapper
 │   ├── live-suite.test.ts              # Live smoke suite
 │   ├── live-regression-suite.test.ts   # Live regression suite（core tools）
-│   └── _driver-factory.ts              # Live suite 共享 driver + judge LLM 工厂
+│   └── live-full-suite.test.ts         # Live full-system regression suite
 ├── judge/
 │   ├── judge.ts                  # LLM judge 实现
 │   └── judge-suite.test.ts       # Judge 集成测试

@@ -14,6 +14,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 + **PDD22 第二批：Deterministic Suite + Real Core Tools + CLI Driver**（真实 bash/read/write/edit/editExact 核心工具注册表、CLI 黑盒 driver、instrumented 断言补齐 toolNotCalled/toolArgsContain/allToolsSucceeded/permissionPromptShown、≥5 个 deterministic suite 用例、test:eval 脚本、README 文档）
 + **PDD22 第三批：Replay + Live Smoke + Judge/Report**（replay fixture 驱动、opt-in live smoke、LLM judge 含 prompt builder + 鲁棒 JSON parser、suite report 聚合含 JSON/Markdown 输出、replay/live/judge suite 测试、test:eval:live / test:eval:judge 脚本）
 + **PDD22 第四批：Live Regression — Core Tools 第一轮**（6 个核心工具回归 case：读结构化文件、写入 sentinel 报告、编辑保留不相关内容、只读 bash、权限拒绝、多轮上下文共享；`EVAL_LIVE_REGRESSION=1` 独立开关；`EVAL_JUDGE=1` 启用 LLM judge，`JUDGE_MODEL` 覆盖 judge 模型；`_driver-factory.ts` 共享 driver + judge LLM 工厂；runner.ts 修复 step assertion stepId 绑定 bug）
++ **PDD23 Full-tools Live E2E**（修正 live regression 开关语义/README；新增 full-tool-runtime 临时 agentHome 下的完整工具组装；新增 4 release + 3 nightly full-system live cases；新增 5 个 instrumented 断言：fileNotExists/toolCalledOneOf/toolResultContains/stepToolCalled/stepToolNotCalled；新增 RuntimePathEvent 定位临时目录；live-full-suite 默认 skip）
 
 ## 教学注释增强
 
@@ -141,11 +142,13 @@ src/
 │   │   └── trace-writer.ts   # JSON trace 输出
 │   ├── drivers/
 │   │   ├── learn-claude-code/
-│   │   │   ├── in-process-driver.ts  # 当前项目 createAgent() driver
-│   │   │   ├── core-tool-runtime.ts  # 真实核心工具注册表（bash/read/write/edit/editExact）
-│   │   │   ├── scripted-llm.ts       # ScriptedLLMClient
-│   │   │   ├── scripted-terminal.ts  # ScriptedTerminal（支持 permission 事件记录）
-│   │   │   └── tool-trace.ts         # ToolRegistry tracing wrapper
+│   │   │   ├── in-process-driver.ts       # 当前项目 createAgent() driver
+│   │   │   ├── core-tool-runtime.ts       # 真实核心工具注册表（bash/read/write/edit/editExact）
+│   │   │   ├── full-tool-runtime.ts       # 临时 agentHome 下组装完整工具系统
+│   │   │   ├── full-tool-runtime.test.ts  # full runtime 确定性测试
+│   │   │   ├── scripted-llm.ts            # ScriptedLLMClient
+│   │   │   ├── scripted-terminal.ts       # ScriptedTerminal（支持 permission 事件记录）
+│   │   │   └── tool-trace.ts              # ToolRegistry tracing wrapper
 │   │   └── cli/
 │   │       └── cli-driver.ts         # CLI 黑盒 driver（spawn + stdin/stdout）
 │   ├── cases/
@@ -155,10 +158,11 @@ src/
 │   │   ├── deterministic.test.ts     # Deterministic suite（≥5 个 core tool + CLI smoke case）
 │   │   └── replay-suite.test.ts      # Replay suite
 │   ├── live/
+│   │   ├── _driver-factory.ts              # Live suite 共享 driver + judge LLM 工厂
 │   │   ├── live-llm.ts                     # Live LLM wrapper
 │   │   ├── live-suite.test.ts              # Live smoke suite（需 `EVAL_LIVE=1`）
 │   │   ├── live-regression-suite.test.ts   # Live regression suite（core tools，需 `EVAL_LIVE_REGRESSION=1`）
-│   │   └── _driver-factory.ts              # Live suite 共享 driver + judge LLM 工厂
+│   │   └── live-full-suite.test.ts         # Live full-system regression suite（需 `EVAL_LIVE_FULL=1`）
 │   ├── judge/
 │   │   ├── judge.ts                  # LLM judge 实现
 │   │   └── judge-suite.test.ts       # Judge 集成测试
@@ -300,16 +304,30 @@ skills/
 - **TraceRecorder / writeEvalTrace**：结构化事件收集 + JSON 输出；支持 `EVAL_TRACE_DIR` 环境变量覆盖输出目录
 - **runEvalCase() 生命周期**：validate → create workspace → create driver → step loop → collect events → run assertions → write trace → cleanup
 - **当前项目 in-process driver**：内部组装 `createAgent()`，注入 ScriptedLLMClient、ScriptedTerminal、Fake Tool Registry、静音 Logger、新建 History/Compressor/PermissionManager/TranscriptStore；支持 scripted/replay/live 三种 LLM kind
+- **Full-tools in-process driver**：`tools.kind="full"` 在临时 `agentHome` 下复用真实 TODO/Task/Memory/Skill/SubAgent/Async/Schedule/Output provider；Eval Core 不直接 import 当前项目业务模块，项目耦合集中在 `drivers/learn-claude-code/`
 - **ScriptedLLMClient**：按顺序消耗预设 response，每次 `chat()` 自动序列化 tool args 并发射 `llm_call`/`llm_response` 事件；response 耗尽时抛错
 - **ReplayLLMClient**：读取 JSON fixture（`version: 1`），校验 `caseId` 匹配后，转换为 `ScriptedLLMResponse[]` 复用 scripted 路径；fixture 含 `provider/model/recordedAt/responses`
 - **LiveEvalLLMClient**：包装真实 `createLLMClient()`，发射 `llm_call`/`llm_response` 事件，支持 `maxCalls` 限制防止无限循环
 - **ScriptedTerminal**：自动消耗 `permissionAnswers` 和 `questions` 队列，支持 `defaultPermissionAnswer` 默认值
-- **Fake Tool Registry**：第一批只支持 fake tools，不接入真实 bash/files；工具定义和 executor 由 case 注入，执行时发射标准化 tool_call/tool_result 事件
-- **断言执行器**：`runAssertions()` 遍历断言列表，返回结构化 `EvalAssertionResult`（passed + message + evidence）；instrumented 断言基于 `runtimeEvents` 中 source="agent" 的事件判断
+- **Fake Tool Registry**：第一批只支持 fake tools，不接入真实 bash/files；工具定义和 executor 由 case 注入，执行时发射标准化 tool_call/tool_result 事件（含 stepId）
+- **断言执行器**：`runAssertions()` 遍历断言列表，返回结构化 `EvalAssertionResult`（passed + message + evidence）；instrumented 断言基于 `runtimeEvents` 判断，已支持 `fileNotExists`、`toolCalledOneOf`、`toolResultContains`、`stepToolCalled`、`stepToolNotCalled`
 - **Judge 评估**：`runJudge()` 构建含 rubric + trace summary 的 prompt，调用独立 LLM 做开放式质量评价；输出 `EvalJudgeResult`（passed/score/summary/strengths/problems/evidence/needsHumanReview）；hard assertions 始终优先，judge 失败也导致 case `status = "failed"`
 - **Judge JSON 解析鲁棒性**：三层降级——直接 `JSON.parse()` → 正则提取 markdown code block → 括号深度计数器提取嵌套 JSON → 返回 `judge_failed` fallback（score=0, passed=false, 不影响 hard result）；`VALID_EVIDENCE_KINDS` Set 过滤非法 evidence kind
 - **Suite Report**：`runEvalSuite()` 顺序运行多个 case，聚合 `EvalSuiteReport`（version/total/passed/failed/skipped/mode/cases[]）；`writeJsonReport()` 输出机器可读 JSON，`writeMarkdownReport()` 输出人读 Markdown（分 Passed/Failed 章节）；passed case 含 judge 失败时附加 ` (judge failed)`
-- **Live Regression Suite**：6 个 core-tools-only case 覆盖真实 LLM 下的读/写/编辑/bash/权限/多轮能力；每个 case 限制 `maxCalls`/`maxRounds`，Vitest timeout 30-60s；启用开关 `EVAL_LIVE=1`（同时跑 smoke + regression）或 `EVAL_LIVE_REGRESSION=1`（仅 regression）；`EVAL_JUDGE=1` 启用 LLM judge 评价，`JUDGE_MODEL` 环境变量可覆盖 judge 模型（默认和 Agent 同模型）
+- **Live Regression Suite**：6 个 core-tools-only case 覆盖真实 LLM 下的读/写/编辑/bash/权限/多轮能力；每个 case 限制 `maxCalls`/`maxRounds`，Vitest timeout 30-60s；启用开关 `EVAL_LIVE_REGRESSION=1`；`EVAL_LIVE=1` 只启用 smoke suite；`EVAL_JUDGE=1` 启用 LLM judge 评价，`JUDGE_MODEL` 环境变量可覆盖 judge 模型（默认和 Agent 同模型）
+- **Live Full Suite**：4 个 release case 覆盖 TODO、confirmed Memory、seed Skill、readonly SubAgent；3 个 nightly case 预留 Task/Async/Schedule，默认 `describe.skip`；启用开关 `EVAL_LIVE_FULL=1`，所有 case 都使用临时 workspace + 临时 `agentHome`
+
+### PDD23 Full-tools Live E2E (`src/eval/drivers/learn-claude-code/full-tool-runtime.ts` + `src/eval/live/live-full-suite.test.ts`)
+
+- **临时 agentHome 隔离**：full-tools eval runtime 使用 `createProjectContext({ projectRoot: workspaceRoot, agentHome })` 组装真实工具 provider，skills、memory、logs、task outputs、tasks、schedules 都写入 case 专属临时 `agentHome`，不读取用户真实 `~/.learn-claude-code-ts`
+- **完整工具组装**：`tools.kind="full"` 复用当前项目真实 TODO/Task/Memory/Skill/SubAgent/Async/Schedule/Output provider；Eval Core 仍保持中立，不直接 import 当前项目业务模块
+- **Seed 数据**：`seedSkills` 在创建 SkillManager 前写入临时 skills 目录；`seedMemories` 通过 MemoryManager 写入临时 memory 目录；release skill case 使用 `SKILL_USED_22` 作为技能行为标记，便于失败 trace 快速识别
+- **Async cleanup**：full runtime cleanup 会先 `scheduleManager.stop()`，再调用 `asyncRunManager.shutdown()` 将仍在 running 的 async run 收敛为 `abandoned`，最后按 `keepAgentHome` 决定是否删除临时 `agentHome`
+- **新增断言语义**：`fileNotExists` 验证拒绝写入或越界写入不会产生文件；`toolCalledOneOf` 允许模型通过多个等价查询工具达成目标；`toolResultContains` 校验工具结果本身含目标内容；`stepToolCalled` / `stepToolNotCalled` 基于 tool event 的 `stepId` 校验多轮 case 中单步工具行为
+- **RuntimePathEvent**：driver 在 trace 中发射 `runtime_path` 事件，记录 `workspaceRoot` 与 `agentHome`，失败且 `keepOnFailure` 时可直接定位临时目录
+- **Live full release cases**：`live-full-todo-guided-file-change`、`live-full-memory-confirmed-create-and-read`、`live-full-skill-guided-output`、`live-full-subagent-readonly-analysis`
+- **Live full nightly cases**：Task Group durable plan、Async Run output handle、Schedule create/read/cancel 三个 case 已预留为 `describe.skip`，每个 case 配置 120s timeout，便于后续夜间或人工触发
+- **Judge 成本**：Release 组 4 个 case 均内置 judge rubric；`EVAL_LIVE_FULL=1 EVAL_JUDGE=1` 会额外产生 4 次 judge LLM 调用
 
 ### Agent 核心循环 (`agent.ts`)
 
@@ -706,12 +724,14 @@ skills/
 | `src/tools/registry.test.ts`   | 11     | 重复注册报错、工具定义顺序稳定性、完整 registry 创建、过滤选项、OutputStore 注册                                      |
 | `src/async-runs.test.ts`       | 32     | start 校验、finishRun 生命周期、timeout、深拷贝、冲突检测、notification drain、readOutput、OutputStore 输出登记       |
 | `src/tools/async-runs.test.ts` | 16     | 4 个工具定义、参数校验、JSON 输出格式、错误传播、output_id 展示                                                       |
-| `src/eval/runner.test.ts`      | 8      | fake driver 无工具 case、in-process driver 无工具 case、fake tool call case、多 query history 复用、断言失败、workspace initial files、case id 校验、judge 集成（result + trace） |
+| `src/eval/runner.test.ts`      | 9      | fake driver 无工具 case、in-process driver 无工具 case、fake tool call case、多 query history 复用、断言失败、workspace initial files、case id 校验、judge 集成（result + trace）、full-tools keepOnFailure 保留 agentHome |
 | `src/eval/cases/replay-suite.test.ts` | 2 | replay fixture 读取、caseId 校验、ScriptedLLM 路径复用 |
 | `src/eval/replay/replay-llm.test.ts`  | 4 | fixture version mismatch、caseId mismatch、文件不存在、JSON 解析失败 |
 | `src/eval/judge/judge-suite.test.ts`  | 6 | judge 正常评分通过、JSON 解析失败 fallback、hard assertions 失败时 judge 仍运行、rubric 传入、score 边界 |
+| `src/eval/drivers/learn-claude-code/full-tool-runtime.test.ts` | 6 | full runtime 临时 agentHome 目录、enabledTools 过滤、完整工具注册、seed skill、seed memory、cleanup 放弃 running async run |
 | `src/eval/live/live-suite.test.ts`           | 2      | live LLM wrapper 事件发射、maxCalls 限制（默认 skip，需 `EVAL_LIVE=1`） |
 | `src/eval/live/live-regression-suite.test.ts` | 6 | 读结构化文件、写入 sentinel 报告、编辑保留内容、只读 bash、权限拒绝、多轮上下文共享（默认 skip，需 `EVAL_LIVE_REGRESSION=1`）；5 个 case 内置 judge rubric，`EVAL_JUDGE=1` 启用 |
+| `src/eval/live/live-full-suite.test.ts` | 4 release + 3 nightly skipped | TODO 文件修改、confirmed Memory 创建/读回、seed Skill 输出、SubAgent 只读分析（默认 skip，需 `EVAL_LIVE_FULL=1`）；Nightly 预留 Task/Async/Schedule |
 | `src/execution-policy.test.ts` | 12     | readonly/ci/workspace_write profile、命令白名单、资源边界                                                             |
 | `src/output-store.test.ts`     | 7      | output_id 生成、index 校验、分片读取、路径边界                                                                         |
 | `src/tools/output.test.ts`     | 4      | run_output_read 参数校验、分片读取、错误传播                                                                           |

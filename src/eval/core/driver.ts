@@ -9,7 +9,7 @@
  * - 同一 case 内多个 step 复用同一个 driver 实例
  */
 
-import type { AgentRuntimeEvent } from "./case-schema.js";
+import type { AgentRuntimeEvent, EvalRunStatus } from "./case-schema.js";
 
 /** Driver 启动 case 时传入的上下文 */
 export interface AgentCaseContext {
@@ -41,6 +41,14 @@ export interface AgentTurnResult {
   events?: AgentRuntimeEvent[];
 }
 
+/** Driver 关闭时的上下文，用于决定是否保留调试产物 */
+export interface DriverCloseOptions {
+  /** case 最终状态 */
+  status?: EvalRunStatus;
+  /** 是否保留 driver 自己创建的临时产物（如 full-tools agentHome） */
+  keepArtifacts?: boolean;
+}
+
 /**
  * CodingAgentDriver — 被测 Coding Agent 的抽象接口
  *
@@ -57,5 +65,5 @@ export interface CodingAgentDriver {
   /** 读取全部运行时事件（可选，黑盒 driver 可能不支持） */
   readEvents?(): Promise<AgentRuntimeEvent[]>;
   /** 关闭 driver，释放资源 */
-  close(): Promise<void>;
+  close(options?: DriverCloseOptions): Promise<void>;
 }

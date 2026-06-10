@@ -67,6 +67,7 @@ export async function runEvalCase(
   const allRuntimeEvents: AgentRuntimeEvent[] = [];
   let runError: EvalRunError | undefined;
   let isSkipped = false;
+  let driver: CodingAgentDriver | undefined;
 
   // 辅助函数：将事件同时写入 runner 的数组和 traceRecorder
   // 按 event.id 去重，防止 send() 增量事件与 readEvents() 全量快照重叠
@@ -84,10 +85,13 @@ export async function runEvalCase(
 
   try {
     // 5. 创建 driver
-    const driver = await createDriver(evalCase.driver);
+    driver = await createDriver(evalCase.driver);
 
     // 6. 启动 case
-    await driver.startCase({ caseId: evalCase.id, workspaceRoot: workspace.root });
+    await driver.startCase({
+      caseId: evalCase.id,
+      workspaceRoot: workspace.root,
+    });
 
     // 7. 逐步骤执行
     for (const step of evalCase.steps) {
@@ -96,14 +100,19 @@ export async function runEvalCase(
 
       try {
         const turnResult = await driver.send({ stepId, query: step.query });
-        traceRecorder.endStep(stepId, turnResult.finalOutput, turnResult.exitCode);
+        traceRecorder.endStep(
+          stepId,
+          turnResult.finalOutput,
+          turnResult.exitCode,
+        );
 
         // 合并本步返回的事件
         if (turnResult.events) {
           recordEvents(turnResult.events);
         }
       } catch (stepErr) {
-        const message = stepErr instanceof Error ? stepErr.message : String(stepErr);
+        const message =
+          stepErr instanceof Error ? stepErr.message : String(stepErr);
         const error: EvalRunError = { message, stepId };
         traceRecorder.endStep(stepId, undefined, undefined, error);
         runError = error;
@@ -121,9 +130,6 @@ export async function runEvalCase(
         // readEvents 失败不阻塞主流程
       }
     }
-
-    // 11. 关闭 driver
-    await driver.close();
   } catch (err) {
     if (!runError) {
       const message = err instanceof Error ? err.message : String(err);
@@ -207,6 +213,23 @@ export async function runEvalCase(
     status = "passed";
   }
 
+  // 11. 关闭 driver
+  // 放在状态计算之后，是为了让 full-tools driver 可以在 keepOnFailure 生效时
+  // 同步保留它自己创建的临时 agentHome，方便调试 Memory/Skill/Task/Schedule 文件。
+  if (driver !== undefined) {
+    const keepArtifacts =
+      evalCase.workspace?.keepOnFailure === true && status !== "passed";
+    try {
+      await driver.close({ status, keepArtifacts });
+    } catch (err) {
+      if (runError === undefined) {
+        const message = err instanceof Error ? err.message : String(err);
+        runError = { message };
+        status = "error";
+      }
+    }
+  }
+
   // 组装 trace（judge 完成后才 build，确保 judge 结果入 trace）
   const traceOptions: {
     caseId: string;
@@ -235,14 +258,17 @@ export async function runEvalCase(
   // 默认不启用，除非 case 显式设置 enabled=true 或 EVAL_TRACE_DIR 环境变量存在
   const traceEnabled =
     evalCase.trace?.enabled === true || !!process.env["EVAL_TRACE_DIR"];
-  const traceWriterOptions: { enabled: boolean; outputDir?: string } = { enabled: traceEnabled };
+  const traceWriterOptions: { enabled: boolean; outputDir?: string } = {
+    enabled: traceEnabled,
+  };
   if (evalCase.trace?.outputDir !== undefined) {
     traceWriterOptions.outputDir = evalCase.trace.outputDir;
   }
   const tracePath = await writeEvalTrace(trace, traceWriterOptions);
 
   // 12. 清理 workspace（如果 case 失败且设置了 keepOnFailure，则保留）
-  const shouldKeep = evalCase.workspace?.keepOnFailure === true && status !== "passed";
+  const shouldKeep =
+    evalCase.workspace?.keepOnFailure === true && status !== "passed";
   if (!shouldKeep) {
     try {
       await workspace.cleanup();
@@ -288,7 +314,7 @@ export async function runEvalCase(
  * 4. driver 必须存在，并且 kind 非空
  * 5. learn-claude-code-in-process driver 的 scripted 模式必须提供 scriptedResponses
  * 6. replay 模式必须提供 replayFile
- * 7. live 模式必须显式 opt-in（EVAL_LIVE=1）
+ * 7. live 模式必须显式 opt-in（EVAL_LIVE/EVAL_LIVE_REGRESSION/EVAL_LIVE_FULL）
  * 8. workspace.initialFiles 路径必须是相对路径，不能包含 .. 逃逸
  * 9. fake tool 名称不能重复
  * 10. assertion 中引用的 stepId 必须存在（含自动生成的 step_${index}）
@@ -310,11 +336,15 @@ function validateEvalCase(evalCase: EvalCase): void {
   }
 
   if (!evalCase.steps || evalCase.steps.length === 0) {
-    throw new Error(`EvalCase ${evalCase.id}: steps must have at least one item`);
+    throw new Error(
+      `EvalCase ${evalCase.id}: steps must have at least one item`,
+    );
   }
 
   if (!evalCase.assertions || evalCase.assertions.length === 0) {
-    throw new Error(`EvalCase ${evalCase.id}: assertions must have at least one item`);
+    throw new Error(
+      `EvalCase ${evalCase.id}: assertions must have at least one item`,
+    );
   }
 
   if (!evalCase.driver || !evalCase.driver.kind) {
@@ -328,7 +358,10 @@ function validateEvalCase(evalCase: EvalCase): void {
       { kind: "learn-claude-code-in-process" }
     >;
     if (plan.llm.kind === "scripted") {
-      if (!plan.llm.scriptedResponses || plan.llm.scriptedResponses.length === 0) {
+      if (
+        !plan.llm.scriptedResponses ||
+        plan.llm.scriptedResponses.length === 0
+      ) {
         throw new Error(
           `EvalCase ${evalCase.id}: scripted mode requires at least one scriptedResponse`,
         );
@@ -343,10 +376,12 @@ function validateEvalCase(evalCase: EvalCase): void {
     }
     if (plan.llm.kind === "live") {
       const liveEnabled =
-        process.env["EVAL_LIVE"] === "1" || process.env["EVAL_LIVE_REGRESSION"] === "1";
+        process.env["EVAL_LIVE"] === "1" ||
+        process.env["EVAL_LIVE_REGRESSION"] === "1" ||
+        process.env["EVAL_LIVE_FULL"] === "1";
       if (!liveEnabled) {
         throw new Error(
-          `EvalCase ${evalCase.id}: live mode requires EVAL_LIVE=1 or EVAL_LIVE_REGRESSION=1 environment variable`,
+          `EvalCase ${evalCase.id}: live mode requires EVAL_LIVE=1, EVAL_LIVE_REGRESSION=1, or EVAL_LIVE_FULL=1 environment variable`,
         );
       }
     }
@@ -357,7 +392,10 @@ function validateEvalCase(evalCase: EvalCase): void {
     for (const path of Object.keys(evalCase.workspace.initialFiles)) {
       try {
         // 复用 workspace.ts 的校验逻辑：检查绝对路径和 .. 逃逸
-        if (path.startsWith("/") || path.split(/[/\\]/).some((p) => p === "..")) {
+        if (
+          path.startsWith("/") ||
+          path.split(/[/\\]/).some((p) => p === "..")
+        ) {
           throw new Error(`Workspace path must not contain '..': ${path}`);
         }
       } catch (err) {
@@ -401,7 +439,11 @@ function validateEvalCase(evalCase: EvalCase): void {
     ...evalCase.steps.flatMap((s) => s.assertions ?? []),
   ];
   for (const assertion of allAssertions) {
-    if ("stepId" in assertion && assertion.stepId && !validStepIds.has(assertion.stepId)) {
+    if (
+      "stepId" in assertion &&
+      assertion.stepId &&
+      !validStepIds.has(assertion.stepId)
+    ) {
       throw new Error(
         `EvalCase ${evalCase.id}: assertion references unknown stepId "${assertion.stepId}"`,
       );

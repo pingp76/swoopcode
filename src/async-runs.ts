@@ -161,6 +161,16 @@ export interface AsyncRunManager {
   list(query?: AsyncRunListQuery): AsyncRunRecord[];
   readOutput(input: ReadAsyncRunOutputInput): string;
   drainNotifications(): AsyncRunNotification[];
+  /**
+   * 关闭当前进程内仍在 running 的 async runs。
+   *
+   * 这是运行时生命周期方法，不是 LLM 工具能力：
+   * - 普通完成/失败/超时仍由 finishRun() 统一收敛
+   * - 进程关闭或 eval cleanup 时调用 shutdown()，把剩余 running run 标记为 abandoned
+   * - command executor 底层 child_process 仍依赖 executeBash 的 timeout 机制退出；
+   *   shutdown 的职责是清理 manager 状态、取消内部 timeout、abort 子 Agent
+   */
+  shutdown?(reason?: string): AsyncRunRecord[];
   checkForegroundToolConflict(input: {
     toolName: string;
     args: Record<string, unknown>;
@@ -247,9 +257,7 @@ function deepClone<T>(value: T): T {
 function pathsOverlap(a: string, b: string, baseDir: string): boolean {
   const ra = resolve(baseDir, a);
   const rb = resolve(baseDir, b);
-  return (
-    ra === rb || ra.startsWith(rb + sep) || rb.startsWith(ra + sep)
-  );
+  return ra === rb || ra.startsWith(rb + sep) || rb.startsWith(ra + sep);
 }
 
 /**
@@ -257,11 +265,7 @@ function pathsOverlap(a: string, b: string, baseDir: string): boolean {
  */
 function writeRecordSnapshot(record: AsyncRunRecord): void {
   if (!record.outputPath) return;
-  const recordPath = resolve(
-    record.outputPath,
-    "..",
-    "record.json",
-  );
+  const recordPath = resolve(record.outputPath, "..", "record.json");
   try {
     writeFileSync(recordPath, JSON.stringify(record, null, 2));
   } catch {
@@ -360,6 +364,13 @@ export function createAsyncRunManager(deps: {
   const finishedRunIds = new Set<string>();
   // 当前 running 的 async run 数量
   let runningCount = 0;
+  // 每个 running run 的超时定时器。
+  // 保存引用是为了 shutdown() 时能取消 manager 自己的 timeout 回调，
+  // 避免 cleanup 后又有 late timeout 试图收敛同一条记录。
+  const timeoutIds = new Map<string, ReturnType<typeof setTimeout>>();
+  // 子 Agent executor 额外持有 AbortController。
+  // shutdown() 时主动 abort，阻止仍在循环中的 child Agent 继续发起新的 LLM/tool 调用。
+  const abortControllers = new Map<string, AbortController>();
   // 可选的 finish 生命周期回调（供 ScheduleManager 注册）
   let onFinishRef = onFinish;
 
@@ -399,6 +410,7 @@ export function createAsyncRunManager(deps: {
       return false;
     }
     finishedRunIds.add(record.id);
+    clearRunRuntime(record.id);
 
     // 执行状态转换
     const now = new Date();
@@ -506,6 +518,39 @@ export function createAsyncRunManager(deps: {
     return true;
   }
 
+  /**
+   * clearRunRuntime — 清理单个 run 的 manager 运行态资源。
+   *
+   * record 本身仍保留在 records Map 中，供 check/list/readOutput 查询。
+   * 这里清理的是“会在未来再次触发回调”的 timeout 和 abort controller 引用。
+   */
+  function clearRunRuntime(runId: string): void {
+    const timeoutId = timeoutIds.get(runId);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutIds.delete(runId);
+    }
+    abortControllers.delete(runId);
+  }
+
+  /**
+   * shutdown — 把尚未结束的 async runs 收敛为 abandoned。
+   *
+   * 这是 eval/进程关闭边界的兜底路径。它不等待 LLM 自己继续推理，也不让
+   * running 状态跨过 driver.close()，从而避免后续断言和 trace 看到悬挂任务。
+   */
+  function shutdown(reason = "Async run manager shut down"): AsyncRunRecord[] {
+    const abandoned: AsyncRunRecord[] = [];
+    for (const record of records.values()) {
+      if (record.status !== "running") continue;
+      abortControllers.get(record.id)?.abort();
+      if (finishRun(record, "abandoned", undefined, reason)) {
+        abandoned.push(deepClone(record));
+      }
+    }
+    return abandoned;
+  }
+
   // -------------------------------------------------------------------------
   // start — 启动 async run
   // -------------------------------------------------------------------------
@@ -568,7 +613,9 @@ export function createAsyncRunManager(deps: {
       profile: "readonly",
     });
     if (!resourceValidation.allowed) {
-      throw new Error(resourceValidation.reason ?? "Invalid async run resources");
+      throw new Error(
+        resourceValidation.reason ?? "Invalid async run resources",
+      );
     }
 
     if (input.executor === "command" && input.command) {
@@ -707,15 +754,20 @@ export function createAsyncRunManager(deps: {
     // timeout 和命令完成是竞争关系，二者都调用 finishRun。
     // finishRun 的幂等保护负责保证只产生一个终态。
     const timeoutId = setTimeout(() => {
-      finishRun(record, "timeout", undefined, `Exceeded timeout of ${timeoutMs}ms`);
+      finishRun(
+        record,
+        "timeout",
+        undefined,
+        `Exceeded timeout of ${timeoutMs}ms`,
+      );
     }, timeoutMs);
+    timeoutIds.set(record.id, timeoutId);
 
     // 异步执行命令
     // 注意这里故意不 await：start() 必须快速返回 run_id，
     // 让主 Agent 可以继续工作，后台结果以后通过 notification 回来。
     executeBash(command, projectRoot, timeoutMs)
       .then((result) => {
-        clearTimeout(timeoutId);
         if (result.error) {
           finishRun(record, "failed", result.output, result.output);
         } else {
@@ -723,7 +775,6 @@ export function createAsyncRunManager(deps: {
         }
       })
       .catch((err) => {
-        clearTimeout(timeoutId);
         const errMsg = err instanceof Error ? err.message : String(err);
         finishRun(record, "failed", undefined, errMsg);
       });
@@ -756,7 +807,10 @@ export function createAsyncRunManager(deps: {
     // 这样子智能体可以拥有独立上下文，但审计时仍能追溯到父会话。
     const childSession =
       sessionManager && parentSessionId
-        ? sessionManager.createChildSession(parentSessionId, record.title.slice(0, 80))
+        ? sessionManager.createChildSession(
+            parentSessionId,
+            record.title.slice(0, 80),
+          )
         : null;
     const childSessionId = childSession?.id ?? null;
     if (childSessionId) {
@@ -765,6 +819,7 @@ export function createAsyncRunManager(deps: {
 
     // AbortController：timeout 后向 child Agent 发送中止信号，阻止新的 LLM/tool 调用
     const abortController = new AbortController();
+    abortControllers.set(record.id, abortController);
 
     // 构建 child Agent 参数
     // 注意：不传递 asyncRunManager（防止嵌套）、不传递 askUserFn（ask 降级为 deny）
@@ -778,7 +833,10 @@ export function createAsyncRunManager(deps: {
           commandPolicy: readonlyCommandPolicy,
         })
       : {
-          check: () => ({ action: "allow" } as import("./permission.js").PermissionDecision),
+          check: () =>
+            ({
+              action: "allow",
+            }) as import("./permission.js").PermissionDecision,
           setMode: () => {},
           getMode: () => "auto" as import("./permission.js").PermissionMode,
           getProjectDir: () => projectRoot,
@@ -810,8 +868,14 @@ export function createAsyncRunManager(deps: {
     // 设置超时监控：超时后先 abort child Agent，再 finishRun
     const timeoutId = setTimeout(() => {
       abortController.abort();
-      finishRun(record, "timeout", undefined, `Exceeded timeout of ${timeoutMs}ms`);
+      finishRun(
+        record,
+        "timeout",
+        undefined,
+        `Exceeded timeout of ${timeoutMs}ms`,
+      );
     }, timeoutMs);
+    timeoutIds.set(record.id, timeoutId);
 
     // 运行子 Agent
     // 和 command runner 一样，这里不 await。
@@ -819,14 +883,12 @@ export function createAsyncRunManager(deps: {
     subAgent
       .run(prompt)
       .then((output) => {
-        clearTimeout(timeoutId);
         if (childSessionId) {
           sessionManager?.endSession(childSessionId);
         }
         finishRun(record, "completed", output);
       })
       .catch((err) => {
-        clearTimeout(timeoutId);
         if (childSessionId) {
           sessionManager?.endSession(childSessionId);
         }
@@ -1013,6 +1075,7 @@ export function createAsyncRunManager(deps: {
     list,
     readOutput,
     drainNotifications,
+    shutdown,
     checkForegroundToolConflict,
     setOnFinish(handler: (record: AsyncRunRecord) => void): void {
       onFinishRef = handler;

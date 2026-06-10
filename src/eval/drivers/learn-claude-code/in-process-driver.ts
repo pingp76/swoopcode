@@ -22,6 +22,9 @@
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createAgent } from "../../../agent.js";
 import { createHistory } from "../../../history.js";
 import { createLogger } from "../../../logger.js";
@@ -32,6 +35,7 @@ import { createSessionEventBuffer } from "../../../session-events.js";
 import { createSystemPromptProvider } from "../../../system-prompt.js";
 import type { ToolRegistry } from "../../../tools/registry.js";
 import type { ToolResult } from "../../../tools/types.js";
+import type { LLMClient } from "../../../llm.js";
 import type {
   CodingAgentDriver,
   AgentCaseContext,
@@ -49,6 +53,10 @@ import { createCoreEvalToolRegistry } from "./core-tool-runtime.js";
 import { wrapToolRegistryForTrace } from "./tool-trace.js";
 import { createReplayLLMClient } from "../../replay/replay-llm.js";
 import { createLiveEvalLLMClient } from "../../live/live-llm.js";
+import {
+  createFullEvalRuntime,
+  type FullEvalRuntime,
+} from "./full-tool-runtime.js";
 
 /**
  * createLearnClaudeCodeInProcessDriver — 创建当前项目 in-process driver
@@ -72,8 +80,10 @@ export async function createLearnClaudeCodeInProcessDriver(
   }
 
   // LLM 和 PermissionManager 延迟到 startCase 创建，以便传入正确的 caseId/workspaceRoot
-  let llm: ReturnType<typeof createScriptedLLMClient> | undefined;
+  let llm: LLMClient | undefined;
   let permissionManager: ReturnType<typeof createPermissionManager> | undefined;
+  let fullRuntime: FullEvalRuntime | undefined;
+  let currentStepId: string | undefined;
 
   // 创建 Scripted Terminal，用于自动应答权限确认
   // 传入 emitEvent 以便在 askUser 被调用时记录 permission_prompt / permission_response 事件
@@ -90,47 +100,38 @@ export async function createLearnClaudeCodeInProcessDriver(
 
   // 创建 Compressor（使用默认配置）
   const compressor = createContextCompressor();
-
-
+  let activeCompressor = compressor;
 
   // 创建 TranscriptStore（内存版）
   const transcriptStore = createTranscriptStore();
+  let activeTranscriptStore = transcriptStore;
 
   // 创建 SessionEventBuffer
   const sessionEventBuffer = createSessionEventBuffer();
+  let activeSessionEventBuffer = sessionEventBuffer;
 
   // 创建最小化的 SystemPromptProvider
   const systemPromptProvider = createSystemPromptProvider({
     getSkillHint: () => null,
     getMemoryHint: () => null,
   });
+  let activeSystemPromptProvider = systemPromptProvider;
 
   // 生成 sessionId
   const sessionId = `eval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let activeSessionId = sessionId;
 
   // Agent 实例引用，延迟到 startCase 创建
   let agent: ReturnType<typeof createAgent> | undefined;
 
   return {
     async startCase(context: AgentCaseContext): Promise<void> {
-      // 根据 tools.kind 选择注册表类型
-      if (plan.tools?.kind === "core") {
-        // 第二批：使用真实核心工具，限制在临时 workspace 内
-        const coreOptions = plan.tools.core ?? {};
-        const coreRegistry = createCoreEvalToolRegistry({
-          projectRoot: context.workspaceRoot,
-          includeBash: coreOptions.includeBash ?? true,
-          includeRead: coreOptions.includeRead ?? true,
-          includeWrite: coreOptions.includeWrite ?? true,
-          includeEdit: coreOptions.includeEdit ?? true,
-          includeEditExact: coreOptions.includeEditExact ?? true,
-        });
-        // 包装追踪层，自动发射 tool_call / tool_result 事件
-        tools = wrapToolRegistryForTrace(coreRegistry, emitEvent);
-      } else {
-        // 第一批及默认：使用 fake tools
-        tools = createFakeToolRegistry(plan.tools?.fakeTools ?? [], emitEvent);
-      }
+      emitEvent({
+        kind: "runtime_path",
+        source: "driver",
+        label: "workspaceRoot",
+        path: context.workspaceRoot,
+      } as AgentRuntimeEvent);
 
       // 根据 llm.kind 创建对应的 LLM 客户端
       if (plan.llm.kind === "replay") {
@@ -145,7 +146,8 @@ export async function createLearnClaudeCodeInProcessDriver(
           emitEvent,
         });
       } else if (plan.llm.kind === "live") {
-        const liveOptions: { emitEvent: typeof emitEvent; maxCalls?: number } = { emitEvent };
+        const liveOptions: { emitEvent: typeof emitEvent; maxCalls?: number } =
+          { emitEvent };
         if (plan.llm.live?.maxCalls !== undefined) {
           liveOptions.maxCalls = plan.llm.live.maxCalls;
         }
@@ -158,43 +160,123 @@ export async function createLearnClaudeCodeInProcessDriver(
           emitEvent,
         });
       }
+      if (llm === undefined) {
+        throw new Error(`EvalCase ${context.caseId}: failed to create LLM`);
+      }
 
-      // 创建 PermissionManager，项目目录设为当前 workspace
-      permissionManager = createPermissionManager(context.workspaceRoot);
-      // 从 plan 读取权限模式，支持 case 作者选择 default/plan 来触发 askUser，
-      // 从而验证 permissionPromptShown 等断言。默认 auto 模式不调用 askUser。
-      const permissionMode = plan.tools?.core?.permissionMode ?? "auto";
-      permissionManager.setMode(permissionMode);
+      // 根据 tools.kind 选择注册表类型
+      if (plan.tools?.kind === "core") {
+        // 第二批：使用真实核心工具，限制在临时 workspace 内
+        const coreOptions = plan.tools.core ?? {};
+        const coreRegistry = createCoreEvalToolRegistry({
+          projectRoot: context.workspaceRoot,
+          includeBash: coreOptions.includeBash ?? true,
+          includeRead: coreOptions.includeRead ?? true,
+          includeWrite: coreOptions.includeWrite ?? true,
+          includeEdit: coreOptions.includeEdit ?? true,
+          includeEditExact: coreOptions.includeEditExact ?? true,
+        });
+        // 包装追踪层，自动发射 tool_call / tool_result 事件
+        tools = wrapToolRegistryForTrace(coreRegistry, emitEvent, {
+          getStepId: () => currentStepId,
+        });
+
+        permissionManager = createPermissionManager(context.workspaceRoot);
+        const permissionMode = coreOptions.permissionMode ?? "auto";
+        permissionManager.setMode(permissionMode);
+      } else if (plan.tools?.kind === "full") {
+        // 第三轮：使用完整真实工具，但把 agentHome 隔离到临时目录。
+        const fullOptions = plan.tools.full ?? {};
+        if (
+          fullOptions.agentHome !== undefined &&
+          fullOptions.agentHome !== "temp"
+        ) {
+          throw new Error(
+            `EvalCase ${context.caseId}: full tools only support agentHome="temp"`,
+          );
+        }
+        const agentHome = await mkdtemp(
+          join(tmpdir(), "learn-claude-eval-home-"),
+        );
+        const runtimeOptions: Parameters<typeof createFullEvalRuntime>[0] = {
+          workspaceRoot: context.workspaceRoot,
+          agentHome,
+          llm,
+          logger,
+          emitEvent,
+          getStepId: () => currentStepId,
+          permissionMode: fullOptions.permissionMode ?? "auto",
+        };
+        if (fullOptions.enabledTools !== undefined) {
+          runtimeOptions.enabledTools = fullOptions.enabledTools;
+        }
+        if (fullOptions.seedSkills !== undefined) {
+          runtimeOptions.seedSkills = fullOptions.seedSkills;
+        }
+        if (fullOptions.seedMemories !== undefined) {
+          runtimeOptions.seedMemories = fullOptions.seedMemories;
+        }
+        if (fullOptions.startScheduleManager !== undefined) {
+          runtimeOptions.startScheduleManager =
+            fullOptions.startScheduleManager;
+        }
+        fullRuntime = await createFullEvalRuntime(runtimeOptions);
+        tools = fullRuntime.tools;
+        permissionManager = fullRuntime.permissionManager;
+        activeCompressor = fullRuntime.compressor;
+        activeTranscriptStore = fullRuntime.transcriptStore;
+        activeSessionEventBuffer = fullRuntime.sessionEventBuffer;
+        activeSystemPromptProvider = fullRuntime.systemPromptProvider;
+        activeSessionId = fullRuntime.sessionId;
+
+        const snapshot = activeSystemPromptProvider.getSnapshot();
+        if (snapshot.systemPrompt) {
+          history.setSystemPrompt(snapshot.systemPrompt);
+        }
+      } else {
+        // 第一批及默认：使用 fake tools
+        const fakeTools =
+          plan.tools?.kind === "fake" ? (plan.tools.fakeTools ?? []) : [];
+        tools = createFakeToolRegistry(
+          fakeTools,
+          emitEvent,
+          () => currentStepId,
+        );
+
+        permissionManager = createPermissionManager(context.workspaceRoot);
+        permissionManager.setMode("auto");
+      }
+      if (permissionManager === undefined) {
+        throw new Error(
+          `EvalCase ${context.caseId}: failed to create PermissionManager`,
+        );
+      }
 
       // 创建 Agent 实例
-      const agentOptions: {
-        llm: typeof llm;
-        history: typeof history;
-        tools: typeof tools;
-        logger: typeof logger;
-        compressor: typeof compressor;
-        permissionManager: typeof permissionManager;
-        askUserFn: typeof terminal.askUser;
-        systemPromptProvider: typeof systemPromptProvider;
-        sessionEventBuffer: typeof sessionEventBuffer;
-        transcriptStore: typeof transcriptStore;
-        sessionId: string;
-        maxRounds?: number;
-      } = {
+      const agentOptions: Parameters<typeof createAgent>[0] = {
         llm,
         history,
         tools,
         logger,
-        compressor,
+        compressor: activeCompressor,
         permissionManager,
         askUserFn: terminal.askUser.bind(terminal),
-        systemPromptProvider,
-        sessionEventBuffer,
-        transcriptStore,
-        sessionId,
+        systemPromptProvider: activeSystemPromptProvider,
+        sessionEventBuffer: activeSessionEventBuffer,
+        transcriptStore: activeTranscriptStore,
+        sessionId: activeSessionId,
       };
       if (plan.maxRounds !== undefined) {
         agentOptions.maxRounds = plan.maxRounds;
+      }
+      if (fullRuntime !== undefined) {
+        agentOptions.todoManager = fullRuntime.todoManager;
+        if (fullRuntime.asyncRunManager !== undefined) {
+          agentOptions.asyncRunManager = fullRuntime.asyncRunManager;
+        }
+        if (fullRuntime.scheduleManager !== undefined) {
+          agentOptions.scheduleManager = fullRuntime.scheduleManager;
+        }
       }
       agent = createAgent(agentOptions);
     },
@@ -207,8 +289,15 @@ export async function createLearnClaudeCodeInProcessDriver(
       // 记录发送前的 runtimeEvents 长度，以便只返回本步产生的新事件
       const beforeCount = runtimeEvents.length;
 
-      // 调用 Agent 的 run() 处理用户输入
-      const finalOutput = await agent.run(input.query);
+      // 调用 Agent 的 run() 处理用户输入。
+      // currentStepId 只在当前 turn 有效，trace wrapper 会读取它并写入 tool events。
+      currentStepId = input.stepId;
+      let finalOutput: string;
+      try {
+        finalOutput = await agent.run(input.query);
+      } finally {
+        currentStepId = undefined;
+      }
 
       // 只返回本步新产生的事件，避免跨 step 累积导致重复
       const stepEvents = runtimeEvents.slice(beforeCount);
@@ -221,10 +310,11 @@ export async function createLearnClaudeCodeInProcessDriver(
     },
 
     async readEvents(): Promise<AgentRuntimeEvent[]> {
-      // 只返回 TranscriptStore 映射事件。
-      // LLM/tool 等 driver 内部事件已经在 send() 的 step events 中返回给 runner，
-      // readEvents() 的职责是补充 transcript 视角的事件，避免与 step events 重复。
-      const transcriptEvents = transcriptStore.readSession(sessionId);
+      // 返回 driver 内部事件 + TranscriptStore 映射事件。
+      // send() 已返回的事件会被 runner 按 id 去重；这里额外返回 startCase 阶段
+      // 产生的 runtime_path 等事件，便于失败 trace 定位临时目录。
+      const transcriptEvents =
+        activeTranscriptStore.readSession(activeSessionId);
       const mapped: AgentRuntimeEvent[] = transcriptEvents.map(
         (te) =>
           ({
@@ -233,14 +323,17 @@ export async function createLearnClaudeCodeInProcessDriver(
             kind: te.type,
             source: "agent",
             stepId: undefined,
-          } as unknown as AgentRuntimeEvent),
+          }) as unknown as AgentRuntimeEvent,
       );
-      return mapped;
+      return [...runtimeEvents, ...mapped];
     },
 
-    async close(): Promise<void> {
+    async close(options): Promise<void> {
       terminal.close();
-      compressor.cleanup();
+      activeCompressor.cleanup();
+      await fullRuntime?.cleanup({
+        keepAgentHome: options?.keepArtifacts === true,
+      });
     },
   };
 }
@@ -258,6 +351,7 @@ export async function createLearnClaudeCodeInProcessDriver(
 function createFakeToolRegistry(
   fakeTools: EvalFakeTool[],
   emitEvent: (event: AgentRuntimeEvent) => void,
+  getStepId?: () => string | undefined,
 ): ToolRegistry {
   // 去重校验：fake tool 名称不能重复
   const nameSet = new Set<string>();
@@ -279,13 +373,17 @@ function createFakeToolRegistry(
   }));
 
   // 构建执行器映射
-  const executors = new Map<string, (args: Record<string, unknown>) => Promise<ToolResult>>();
+  const executors = new Map<
+    string,
+    (args: Record<string, unknown>) => Promise<ToolResult>
+  >();
   for (const ft of fakeTools) {
     executors.set(ft.name, async (args) => {
       // 记录 tool_call 事件
       emitEvent({
         kind: "tool_call",
         source: "tool",
+        stepId: getStepId?.(),
         toolName: ft.name,
         args,
       } as AgentRuntimeEvent);
@@ -301,8 +399,9 @@ function createFakeToolRegistry(
       emitEvent({
         kind: "tool_result",
         source: "tool",
+        stepId: getStepId?.(),
         toolName: ft.name,
-        result: result.output.slice(0, 500),
+        result: result.output,
         error: result.error,
       } as AgentRuntimeEvent);
 

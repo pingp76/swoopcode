@@ -98,10 +98,27 @@ export interface EvalTerminalPlan {
 // ============================================================================
 
 /** Tool 执行计划 */
-export interface EvalToolPlan {
-  kind: "fake" | "core";
+export type EvalToolPlan =
+  | EvalFakeToolPlan
+  | EvalCoreToolPlan
+  | EvalFullToolPlan;
+
+/** Fake 工具执行计划 */
+export interface EvalFakeToolPlan {
+  kind: "fake";
   fakeTools?: EvalFakeTool[];
+}
+
+/** 真实核心工具执行计划 */
+export interface EvalCoreToolPlan {
+  kind: "core";
   core?: EvalCoreToolOptions;
+}
+
+/** 当前项目完整工具执行计划 */
+export interface EvalFullToolPlan {
+  kind: "full";
+  full?: EvalFullToolOptions;
 }
 
 /** Fake 工具定义 */
@@ -109,7 +126,9 @@ export interface EvalFakeTool {
   name: string;
   description?: string;
   parameters?: Record<string, unknown>;
-  result: EvalToolResult | ((args: Record<string, unknown>) => Promise<EvalToolResult>);
+  result:
+    | EvalToolResult
+    | ((args: Record<string, unknown>) => Promise<EvalToolResult>);
 }
 
 /** Fake 工具返回结果（与当前项目 ToolResult 同构，避免直接依赖） */
@@ -126,6 +145,35 @@ export interface EvalCoreToolOptions {
   includeEdit?: boolean;
   includeEditExact?: boolean;
   permissionMode?: "auto" | "default" | "plan";
+}
+
+/** 当前项目 full-tools eval 支持的工具组 */
+export type EvalFullToolGroup =
+  | "core"
+  | "todo"
+  | "task"
+  | "memory"
+  | "skill"
+  | "subagent"
+  | "async"
+  | "schedule"
+  | "output";
+
+/** full-tools eval 的预置 memory 内容 */
+export interface EvalSeedMemory {
+  description: string;
+  type: "user" | "feedback" | "project" | "reference";
+  body: string;
+}
+
+/** 当前项目完整工具选项 */
+export interface EvalFullToolOptions {
+  enabledTools?: EvalFullToolGroup[];
+  agentHome?: "temp";
+  seedSkills?: Record<string, string>;
+  seedMemories?: Record<string, EvalSeedMemory>;
+  permissionMode?: "auto" | "default" | "plan";
+  startScheduleManager?: boolean;
 }
 
 // ============================================================================
@@ -252,13 +300,18 @@ export type EvalAssertion =
   | ExitCodeIsAssertion
   | AllStepsCompletedAssertion
   | FileExistsAssertion
+  | FileNotExistsAssertion
   | FileContainsAssertion
   | WorkspaceDiffContainsAssertion
   | NoWritesOutsideWorkspaceAssertion
   | ToolCalledAssertion
   | ToolNotCalledAssertion
+  | ToolCalledOneOfAssertion
   | ToolCallCountAssertion
   | ToolArgsContainAssertion
+  | ToolResultContainsAssertion
+  | StepToolCalledAssertion
+  | StepToolNotCalledAssertion
   | NoToolErrorsAssertion
   | AllToolsSucceededAssertion
   | TranscriptEventTypesAssertion
@@ -297,6 +350,12 @@ export interface FileExistsAssertion {
   path: string;
 }
 
+/** 文件不存在 */
+export interface FileNotExistsAssertion {
+  kind: "fileNotExists";
+  path: string;
+}
+
 /** 文件包含指定文本 */
 export interface FileContainsAssertion {
   kind: "fileContains";
@@ -329,6 +388,12 @@ export interface ToolNotCalledAssertion {
   toolName: string;
 }
 
+/** 一组工具中至少一个被调用过 */
+export interface ToolCalledOneOfAssertion {
+  kind: "toolCalledOneOf";
+  toolNames: string[];
+}
+
 /** 工具调用次数等于指定值 */
 export interface ToolCallCountAssertion {
   kind: "toolCallCount";
@@ -341,6 +406,28 @@ export interface ToolArgsContainAssertion {
   kind: "toolArgsContain";
   toolName: string;
   text: string;
+}
+
+/** 工具结果包含指定文本 */
+export interface ToolResultContainsAssertion {
+  kind: "toolResultContains";
+  toolName: string;
+  text: string;
+}
+
+/** 指定 step 中工具被调用过 */
+export interface StepToolCalledAssertion {
+  kind: "stepToolCalled";
+  stepId: string;
+  toolName: string;
+  minCount?: number;
+}
+
+/** 指定 step 中工具未被调用 */
+export interface StepToolNotCalledAssertion {
+  kind: "stepToolNotCalled";
+  stepId: string;
+  toolName: string;
 }
 
 /** 没有工具错误 */
@@ -390,6 +477,7 @@ export type AgentRuntimeEvent =
   | LLMRuntimeEvent
   | PermissionRuntimeEvent
   | LogRuntimeEvent
+  | RuntimePathEvent
   | RawRuntimeEvent
   | DriverErrorEvent;
 
@@ -451,6 +539,14 @@ export interface LogRuntimeEvent extends BaseRuntimeEvent {
   kind: "log";
   level: "debug" | "info" | "warn" | "error";
   message: string;
+}
+
+/** Eval runtime 路径事件，用于 trace 中定位临时 workspace/agentHome */
+export interface RuntimePathEvent extends BaseRuntimeEvent {
+  kind: "runtime_path";
+  source: "driver";
+  label: "workspaceRoot" | "agentHome";
+  path: string;
 }
 
 /** 原始运行时事件（扩展预留） */

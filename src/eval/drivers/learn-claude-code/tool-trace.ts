@@ -25,6 +25,9 @@ import type { AgentRuntimeEvent } from "../../core/case-schema.js";
 export function wrapToolRegistryForTrace(
   registry: ToolRegistry,
   emitEvent: (event: AgentRuntimeEvent) => void,
+  options?: {
+    getStepId?: () => string | undefined;
+  },
 ): ToolRegistry {
   return {
     getToolDefinitions() {
@@ -44,6 +47,7 @@ export function wrapToolRegistryForTrace(
         emitEvent({
           kind: "tool_call",
           source: "tool",
+          stepId: options?.getStepId?.(),
           toolName: name,
           args,
         } as AgentRuntimeEvent);
@@ -55,8 +59,9 @@ export function wrapToolRegistryForTrace(
           emitEvent({
             kind: "tool_result",
             source: "tool",
+            stepId: options?.getStepId?.(),
             toolName: name,
-            result: result.output.slice(0, 500),
+            result: result.output,
             error: result.error,
           } as AgentRuntimeEvent);
 
@@ -68,6 +73,7 @@ export function wrapToolRegistryForTrace(
           emitEvent({
             kind: "tool_result",
             source: "tool",
+            stepId: options?.getStepId?.(),
             toolName: name,
             result: message,
             error: true,

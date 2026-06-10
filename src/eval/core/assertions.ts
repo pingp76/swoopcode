@@ -70,6 +70,8 @@ async function runSingleAssertion(
       return runAllStepsCompleted(assertion, ctx);
     case "fileExists":
       return await runFileExists(assertion, ctx);
+    case "fileNotExists":
+      return await runFileNotExists(assertion, ctx);
     case "fileContains":
       return await runFileContains(assertion, ctx);
     case "noWritesOutsideWorkspace":
@@ -78,10 +80,18 @@ async function runSingleAssertion(
       return runToolCalled(assertion, ctx);
     case "toolNotCalled":
       return runToolNotCalled(assertion, ctx);
+    case "toolCalledOneOf":
+      return runToolCalledOneOf(assertion, ctx);
     case "toolCallCount":
       return runToolCallCount(assertion, ctx);
     case "toolArgsContain":
       return runToolArgsContain(assertion, ctx);
+    case "toolResultContains":
+      return runToolResultContains(assertion, ctx);
+    case "stepToolCalled":
+      return runStepToolCalled(assertion, ctx);
+    case "stepToolNotCalled":
+      return runStepToolNotCalled(assertion, ctx);
     case "noToolErrors":
       return runNoToolErrors(assertion, ctx);
     case "allToolsSucceeded":
@@ -163,7 +173,10 @@ function runExitCodeIs(
   };
 }
 
-function runAllStepsCompleted(_assertion: unknown, ctx: EvalAssertionContext): EvalAssertionResult {
+function runAllStepsCompleted(
+  _assertion: unknown,
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
   const completed = ctx.stepTraces.every((s) => s.endedAt !== undefined);
   return {
     kind: "allStepsCompleted",
@@ -188,8 +201,14 @@ function resolveWorkspacePath(pathStr: string, workspaceRoot: string): string {
  *
  * 采用 startsWith(workspaceRoot + sep) 判断，避免 /workspace 前缀匹配 /workspace-evil。
  */
-function isPathWithinWorkspace(absolutePath: string, workspaceRoot: string): boolean {
-  return absolutePath === workspaceRoot || absolutePath.startsWith(workspaceRoot + sep);
+function isPathWithinWorkspace(
+  absolutePath: string,
+  workspaceRoot: string,
+): boolean {
+  return (
+    absolutePath === workspaceRoot ||
+    absolutePath.startsWith(workspaceRoot + sep)
+  );
 }
 
 async function runFileExists(
@@ -215,6 +234,34 @@ async function runFileExists(
     return {
       kind: "fileExists",
       passed: false,
+      message: `File does not exist: ${assertion.path}`,
+    };
+  }
+}
+
+async function runFileNotExists(
+  assertion: { path: string },
+  ctx: EvalAssertionContext,
+): Promise<EvalAssertionResult> {
+  const absolutePath = resolveWorkspacePath(assertion.path, ctx.workspaceRoot);
+  if (!isPathWithinWorkspace(absolutePath, ctx.workspaceRoot)) {
+    return {
+      kind: "fileNotExists",
+      passed: false,
+      message: `Path escapes workspace: ${assertion.path}`,
+    };
+  }
+  try {
+    await readFile(absolutePath);
+    return {
+      kind: "fileNotExists",
+      passed: false,
+      message: `File unexpectedly exists: ${assertion.path}`,
+    };
+  } catch {
+    return {
+      kind: "fileNotExists",
+      passed: true,
       message: `File does not exist: ${assertion.path}`,
     };
   }
@@ -260,7 +307,8 @@ function runNoWritesOutsideWorkspace(
   // 如果黑盒 driver 不发射 tool_call 事件，此断言会错误通过（无事件 = 无写入）。
   // 使用时应确保 driver 支持 instrumented assertions。
   const toolEvents = ctx.runtimeEvents.filter(
-    (e): e is ToolRuntimeEvent => e.kind === "tool_call" || e.kind === "tool_result",
+    (e): e is ToolRuntimeEvent =>
+      e.kind === "tool_call" || e.kind === "tool_result",
   );
   // 如果没有工具事件，说明没有工具被调用，自然没有外部写入
   if (toolEvents.length === 0) {
@@ -354,6 +402,28 @@ function runToolNotCalled(
   };
 }
 
+function runToolCalledOneOf(
+  assertion: { toolNames: string[] },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const counts = Object.fromEntries(
+    assertion.toolNames.map((name) => [
+      name,
+      countToolCalls(ctx.runtimeEvents, name),
+    ]),
+  );
+  const called = Object.entries(counts).filter(([, count]) => count > 0);
+  const passed = called.length > 0;
+  return {
+    kind: "toolCalledOneOf",
+    passed,
+    message: passed
+      ? `At least one expected tool was called: ${called.map(([name]) => name).join(", ")}`
+      : `None of expected tools were called: ${assertion.toolNames.join(", ")}`,
+    evidence: { counts },
+  };
+}
+
 function runToolArgsContain(
   assertion: { toolName: string; text: string },
   ctx: EvalAssertionContext,
@@ -375,6 +445,68 @@ function runToolArgsContain(
   };
 }
 
+function runToolResultContains(
+  assertion: { toolName: string; text: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const matchingResults = ctx.runtimeEvents.filter(
+    (e): e is ToolRuntimeEvent =>
+      e.kind === "tool_result" &&
+      e.toolName === assertion.toolName &&
+      stringifyResult(e.result).includes(assertion.text),
+  );
+  const passed = matchingResults.length > 0;
+  return {
+    kind: "toolResultContains",
+    passed,
+    message: passed
+      ? `Tool "${assertion.toolName}" result contains "${assertion.text}"`
+      : `Tool "${assertion.toolName}" result does not contain "${assertion.text}"`,
+    evidence: { matchingResults: matchingResults.length },
+  };
+}
+
+function runStepToolCalled(
+  assertion: { stepId: string; toolName: string; minCount?: number },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const minCount = assertion.minCount ?? 1;
+  const count = countStepToolCalls(
+    ctx.runtimeEvents,
+    assertion.stepId,
+    assertion.toolName,
+  );
+  const passed = count >= minCount;
+  return {
+    kind: "stepToolCalled",
+    passed,
+    message: passed
+      ? `Tool "${assertion.toolName}" called ${count} time(s) in step "${assertion.stepId}" (>= ${minCount})`
+      : `Tool "${assertion.toolName}" called ${count} time(s) in step "${assertion.stepId}", expected >= ${minCount}`,
+    evidence: { count, stepId: assertion.stepId },
+  };
+}
+
+function runStepToolNotCalled(
+  assertion: { stepId: string; toolName: string },
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
+  const count = countStepToolCalls(
+    ctx.runtimeEvents,
+    assertion.stepId,
+    assertion.toolName,
+  );
+  const passed = count === 0;
+  return {
+    kind: "stepToolNotCalled",
+    passed,
+    message: passed
+      ? `Tool "${assertion.toolName}" was not called in step "${assertion.stepId}"`
+      : `Tool "${assertion.toolName}" was called ${count} time(s) in step "${assertion.stepId}", expected 0`,
+    evidence: { count, stepId: assertion.stepId },
+  };
+}
+
 function runAllToolsSucceeded(
   _assertion: unknown,
   ctx: EvalAssertionContext,
@@ -390,7 +522,10 @@ function runAllToolsSucceeded(
     message: passed
       ? "All tool calls succeeded"
       : `${failed.length} tool call(s) failed`,
-    evidence: { totalToolResults: toolResults.length, failedCount: failed.length },
+    evidence: {
+      totalToolResults: toolResults.length,
+      failedCount: failed.length,
+    },
   };
 }
 
@@ -398,7 +533,9 @@ function runPermissionPromptShown(
   _assertion: unknown,
   ctx: EvalAssertionContext,
 ): EvalAssertionResult {
-  const prompts = ctx.runtimeEvents.filter((e) => e.kind === "permission_prompt");
+  const prompts = ctx.runtimeEvents.filter(
+    (e) => e.kind === "permission_prompt",
+  );
   const passed = prompts.length > 0;
   return {
     kind: "permissionPromptShown",
@@ -410,7 +547,10 @@ function runPermissionPromptShown(
   };
 }
 
-function runNoToolErrors(_assertion: unknown, ctx: EvalAssertionContext): EvalAssertionResult {
+function runNoToolErrors(
+  _assertion: unknown,
+  ctx: EvalAssertionContext,
+): EvalAssertionResult {
   const errorEvents = ctx.runtimeEvents.filter(
     (e): e is ToolRuntimeEvent =>
       (e.kind === "tool_call" || e.kind === "tool_result") && e.error === true,
@@ -439,7 +579,8 @@ function runTranscriptEventTypes(
     .map((e) => e.kind);
   const expected = assertion.expected;
   const passed =
-    actual.length === expected.length && actual.every((v, i) => v === expected[i]);
+    actual.length === expected.length &&
+    actual.every((v, i) => v === expected[i]);
   return {
     kind: "transcriptEventTypes",
     passed,
@@ -461,7 +602,10 @@ function runWorkspaceDiffContains(
 }
 
 async function runCustomAssertion(
-  assertion: { fn: (ctx: EvalAssertionContext) => boolean | Promise<boolean>; message: string },
+  assertion: {
+    fn: (ctx: EvalAssertionContext) => boolean | Promise<boolean>;
+    message: string;
+  },
   ctx: EvalAssertionContext,
 ): Promise<EvalAssertionResult> {
   const passed = await assertion.fn(ctx);
@@ -481,7 +625,10 @@ async function runCustomAssertion(
  *
  * 如果 stepId 未指定，返回最后一步；否则按 stepId 精确匹配。
  */
-function findStepTrace(stepId: string | undefined, ctx: EvalAssertionContext): EvalStepTrace | undefined {
+function findStepTrace(
+  stepId: string | undefined,
+  ctx: EvalAssertionContext,
+): EvalStepTrace | undefined {
   if (stepId === undefined) {
     return ctx.stepTraces.at(-1);
   }
@@ -493,6 +640,36 @@ function findStepTrace(stepId: string | undefined, ctx: EvalAssertionContext): E
  */
 function countToolCalls(events: AgentRuntimeEvent[], toolName: string): number {
   return events.filter(
-    (e): e is ToolRuntimeEvent => e.kind === "tool_call" && e.toolName === toolName,
+    (e): e is ToolRuntimeEvent =>
+      e.kind === "tool_call" && e.toolName === toolName,
   ).length;
+}
+
+/**
+ * countStepToolCalls — 统计指定 step 内的工具调用次数。
+ *
+ * 这个断言依赖 driver 在 tool_call 事件上填充 stepId。
+ * 若旧 driver 没有 stepId，该断言会自然失败，提醒 case 作者不要误以为
+ * 已经验证了“某一步没有写入”。
+ */
+function countStepToolCalls(
+  events: AgentRuntimeEvent[],
+  stepId: string,
+  toolName: string,
+): number {
+  return events.filter(
+    (e): e is ToolRuntimeEvent =>
+      e.kind === "tool_call" && e.stepId === stepId && e.toolName === toolName,
+  ).length;
+}
+
+function stringifyResult(result: unknown): string {
+  if (typeof result === "string") {
+    return result;
+  }
+  try {
+    return JSON.stringify(result);
+  } catch {
+    return String(result);
+  }
 }
