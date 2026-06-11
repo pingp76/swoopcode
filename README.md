@@ -12,6 +12,8 @@
 
 Swoop Code 的仓库名和包名是 `swoopcode`。项目中的所有代码和大部分文档都由 Codex、Kimi Code、GLM、MiniMax 协作完成。它是一个教学用途的 TypeScript Coding Agent。它不是把生产级 agent 框架藏在抽象后面，而是用尽量清晰、可阅读、可测试的代码，展示一个 coding agent 从最小 loop 到完整 harness 的逐步构建过程。
 
+通过内置的教程和原始 Prompt，你最大的收获会是了解如何 Vibe Coding 一个全功能的 Agent。这样你可以通过裁剪功能，为自己的任务定制特殊目的 Agent。
+
 `Swoop` 的灵感来自跳伞运动中的“拉飘”：降落前从高速俯冲转为拉平滑翔，再把速度和方向收束到一个精准落点。这个名字也对应本项目想表达的 coding agent harness：让模型从自由生成的“自由落体”，进入有工具、有权限、有上下文、有验证的受控执行过程，最后把任务稳稳落到代码和结果上。
 
 项目仍在持续推进中。当前版本已经覆盖单 Agent runtime 的大部分教学主线，后续还会继续补充 MCP runtime、Agent Team、多 agent 协作、更多真实模型适配和更系统的端到端评测。欢迎对 coding agent 感兴趣的朋友一起贡献设计、实现、测试、教程和案例。
