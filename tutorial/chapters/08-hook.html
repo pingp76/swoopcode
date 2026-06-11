@@ -1,0 +1,554 @@
+<p class="article__eyebrow">第 08 章 · 在 Loop 周围挂钩子</p>
+<h1 class="article__title">给 Harness 留事实基础: Hook</h1>
+<p class="article__lede">
+  前面七章让 harness 能聊天、能调工具、能跑子任务、能压缩、能拦权限。 但 harness
+  的关键事件 (permission 决策、工具执行、状态变化) 现在还没有 统一记录。这一章在
+  loop 周围挂三个钩子: PreToolUse (执行前)、 PostToolUse (执行后)、SessionStart
+  (会话开始), 让 harness 的关键事件 有 transcript 兜底, 也为 eval
+  重放和审计留事实基础。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="delta-from-07">在第 07 章基础上改了什么</h2>
+<p>
+  这一章在 agent 主循环的关键节点插入 Hook 调用点。PreToolUse 在
+  permission.check 之后、tool.execute 之前触发, PostToolUse 在 tool.execute
+  之后、history.add(tool message) 之前触发, SessionStart 在第一次 run()
+  调用、history.add(user message) 之前触发。Hook 返回 exitCode: 0 (pass through)
+  / 1 (block) / 2 (inject message) 三种 状态, harness 根据 exitCode
+  决定后续行为。 对应到代码, 改动集中在 3 个文件:
+  <code>src/hooks.ts</code> (新)、 <code>src/agent.ts</code> (改关键节点插入
+  hookRunner.run())、 <code>src/index.ts</code> (改接线, 注入 hookRunner)。
+</p>
+<div class="source-links" aria-label="本章 GitHub 永久链接">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/hooks.ts"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/hooks.ts: 钩子运行器 (新)</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
+    target="_blank"
+    rel="noreferrer"
+    >2. src/agent.ts: PreToolUse / PostToolUse / SessionStart 接入点</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/transcript.ts"
+    target="_blank"
+    rel="noreferrer"
+    >3. src/transcript.ts: Hook 决策记录 (第 15 章展开)</a
+  >
+</div>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    harness 跑了一个月之后, 出了"为什么这个工具没执行" 的问题, 但 history
+    里只有"Permission denied" 这条 tool message, 没有"为什么 permission 拒绝"
+    的具体信息。现象是"决策过程不透明"。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"在 permission 内部 console.log"。这有两个问题: 一是日志进了
+    stdout, 但 transcript 没记录, eval 重放时无法还原; 二是 console.log
+    是副作用, 测试时无法断言"permission 拒绝时是否 输出了正确原因"。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口:
+    <code>interface HookRunner { run(event): Promise&lt;HookResult&gt; }</code
+    >。 不变量三条: (1) Hook 是异步的, 但不能修改主消息流 (只能注入新消息 或返回
+    block), (2) exitCode 1 必须对应到具体副作用, 不能"无理由 block", (3) Hook
+    失败 (抛错) 必须降级为 pass through, 不能让 harness 因 Hook 崩溃。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake HookRunner 预设 PreToolUse 返回 exitCode 1, 跑完后 history 末尾有 tool
+    message "Blocked by PreToolUse hook: ..."; spy 验证 tool.execute 没被调用。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
+<div class="note">
+  <p class="note__title">观察 1 · Hook 抛错让 harness 崩</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+const result = await hookRunner.run(event);
+if (result.exitCode === 1) {
+  // 错误: 没写 tool message
+  return;  // 直接 return, tool 也不执行了
+}</code></pre>
+  <p><strong>问:</strong>为什么不写 tool message, 直接 return?</p>
+  <p>
+    <strong>答:</strong>三件事同时坏掉 —— 协议: tool_call 必须配对 tool_message,
+    缺一条 messages 序列就断裂; 真实性: LLM 不知道"为什么没执行", 反复重试;
+    体验: eval 重放时看不到 "Hook 在此刻 block 了什么"。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 2 · Hook 抛错让主 loop 崩</p>
+  <pre class="code-block"><code>// 教学简化版
+try {
+  const result = await hookRunner.run(event);
+} catch (err) {
+  throw err;  // 错误: 让 hook 错误冒泡到 agent
+}</code></pre>
+  <p><strong>问:</strong>为什么不让 hook 错误冒泡?</p>
+  <p>
+    <strong>答:</strong>Hook 是用户扩展点, 第三方 Hook (例如审计 Hook)
+    不应该有能力让 harness 崩溃。Hook 抛错必须降级为 pass through, 写一条 error
+    tool message 告诉 LLM "Hook 失败, 已忽略"。
+  </p>
+</div>
+
+<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export type HookEventName =
+  | "SessionStart" | "PreToolUse" | "PostToolUse" | "SubagentStart" | "SubagentEnd";
+
+export interface HookEvent {
+  name: HookEventName;
+  payload: Record&lt;string, unknown&gt;;  // 事件专属字段
+}
+
+export type HookExitCode = 0 | 1 | 2;
+// 0: pass through (继续执行)
+// 1: block (阻止后续动作, 但 tool_call 必须配对 tool_message)
+// 2: inject (允许后续动作, 追加一条 user 消息到 history)
+
+export interface HookResult {
+  exitCode: HookExitCode;
+  message?: string;  // exitCode 1 时为拒绝原因, exitCode 2 时为注入消息
+}
+
+export interface HookRunner {
+  run(event: HookEvent): Promise&lt;HookResult&gt;;
+}</code></pre>
+
+<h2 id="loop-integration">loop 接入: 三个事件三个位置</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+// SessionStart: 第一次 run() 时触发
+if (!sessionStarted) {
+  sessionStarted = true;
+  const result = await safeRunHook(hookRunner, { name: "SessionStart", payload: { query } });
+  if (result.exitCode === 1) {
+    return result.message ?? "Session blocked by hook.";  // 整个会话被拒
+  }
+  // exitCode 2 注入的 message 在用户消息之后追加
+}
+
+// 在工具执行路径上
+for (const call of assistant.tool_calls) {
+  // 1. permission
+  const decision = permissionManager.check({ toolName: call.name, args: call.args });
+  if (decision.action === "deny") { /* ... */ continue; }
+  if (decision.action === "ask") { /* ... */ }
+
+  // 2. PreToolUse Hook (permission 之后, execute 之前)
+  const preResult = await safeRunHook(hookRunner, {
+    name: "PreToolUse",
+    payload: { toolName: call.name, args: call.args, round: loopRound },
+  });
+  if (preResult.exitCode === 1) {
+    history.add({ role: "tool", tool_call_id: call.id,
+      content: `Blocked by PreToolUse hook: ${preResult.message ?? ""}` });
+    continue;
+  }
+  // exitCode 2 注入的消息延迟到所有 tool_result 写完后再追加 (避免破坏协议)
+
+  // 3. execute
+  const result = await tool.execute(call.args);
+
+  // 4. PostToolUse Hook (execute 之后, tool message 写入之前)
+  const postResult = await safeRunHook(hookRunner, {
+    name: "PostToolUse",
+    payload: { toolName: call.name, args: call.args, output: result.content, error: result.error },
+  });
+  // PostToolUse exitCode 1 不能撤销已执行的副作用, 只能注入警告
+  if (postResult.exitCode === 1) {
+    pendingHookMessages.push(`[Hook: PostToolUse] block: ${postResult.message ?? ""}`);
+  }
+  if (postResult.exitCode === 2) {
+    pendingHookMessages.push(`[Hook: PostToolUse] ${postResult.message ?? ""}`);
+  }
+
+  history.add({ role: "tool", tool_call_id: call.id, content: result.content });
+}
+
+// 5. 所有 tool_result 写完后, 统一追加 Hook 注入的 user 消息
+for (const msg of pendingHookMessages) {
+  history.add({ role: "user", content: msg }, timing);
+}</code></pre>
+
+<h2 id="error-degradation">错误降级: hook 抛错不能崩 harness</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+async function safeRunHook(hookRunner: HookRunner, event: HookEvent): Promise&lt;HookResult&gt; {
+  try {
+    return await hookRunner.run(event);
+  } catch (err) {
+    logger.warn("Hook %s failed: %s", event.name, err);
+    return { exitCode: 0 };  // 降级为 pass through
+  }
+}</code></pre>
+<p>
+  第三方 Hook 不应该有能力让 harness 崩溃。Hook 抛错时, harness 降级 为 pass
+  through, 写一条 warning 到 logger, 主 loop 继续。
+</p>
+
+<h2 id="trap">反例梯度</h2>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>PreToolUse block 时不写 tool message。</p>
+    <p>
+      <strong>为什么错:</strong>破坏第 02 章 tool_call 配对协议, messages
+      序列断裂。
+    </p>
+    <p>
+      <strong>正确做法:</strong>block 必写 role: "tool" 消息 "Blocked by
+      PreToolUse hook: ..."。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>Hook 抛错时让主 loop 崩。</p>
+    <p>
+      <strong>为什么错:</strong>第三方 Hook 不应该有能力让 harness 崩溃, 主 loop
+      健壮性优先。
+    </p>
+    <p>
+      <strong>正确做法:</strong>safeRunHook() 包 try/catch, 抛错降级为 exitCode
+      0。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>Hook 注入的 user 消息插在 tool_result 之间。
+    </p>
+    <p>
+      <strong>为什么错:</strong>多工具并行调用时, 插在 tool_result 之间会破坏
+      LLM 协议的 tool_call/tool_result 配对规则。
+    </p>
+    <p>
+      <strong>正确做法:</strong>Hook 注入消息延迟到所有 tool_result 写完之后,
+      统一追加。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>PostToolUse exitCode 1 试图撤销已执行的副作用。
+    </p>
+    <p>
+      <strong>为什么错:</strong>工具已经执行 (例如文件已写、命令已跑), 撤销 API
+      不存在。PostToolUse block 只能注入警告, 不能"假装撤销"。
+    </p>
+    <p>
+      <strong>正确做法:</strong>PostToolUse exitCode 1 注入 "[Hook: PostToolUse]
+      block: ..." 警告, 不假装撤销。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · 第 08 章</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>PreToolUse block 写 tool message:</strong>fake HookRunner
+      PreToolUse 返回 exitCode 1, 跑完后 spy 验证 tool.execute 没被 调用,
+      history 末尾有 tool message "Blocked by PreToolUse hook"。
+    </p>
+    <p>
+      <strong>Hook 抛错降级为 pass through:</strong>fake HookRunner.run 抛错,
+      跑完后主 loop 继续, tool.execute 被调用, logger.warn 有 "Hook PreToolUse
+      failed"。
+    </p>
+    <p>
+      <strong>Hook 注入消息延迟追加:</strong>fake LLM 返回 2 个 tool_calls, fake
+      HookRunner PreToolUse 返回 exitCode 2 with message, 跑完后 history 中 2 条
+      tool_result 之后才出现 1 条 user message "[Hook: PreToolUse] ..."。
+    </p>
+    <p>
+      <strong>SessionStart block 终止 run:</strong>fake HookRunner SessionStart
+      返回 exitCode 1, agent.run() 返回 "Session blocked by hook.", history 长度
+      = 0 (用户消息未写入)。
+    </p>
+    <p>
+      <strong>PostToolUse block 不撤销:</strong>fake HookRunner PostToolUse 返回
+      exitCode 1, 跑完后 history 末尾有 tool result (execute 已完成) + 1 条 user
+      message "[Hook: PostToolUse] block: ..."。
+    </p>
+  </div>
+</div>
+
+<h2 id="lookback">回望第 00–07 章: 哪些原则在本章兑现了</h2>
+<ul>
+  <li>
+    <strong>tool_call 协议沿用:</strong>PreToolUse block 必写 tool message, Hook
+    注入消息延迟追加, 不破坏第 02 章的协议约束。
+  </li>
+  <li>
+    <strong>Composition Root 唯一接线:</strong>hookRunner 在
+    <code>index.ts</code> 创建, 注入 agent, 不在 agent.ts 内 new。
+  </li>
+  <li>
+    <strong>错误降级原则:</strong>Hook 抛错不崩主 loop, 这条原则在第 11 章
+    recovery 会进一步展开 (LLM 抛错也降级)。
+  </li>
+  <li>
+    <strong>事实与视图分离:</strong>Hook 决策不进 history, 进 transcript (第 15
+    章展开), history 仍然保持"对话历史" 的单一职责。
+  </li>
+</ul>
+
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>Hook 决策落盘</dt>
+  <dd>
+    第 15 章 transcript 会把 Hook 决策 (exitCode, message, timestamp) 落盘,
+    用于审计和 eval 重放。
+  </dd>
+  <dt>Hook 阻塞太久</dt>
+  <dd>
+    第 11 章 recovery 会处理"Hook 阻塞超过 30s" 的超时降级, 不让主 loop 永远卡在
+    Hook 上。
+  </dd>
+  <dt>SessionStart 拒掉的会话</dt>
+  <dd>
+    第 09 章 memory 区分"被 SessionStart 拒掉的会话" (不进 memory)
+    和"被正常完成的会话" (写 memory)。
+  </dd>
+  <dt>Hook 跨项目保留</dt>
+  <dd>
+    Hook 配置通常在 <code>.claude/hooks/</code> 项目级目录, 与第 09 章 memory
+    的项目级 / 用户级分类一致。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-08">本次如何 vibe code: 第 08 章的三件套</h2>
+
+<h3 id="vibe-feed-08">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>HookEvent</code> /
+    <code>HookResult</code> / <code>HookRunner</code> 三个 interface, 以及
+    exitCode 0/1/2 三种语义的明确文档。本轮不写实现, 重点钉"block 必写 tool
+    message" 和"错误降级" 两条约束。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
+    <code>createNoopHookRunner()</code> 返回 pass-through runner (永远 exitCode
+    0), agent.run 接入三个事件调用点但 runner 是 noop。本轮 review 重点:
+    hookRunner 与 permissionManager 是同级依赖。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写 safeRunHook + PreToolUse /
+    PostToolUse / SessionStart 接入 + 注入消息延迟追加。本轮 review 重点:
+    三个事件都在正确位置, safeRunHook 包 try/catch。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写
+    <code>test/hook.test.ts</code>。本轮 review 重点: "PreToolUse block 写 tool
+    message" 和 "Hook 抛错降级" 两条必须有 spy 验证。
+  </li>
+</ol>
+
+<h3 id="vibe-review-08">Review: 第 08 章专属 checklist</h3>
+<ol>
+  <li>
+    <strong>block 必写 tool message。</strong>PreToolUse exitCode 1 路径上必有
+    <code>history.add({role: "tool", ...})</code>。验证:
+    <code>grep -n 'Blocked by PreToolUse' src/agent.ts</code> ≥ 1 行。
+  </li>
+  <li>
+    <strong>Hook 抛错降级。</strong>safeRunHook 必有 try/catch。验证:
+    <code>grep -n 'catch' src/hooks.ts</code> ≥ 1 行。
+  </li>
+  <li>
+    <strong>Hook 注入消息延迟追加。</strong>exitCode 2 注入的 message 不直接写
+    history, 而是 push 到 pendingHookMessages 数组, 在所有 tool_result
+    写完之后统一追加。验证: agent.ts 末尾有 "for (const msg of
+    pendingHookMessages)" 循环。
+  </li>
+  <li>
+    <strong>PostToolUse 不撤销。</strong>PostToolUse exitCode 1 路径上,
+    tool.execute 之后正常写 tool message, Hook block 仅作为 user 消息追加。验证:
+    跑测试, 工具 spy 被调用 1 次 (execute 真的跑了)。
+  </li>
+  <li>
+    <strong>hookRunner 是工厂, 不在 agent 内 new。</strong>验证:
+    <code>grep -n 'new HookRunner\|new NoopHook' src/agent.ts</code> 应当 0 行。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-08">调试: 第 08 章典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · Hook 注入消息直接写 history, 不延迟。</strong>症状:
+    exitCode 2 路径上 <code>history.add({role: "user", ...})</code> 紧跟在
+    tool.execute 之后。验证: 跑测试, 2 个 tool_calls 时 history 中间不能出现
+    user message, 必须在末尾。
+  </li>
+  <li>
+    <strong>伪装 B · Hook 抛错时 throw 而不是降级。</strong>症状: agent.run 顶层
+    try/catch 缺失, Hook 错误冒泡到 main。验证: Validation 卡片"Hook 抛错降级"
+    那条测试通过。
+  </li>
+  <li>
+    <strong>伪装 C · PostToolUse block 试图 "撤销"。</strong>症状: 代码里有 "if
+    (postResult.exitCode === 1) { tool.undo?.() }"。验证: PostToolUse block
+    只能追加 user 消息警告, 不能调 tool 自身的 undo (没有这个方法)。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-08">迭代: 第 08 章 4 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(ch08): 钉 HookEvent / HookResult / HookRunner 接口与 exitCode
+      语义</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code>feat(ch08): createNoopHookRunner + agent.run 接入三个事件 stub</code>
+    —— tsc 通过, runner 永远 exitCode 0。
+  </li>
+  <li>
+    <code
+      >feat(ch08): safeRunHook + 注入消息延迟追加 + block 写 tool message</code
+    >
+    —— 跑通 Validation 卡片前 4 条。
+  </li>
+  <li>
+    <code>test(ch08): PostToolUse block 不撤销 + SessionStart 拒掉会话</code> ——
+    全绿。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 08 章</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>在 agent loop 关键节点插入 Hook 调用点, 让 harness
+      的关键事件 (permission 决策、工具执行、状态变化) 有 transcript 兜底。
+    </p>
+    <p>
+      <strong>场景:</strong>用户输入 "清理临时文件", LLM 调用 run_bash,
+      PreToolUse Hook 记录 decision, tool.execute 之后 PostToolUse Hook 记录
+      result, transcript 留下完整事件流供 eval 重放。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/hooks.ts</code> (新) 暴露
+      <code>createNoopHookRunner()</code> 和
+      <code>createHookRunner(config)</code>; <code>src/agent.ts</code> 在
+      PreToolUse / PostToolUse / SessionStart 三个位置插入 hookRunner.run();
+      <code>src/index.ts</code> 接线 hookRunner。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>
+        PreToolUse block (exitCode 1) 必写 role: "tool" 消息 "Blocked by
+        PreToolUse hook: ..."
+      </li>
+      <li>Hook 抛错时降级为 exitCode 0, 不让主 loop 崩</li>
+      <li>
+        Hook 注入消息 (exitCode 2) 延迟到所有 tool_result 写完之后统一追加
+      </li>
+      <li>PostToolUse block 仅追加 user 消息警告, 不撤销已执行的副作用</li>
+      <li>SessionStart block 终止 run(), history 长度 = 0 (用户消息未写入)</li>
+    </ul>
+    <p>
+      <strong
+        >验证 (用 fake HookRunner + spy registry, 逐条落到 vitest):</strong
+      >
+    </p>
+    <ul>
+      <li>
+        PreToolUse exitCode 1, spy.execute 没被调用, history 末尾有 tool message
+        "Blocked by PreToolUse hook"
+      </li>
+      <li>fake HookRunner.run 抛错, 主 loop 继续, tool.execute 被调用</li>
+      <li>
+        2 个 tool_calls + PreToolUse exitCode 2, history 末尾顺序: [tool, tool,
+        user(Hook 注入)]
+      </li>
+      <li>
+        SessionStart exitCode 1, agent.run() 返回 "Session blocked by hook.",
+        history 长度 = 0
+      </li>
+      <li>
+        PostToolUse exitCode 1, tool.execute 仍被调用 1 次, history 末尾追加
+        user 警告
+      </li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="practice">本章练习</h2>
+<ol>
+  <li>
+    故意在 PreToolUse block 路径上不写 tool message, 跑测试, 看"PreToolUse block
+    写 tool message" 是否抓到。
+  </li>
+  <li>
+    让 fake HookRunner.run 抛错, 但 safeRunHook 不包 try/catch, 跑测试, 看"Hook
+    抛错降级" 是否抓到。
+  </li>
+  <li>
+    把 Hook 注入消息直接写 history (不延迟), 跑测试, 看"Hook 注入消息延迟追加"
+    是否抓到 (2 个 tool_calls 时中间不能有 user message)。
+  </li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章给 harness 加了 Hook 机制, 在 loop 关键节点 (SessionStart / PreToolUse /
+  PostToolUse) 插入可扩展点。Hook 通过 exitCode 0/1/2 决定 pass-through / block
+  / inject 三种行为, 错误降级原则保证 第三方 Hook 不会让 harness 崩溃。下一章
+  (第 09 章) 我们会处理"用户偏好 怎么跨会话保留" 的问题——Memory, 把"项目级"
+  和"用户级" 长期事实 分开, 让 harness 在新会话里也能想起"用户喜欢简洁解释"。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  第 08 章让 harness 有关键事件的事实记录, 但用户偏好 (例如"我喜欢 简洁解释")
+  仍然在每次新会话都丢。下一章 Memory 模块会区分"项目级 短期事实"
+  (例如本项目的命名规范) 和"用户级 长期事实" (例如用户的 解释风格偏好),
+  把后者持久化, 让 harness 在新会话里也能想起。
+</p>

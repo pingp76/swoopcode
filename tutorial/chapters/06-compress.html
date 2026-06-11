@@ -1,0 +1,538 @@
+<p class="article__eyebrow">第 06 章 · 上下文太长怎么办</p>
+<h1 class="article__title">三层压缩: Normalize / Block / Compress</h1>
+<p class="article__lede">
+  前面五章让 harness 能聊天、能调工具、能跑子任务、能加载 skill。但 messages
+  列表会随着对话轮次和工具结果无限增长, 最终撑爆模型窗口。这一章给 harness
+  加三层压缩: Normalize (合并相邻同角色消息) → Block (按消息块分组) → Compress
+  (P1 即时压缩 + P2 全量压缩), 让 harness 在长任务下保持稳定。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="delta-from-05">在第 05 章基础上改了什么</h2>
+<p>
+  这一章在 prepareMessages() 流程里加三层压缩管道。原始 messages 从 history
+  读出后, 先 Normalize 合并相邻同角色消息, 再 Block 按"用户输入 + 助手回复 +
+  工具结果" 分组, 最后 Compress 做 P1 即时压缩 (大工具结果存文件 + 占位摘要) 和
+  P2 全量压缩 (超阈值时 LLM 总结早期 messages)。压缩后的 messages 进 LLM, 但
+  history 内部保留的是原始未压缩的 messages, 用于 audit。 对应到代码, 改动集中在
+  4 个文件: <code>src/normalize.ts</code> (新)、
+  <code>src/message-block.ts</code> (新)、<code>src/compressor.ts</code> (新)、
+  <code>src/agent.ts</code> (改 prepareMessages 流程)。
+</p>
+<div class="source-links" aria-label="本章 GitHub 永久链接">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/normalize.ts"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/normalize.ts: 合并相邻同角色 (新)</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/message-block.ts"
+    target="_blank"
+    rel="noreferrer"
+    >2. src/message-block.ts: 按消息块分组 (新)</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/compressor.ts"
+    target="_blank"
+    rel="noreferrer"
+    >3. src/compressor.ts: P1 即时 + P2 全量压缩 (新)</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
+    target="_blank"
+    rel="noreferrer"
+    >4. src/agent.ts: prepareMessages 串起三层管道</a
+  >
+</div>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    长任务下, 第 5 轮 LLM 调用时 messages 已经 200k tokens, 模型不仅贵
+    还"记不清早先的细节"。现象是"history 无增长, 模型却开始犯低级错误"。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"history 截断到最近 N 轮"。这有两个问题: 一是早期 的关键决策
+    (例如"用户偏好简洁解释") 被丢掉, 二是模型失去对任务 全局的感知,
+    容易重复已做的事。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口:
+    <code
+      >interface ContextCompressor { compressToolResult, decayOldBlocks,
+      compactHistory }</code
+    >。 不变量三条: (1) history 内部保留原始未压缩 messages, 用于 audit 和 重放,
+    (2) 压缩只发生在 prepareMessages() 阶段, 不写回 history, (3) tool_call_id
+    配对在压缩后仍然成立 (压缩不能破坏协议)。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake LLM 触发 P1 压缩 (返回超长 tool result), 跑完后 prepareMessages
+    的输出中 tool result 被替换为占位摘要, 但 tool_call_id 仍在;
+    history.getMessages() 仍然保留原始长 tool result。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
+<div class="note">
+  <p class="note__title">观察 1 · 压缩后写回 history</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+async function prepareMessages() {
+  const messages = history.getMessages();
+  const compressed = compressor.compact(messages);
+  history.replaceEntries(compressed);  // 错误: 写回 history
+  return compressed;
+}</code></pre>
+  <p><strong>问:</strong>为什么不能把压缩结果写回 history?</p>
+  <p>
+    <strong>答:</strong>写回会破坏三个东西 —— 审计: history 不再是"原始 现场",
+    transcript 模块 (第 15 章) 看到的是压缩后的消息; 重放: 下次 LLM 报 context
+    overflow, 触发"再次压缩", 陷入递归; 协议: tool_call_id
+    配对可能在压缩中丢失。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 2 · 截断到最近 N 轮</p>
+  <pre class="code-block"><code>// 教学简化版
+const recent = messages.slice(-20);  // 只留最后 20 条
+return recent;</code></pre>
+  <p><strong>问:</strong>为什么不直接截断?</p>
+  <p>
+    <strong>答:</strong>截断丢掉的是"事实", 不是"长度"。关键决策
+    (例如"用户偏好"、 "项目约束") 经常出现在早期轮次。截断后模型 失去全局感,
+    重复已做的事或违背用户偏好。压缩保留的是"信息", 截断保留的是"顺序"。
+  </p>
+</div>
+
+<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+// 1. Normalize 层
+export function normalizeMessages(messages: Message[]): Message[];
+
+// 2. Block 层
+export type MessageBlock =
+  | { type: "text"; user?: Message; assistant?: Message }
+  | { type: "tool_use"; user: Message; assistant: Message; toolResults: Message[] }
+  | { type: "summary"; user: Message; summary: string };
+
+export function groupToBlocks(messages: Message[]): MessageBlock[];
+export function flattenToMessages(blocks: MessageBlock[]): Message[];
+
+// 3. Compress 层
+export interface ContextCompressor {
+  // P1: 即时压缩单个 tool result, 超过阈值存文件 + 占位摘要
+  compressToolResult(toolName: string, callId: string, content: string): ToolResult;
+  // P0: 衰减压缩 (第 N 轮之后, 把旧 tool result 截断到前 K tokens)
+  decayOldBlocks(blocks: MessageBlock[], currentLoopIndex: number): MessageBlock[];
+  // P2: 全量压缩 (token 估算超阈值时, 让 LLM 总结早期 blocks)
+  compactHistory(blocks: MessageBlock[]): { blocks: MessageBlock[]; summary: string };
+}</code></pre>
+
+<h2 id="pipeline">三层管道: prepareMessages 串起来</h2>
+<p>
+  三层是有顺序的: 先 Normalize 解决"消息分裂", 再 Block 解决"逻辑分组", 最后
+  Compress 解决"长度控制"。顺序反了会出问题: 先 Compress 看不到完整 block,
+  总结质量差; 先 Block 但不 Normalize, block 内仍有相邻同角色冗余。
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+function prepareMessages(currentLoopIndex: number, currentQuery: string): Message[] {
+  const entries = history.getEntries();       // 原始 messages, 不压缩
+  const systemPrompt = history.getSystemPrompt();
+  const systemMsg = systemPrompt ? [{ role: "system", content: systemPrompt }] : [];
+
+  const normalized = normalizeMessages(entries);
+  const blocks = groupToBlocks(normalized);
+
+  // P0 衰减: 旧 block 的 tool result 截断
+  const decayed = compressor.decayOldBlocks(blocks, currentLoopIndex);
+
+  // P2 全量: token 超阈值时, 总结早期 block
+  const tokenEstimate = estimateMessagesTokens(normalized);
+  const finalBlocks = tokenEstimate &gt; maxContextTokens
+    ? compressor.compactHistory(decayed).blocks
+    : decayed;
+
+  const flat = flattenToMessages(finalBlocks);
+  return [...systemMsg, ...flat];
+}</code></pre>
+<p>
+  关键不变量: <code>history</code> 内部仍然保留原始未压缩 messages; 压缩只发生在
+  prepareMessages() 阶段, LLM 看到的是压缩后的 messages, 但
+  history.getMessages() 仍然返回原始。
+</p>
+
+<h2 id="p1-p2">P1 / P2 的分工</h2>
+<dl class="defs">
+  <dt>P1 即时压缩</dt>
+  <dd>
+    工具执行后立刻触发。例如 read_file 工具返回 100k 字符的日志, P1
+    把超长部分存到本地文件 (<code>~/.cache/run-outputs/abc123.txt</code>), tool
+    result 里只留前 200 字符 + "完整内容见 output_id=abc123" 的 占位符。LLM
+    看到的是"这里有占位符, 需要全文可以再调 read_output"。
+  </dd>
+  <dt>P2 全量压缩</dt>
+  <dd>
+    每次 LLM 调用前 token 估算超阈值时触发。早期 block 被合并成一个 "summary
+    block", 由 LLM 写成一段摘要, 替换原始 block。 不同于 P1, P2 的产物是
+    messages 的一部分, 不在文件里。
+  </dd>
+  <dt>P0 衰减压缩 (中间层)</dt>
+  <dd>
+    比 P1 弱, 比 P2 轻: 第 N 轮之后, 把旧 tool result 截断到前 K tokens (例如前
+    500 tokens), 不调 LLM 总结。LLM 仍然能看到"这里有内容",
+    但要查全文需要重新触发工具。
+  </dd>
+</dl>
+
+<h2 id="transcript">不写回 history: 留给 transcript 兜底</h2>
+<p>
+  压缩只发生在 prepareMessages(), 不写回 history。这看上去"每次都要重做",
+  实际是把"事实" 和 "视图" 分开:
+</p>
+<ul>
+  <li><strong>事实 (history)</strong>: 原始 messages, append-only, 不可变。</li>
+  <li>
+    <strong>视图 (prepareMessages 输出)</strong>: 当次 LLM 调用的压缩结果,
+    用完即弃。
+  </li>
+</ul>
+<p>
+  这种分离让 transcript (第 15 章) 能记录原始现场, 重放 (eval) 能从
+  原始历史里还原任意时点的 messages 序列。如果把压缩写回 history,
+  这两件事都会崩。
+</p>
+
+<h2 id="trap">反例梯度</h2>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>压缩后写回 history。</p>
+    <p><strong>为什么错:</strong>破坏 audit / 重放 / tool_call_id 配对。</p>
+    <p>
+      <strong>正确做法:</strong>压缩只发生在 prepareMessages(), history
+      内部保留原始。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>截断 messages 到最近 N 条。</p>
+    <p>
+      <strong>为什么错:</strong>丢掉关键事实, 模型失去全局感, 重复已做的事。
+    </p>
+    <p><strong>正确做法:</strong>用 P2 总结替代截断, 保留信息密度。</p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>压缩时丢掉 tool_call_id。</p>
+    <p>
+      <strong>为什么错:</strong>第 02 章的 tool_call_id 配对约束被破坏,
+      协议层拒绝接受。
+    </p>
+    <p><strong>正确做法:</strong>压缩保留 id 字段, 只压缩 content 字符串。</p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>P2 总结调 LLM 时不传 "这是压缩任务" 的提示, 让
+      LLM 误以为是普通对话。
+    </p>
+    <p>
+      <strong>为什么错:</strong>总结质量不稳定, LLM 可能输出"好的, 我会..."
+      这种无意义前缀。
+    </p>
+    <p>
+      <strong>正确做法:</strong>压缩调用 LLM 时, messages 是特殊 system prompt,
+      明确说"总结以下对话, 不要回复"。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · 第 06 章</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>P1 触发占位:</strong>fake LLM 返回 tool_call=read_file, fake
+      execute 返回 100k 字符长字符串, 跑完后 prepareMessages 输出中 tool result
+      被替换为前 200 字符 + "完整内容见 output_id=xxx"。
+    </p>
+    <p>
+      <strong>history 内部不压缩:</strong>跑完后 history.getMessages() 仍
+      然返回原始 100k 字符 tool result。
+    </p>
+    <p>
+      <strong>tool_call_id 配对保留:</strong>压缩后 tool message 的 tool_call_id
+      仍然等于 assistant.tool_calls[N].id。
+    </p>
+    <p>
+      <strong>P2 触发条件:</strong>token 估算超 maxContextTokens, 跑完后
+      prepareMessages 输出中早期 block 被替换为 summary block。
+    </p>
+    <p>
+      <strong>Normalize 合并相邻:</strong>history 里有 3 条连续 role: "user"
+      消息, 跑完后 prepareMessages 输出合并为 1 条。
+    </p>
+  </div>
+</div>
+
+<h2 id="lookback">回望第 00–05 章: 哪些原则在本章兑现了</h2>
+<ul>
+  <li>
+    <strong>事实与视图分离:</strong>history 是事实, prepareMessages
+    是视图。这条原则在第 00 章"History 唯一职责" 隐含, 本章显式兑现。
+  </li>
+  <li>
+    <strong>tool call 协议沿用:</strong>压缩保留 tool_call_id, 不破坏第 02
+    章的协议约束。
+  </li>
+  <li>
+    <strong>不写回 history:</strong>history.getMessages() 仍然可观测,
+    不被压缩污染, 第 15 章 transcript 和 eval 重放都需要这一点。
+  </li>
+  <li>
+    <strong>稳定前缀原则:</strong>system prompt 不进压缩管道, 稳定不变, 第 10
+    章的伏笔。
+  </li>
+</ul>
+
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>压缩策略由谁决定</dt>
+  <dd>
+    第 10 章 cache-friendly 布局会展开, P2 总结的 LLM 调用本身吃 cache 配额,
+    需要 stable context 隔离。
+  </dd>
+  <dt>压缩出错怎么办</dt>
+  <dd>
+    第 11 章 recovery 会处理"压缩 LLM 调用失败" 的回退路径, 通常降级到 P0
+    衰减或纯截断。
+  </dd>
+  <dt>P1 占位 output_id 怎么读</dt>
+  <dd>第 12 章 task 系统会持久化 output_id 引用, eval 重放时还原原始内容。</dd>
+  <dt>压缩时遇到 system-reminder 怎么办</dt>
+  <dd>
+    Normalize 不合并 system-reminder 标签, groupToBlocks 不进 block, 独立处理,
+    第 03 章 TODO reminder 走这条路径。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-06">本次如何 vibe code: 第 06 章的三件套</h2>
+
+<h3 id="vibe-feed-06">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出
+    <code>normalizeMessages</code> / <code>MessageBlock</code> /
+    <code>ContextCompressor</code> 三个模块的 interface。本轮不写实现,
+    重点钉三层管道的输入输出形态。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 agent.prepareMessages() 的
+    stub, 三层都是 noop (直接返回原 messages)。本轮 review 重点: prepareMessages
+    是 createAgent() 闭包内的私有函数, 不暴露给外部。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写三层实现 + agent.prepareMessages()
+    串起。本轮 review 重点: 压缩结果不写回 history, tool_call_id 保留, P2 调 LLM
+    走特殊 system prompt。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写
+    <code>test/compress.test.ts</code>。本轮 review 重点: "history 内部不压缩"
+    和 "tool_call_id 配对保留" 两条必须有反向断言。
+  </li>
+</ol>
+
+<h3 id="vibe-review-06">Review: 第 06 章专属 checklist</h3>
+<ol>
+  <li>
+    <strong>压缩不写回 history。</strong>不得出现
+    <code>history.replaceEntries(compressed)</code>。验证:
+    <code>grep -n 'replaceEntries' src/agent.ts</code> 应当 0 行 (本章内),
+    仅在第 11 章 recovery 路径里允许。
+  </li>
+  <li>
+    <strong>tool_call_id 保留。</strong>压缩过程中 tool message 的 id
+    字段不被丢弃。验证: 写一个测试断言
+    <code>compressed.find(m =&gt; m.role === "tool").tool_call_id</code>
+    等于原始 id。
+  </li>
+  <li>
+    <strong>P2 调 LLM 走特殊 system prompt。</strong>压缩用的 LLM 调用 messages
+    头部有明确"压缩任务" 标识。验证: 写一个测试, 让 fake LLM 拒绝响应 (无 tool
+    call) 应当被识别为压缩任务。
+  </li>
+  <li>
+    <strong>Normalize 不合并 system-reminder。</strong>第 03 章的 reminder
+    标签不进 Normalize 合并, 独立保留。验证: 写一个测试, history 里有 3 条 user
+    message (其中 1 条是 system-reminder 标签), 跑完后 reminder 那条独立, 另 2
+    条合并。
+  </li>
+  <li>
+    <strong>不污染 system prompt。</strong>P2 总结结果不进 system prompt, 进普通
+    user 消息。验证: 跑完 P2 后 messages[0].role !== "system" 仍然成立。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-06">调试: 第 06 章典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · 压缩后写回 history 加速下次 LLM 调用。</strong>症状:
+    觉得"每次重做压缩浪费", 写回 history 看起来能省 token。验证: Validation
+    卡片"history 内部不压缩" 必须断言"跑完后 history.getMessages()
+    仍然返回原始长 tool result"。
+  </li>
+  <li>
+    <strong>伪装 B · 截断 messages 代替压缩。</strong>症状:
+    <code>messages.slice(-50)</code> 写进 prepareMessages。验证: Validation
+    卡片"P2 触发条件" 那条, 必须断言"早期 block 被替换为 summary block",
+    不是"早期 block 被丢弃"。
+  </li>
+  <li>
+    <strong>伪装 C · 压缩时 LLM 调用混进普通 LLM 流量。</strong>症状: 压缩 LLM
+    调用的 messages 头部没有"压缩任务" 标识, 模型不知道这是压缩。验证: 第 18 章
+    eval 会通过"压缩 LLM 调用的 system prompt 长度" 反向检查, 本章不显式测。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-06">迭代: 第 06 章 4 个 commit 节点</h3>
+<ol>
+  <li>
+    <code>feat(ch06): 钉 normalize / block / compressor 三层接口</code> —— tsc
+    通过, 无实现。
+  </li>
+  <li>
+    <code
+      >feat(ch06): createCompressor 工厂 + agent.prepareMessages() stub</code
+    >
+    —— tsc 通过, 三层 noop。
+  </li>
+  <li>
+    <code
+      >feat(ch06): 三层实现 + prepareMessages 串起 + 压缩不写回 history</code
+    >
+    —— 跑通 Validation 卡片前 4 条。
+  </li>
+  <li>
+    <code
+      >test(ch06): Normalize 不合并 system-reminder + tool_call_id 保留</code
+    >
+    —— 全绿。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 06 章</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>实现三层压缩管道 (Normalize / Block / Compress), 让
+      harness 在长任务下保持稳定 context 长度。
+    </p>
+    <p>
+      <strong>场景:</strong>用户多轮对话 + 多次 read_file 工具调用后, messages
+      超过 80k tokens, 触发 P2 全量压缩, 早期 block 被 LLM 总结为一段摘要替换。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/normalize.ts</code> (新) 暴露
+      <code>normalizeMessages()</code>; <code>src/message-block.ts</code> (新)
+      暴露 <code>groupToBlocks()</code> / <code>flattenToMessages()</code>;
+      <code>src/compressor.ts</code> (新) 暴露 <code>createCompressor()</code>;
+      <code>src/agent.ts</code> 改 prepareMessages() 串起三层。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>压缩结果不写回 history, 只在 prepareMessages() 输出层生效</li>
+      <li>tool_call_id 在压缩中保留, 不丢弃</li>
+      <li>P2 调 LLM 时 messages 头部带"压缩任务" 标识的 system prompt</li>
+      <li>Normalize 不合并 system-reminder 标签</li>
+      <li>P1 占位 output_id 写入本地文件, 不进 messages</li>
+    </ul>
+    <p>
+      <strong>验证 (用 fake LLM + fake compressor, 逐条落到 vitest):</strong>
+    </p>
+    <ul>
+      <li>
+        fake execute 返回 100k 字符串, 跑完后 prepareMessages 输出含 P1 占位符
+      </li>
+      <li>跑完后 history.getMessages() 仍含 100k 字符串 (不压缩)</li>
+      <li>
+        压缩后 tool message 的 tool_call_id 仍等于 assistant.tool_calls[N].id
+      </li>
+      <li>token 估算超阈值, prepareMessages 输出含 summary block</li>
+      <li>
+        3 条连续 user message, prepareMessages 输出合并为 1 条 (除
+        system-reminder 外)
+      </li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="practice">本章练习</h2>
+<ol>
+  <li>
+    故意把压缩结果写回 history, 跑测试, 看 "history 内部不压缩" 是否抓到。
+  </li>
+  <li>
+    把 P2 调 LLM 的 system prompt 去掉, 跑测试, 看压缩质量是否明显下降
+    (这条需要做主观对比, 没有客观断言)。
+  </li>
+  <li>
+    故意在 Normalize 里合并 system-reminder, 跑测试, 看"system-reminder 不合并"
+    是否抓到。
+  </li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章给 harness 加了三层压缩管道: Normalize 合并相邻同角色消息, Block
+  按消息块分组, Compress 做 P1 / P0 / P2 三档长度控制。 关键不变量是"压缩不写回
+  history", history 保留原始现场, prepareMessages 只在视图层做压缩。这一原则为第
+  15 章 transcript 和 eval 重放留了 完整的现场。下一章 (第 07 章)
+  我们处理"危险命令" 的问题——Permission, 在工具执行前同步拦截, 不让 LLM
+  写到文件系统就删光。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  第 06 章让 harness 在长任务下稳定, 但 LLM 仍然可以发出"删除项目根目录"
+  这样的危险命令。下一章 Permission 模块会在工具执行前同步拦截, 通过 schema 校验
+  + 用户确认 + 路径边界三个机制, 给 harness 加"安全阀门"。 Permission 是 harness
+  设计哲学最关键的一环——它是模型与真实世界之间的 唯一可观察屏障。
+</p>

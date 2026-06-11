@@ -1,0 +1,519 @@
+<p class="article__eyebrow">第 09 章 · 跨会话记忆</p>
+<h1 class="article__title">让 Harness 记得用户: Memory</h1>
+<p class="article__lede">
+  前面八章让 harness 在单次会话内能聊天、调工具、跑子任务、压缩、拦权限、 留
+  hook。但用户偏好 (例如"我喜欢简洁解释") 仍然在每次新会话都丢。 这一章给
+  harness 加 Memory 模块, 区分"项目级短期事实" 和"用户级长期 事实",
+  把后者持久化, 让 harness 在新会话里也能想起。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="delta-from-08">在第 08 章基础上改了什么</h2>
+<p>
+  这一章在 Composition Root 加 memory 持久化层。memory 数据落盘到
+  <code>~/.claude/memory/&lt;scope&gt;/&lt;key&gt;.md</code> 这样的 markdown
+  文件, scope 区分 <code>user</code> (用户级) 和 <code>project</code> (项目级)。
+  agent 主循环在 SessionStart 时把 memory 注入到 system prompt, 会话过程中 LLM
+  可通过 save_memory 工具更新 memory。memory 与 history 严格分离, 不进 messages
+  序列。 对应到代码, 改动集中在 3 个文件: <code>src/memory.ts</code> (新)、
+  <code>src/tools/save_memory.ts</code> (新)、<code>src/agent.ts</code> (改
+  SessionStart 注入 memory)。
+</p>
+<div class="source-links" aria-label="本章 GitHub 永久链接">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/memory.ts: Memory 持久化 (新)</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
+    target="_blank"
+    rel="noreferrer"
+    >2. src/agent.ts: SessionStart 注入 memory 到 system prompt</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/project-context.ts"
+    target="_blank"
+    rel="noreferrer"
+    >3. src/project-context.ts: 项目级上下文 (新)</a
+  >
+</div>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    用户在新会话里说"我喜欢简洁解释", agent 完全不知道用户在上一会话
+    说过这件事。现象是"harness 短期记忆 OK, 长期记忆缺失"。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"把 memory 写在 history 里"。这有两个问题: 一是 history
+    每次新会话都从空开始, memory 仍然丢; 二是 history 是"对话 上下文", memory
+    是"长期事实", 两者职责不同。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口:
+    <code
+      >interface MemoryStore { get(scope, key), set(scope, key, value),
+      list(scope) }</code
+    >。 不变量三条: (1) memory 数据不进 history.getMessages(), (2) memory 落盘是
+    append-only (更新是写新文件, 不直接改原文件, 第 15 章 atomic-write 兜底),
+    (3) 区分 user 级与 project 级, user 级跨项目共享, project
+    级仅在当前项目可见。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake memoryStore 暴露 spy, 跑完一次会话, spy.set 被调用写入"用户 喜欢简洁";
+    第二次会话启动, SessionStart 注入的 system prompt 含 "用户偏好: 简洁解释",
+    LLM 第二轮能引用这个事实。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
+<div class="note">
+  <p class="note__title">观察 1 · memory 写在 history 里</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+// 错误: 试图用 history 保存 memory
+history.add({ role: "system", content: "User preference: 简洁解释" });
+history.persist();  // 错误: history 不该有 persist 方法</code></pre>
+  <p><strong>问:</strong>为什么不复用 history 的持久化能力?</p>
+  <p>
+    <strong>答:</strong>三件事同时坏掉 —— 职责: history 是"对话上下文", memory
+    是"长期事实", 两者职责不同; 性能: history 每次 LLM 调用都 重新发送, memory
+    写进去意味着每次都重传无关事实; 协议: memory 改了 history 的语义, 后续
+    compress / replay 都会混乱。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 2 · 不区分 scope, 所有 memory 写一个文件</p>
+  <pre class="code-block"><code>// 教学简化版
+const memory = await fs.readFile("~/.claude/memory", "utf8");
+memory += `\n${newFact}`;
+await fs.writeFile("~/.claude/memory", memory);</code></pre>
+  <p><strong>问:</strong>为什么不分 scope?</p>
+  <p>
+    <strong>答:</strong>用户换项目之后, 项目级 fact (例如"本项目用 React") 跟着
+    user 走, 污染新项目。区分 user / project scope 之后, 项目级 fact
+    在新项目自动隐藏, 不会被 LLM 误用。
+  </p>
+</div>
+
+<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export type MemoryScope = "user" | "project";
+
+export interface MemoryEntry {
+  scope: MemoryScope;
+  key: string;       // 例如 "user.preference.explanation_style"
+  value: string;     // markdown 内容
+  updatedAt: number; // epoch ms
+}
+
+export interface MemoryStore {
+  get(scope: MemoryScope, key: string): Promise&lt;MemoryEntry | null&gt;;
+  set(scope: MemoryScope, key: string, value: string): Promise&lt;void&gt;;
+  list(scope: MemoryScope): Promise&lt;MemoryEntry[]&gt;;
+  // 渲染为 system prompt 片段
+  renderForPrompt(scope: MemoryScope): Promise&lt;string&gt;;
+}</code></pre>
+
+<h2 id="scope-rules">scope 划分规则</h2>
+<dl class="defs">
+  <dt>user 级</dt>
+  <dd>
+    跨项目共享的事实, 例如 "user.preference.explanation_style = 简洁",
+    "user.preferred_language = zh-CN"。这些 facts 在任何项目任何会话 都生效。
+  </dd>
+  <dt>project 级</dt>
+  <dd>
+    仅在当前项目可见的事实, 例如 "project.tech_stack = React + TypeScript",
+    "project.naming = camelCase"。这些 facts 在新项目自动隐藏, 不会污染
+    其他项目。
+  </dd>
+  <dt>key 命名规范</dt>
+  <dd>
+    <code>&lt;scope-prefix&gt;.&lt;category&gt;.&lt;name&gt;</code>, 例如
+    <code>user.preference.explanation_style</code>。key 稳定, 不允许 LLM
+    自由发挥改名。
+  </dd>
+</dl>
+
+<h2 id="loop-integration">loop 接入: SessionStart 注入到 system prompt</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+// 第一次 run() 时, SessionStart 阶段
+if (!sessionStarted) {
+  sessionStarted = true;
+
+  // 1. 加载 memory 渲染为 system prompt 片段
+  const userMemory = await memoryStore.renderForPrompt("user");
+  const projectMemory = await memoryStore.renderForPrompt("project");
+
+  // 2. 拼接到 system prompt (用稳定前缀, 第 10 章 cache-friendly 伏笔)
+  const basePrompt = history.getSystemPrompt() ?? "";
+  history.setSystemPrompt(
+    `${basePrompt}\n\n# User Memory\n${userMemory}\n\n# Project Memory\n${projectMemory}`
+  );
+
+  // 3. SessionStart Hook (第 08 章)
+  const hookResult = await safeRunHook(/* ... */);
+  if (hookResult.exitCode === 1) return hookResult.message;
+}
+
+// save_memory 工具
+async function saveMemory(args) {
+  await memoryStore.set(args.scope, args.key, args.value);
+  return { toolCallId: call.id, content: `Saved ${args.scope}.${args.key}` };
+}</code></pre>
+<p>
+  关键设计: memory 拼到 system prompt 的固定位置 ("# User Memory" / "# Project
+  Memory"), 即使 memory 内容变化, 这一行 prefix 稳定, 不会破坏第 10 章
+  cache-friendly 布局。memory 内容本身在 LLM 视角 是动态的, 但 prefix 锚点不变。
+</p>
+
+<h2 id="persistence">落盘: append-only + atomic write</h2>
+<p>
+  memory 落盘必须用 atomic write (第 15 章会展开): 写新文件到
+  <code>~/.claude/memory/&lt;scope&gt;/&lt;key&gt;.md.tmp</code>, fsync 之后
+  rename 到正式路径。直接 <code>fs.writeFile</code> 在断电时会留半截文件,
+  下次启动解析失败。
+</p>
+<p>
+  set() 内部追加 metadata header (updatedAt, scope), 这样 list() 时
+  不需要读文件内容就能展示元信息。文件本身是 markdown 格式, 人类可读,
+  也方便用户用编辑器手动修正。
+</p>
+
+<h2 id="trap">反例梯度</h2>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>memory 写进 history。</p>
+    <p>
+      <strong>为什么错:</strong>每次 LLM 调用都重传, token 浪费; 职责混淆;
+      compress / replay 都会混乱。
+    </p>
+    <p>
+      <strong>正确做法:</strong>memory 独立落盘, SessionStart 注入 system
+      prompt, 不写 history。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>不区分 scope, 所有 memory 写一个文件。</p>
+    <p>
+      <strong>为什么错:</strong>用户换项目后项目级 fact 跟着走, 污染新项目。
+    </p>
+    <p>
+      <strong>正确做法:</strong>按 scope 写到不同目录, 渲染 system prompt
+      时按当前项目过滤。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>LLM 写 memory 时 key 自由发挥, 每次都新建一个
+      key。
+    </p>
+    <p>
+      <strong>为什么错:</strong>"user.preference.style" 和
+      "user.preference.explanation_style" 实际是同一件事, 写两份互相覆盖。
+    </p>
+    <p>
+      <strong>正确做法:</strong>key 命名规范, save_memory 工具在 schema 里硬约束
+      key 格式, harness 拒绝不合规的 key。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>memory 写入不原子, 断电后留半截文件。</p>
+    <p><strong>为什么错:</strong>下次启动解析失败, user 长期偏好丢失。</p>
+    <p>
+      <strong>正确做法:</strong>第 15 章的 atomic-write 模块兜底, write tmp +
+      fsync + rename。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · 第 09 章</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>memory 不进 history:</strong>save_memory 调用后, history 末尾有
+      tool message "Saved user.preference.style", 但 history.getMessages()
+      中不含 memory value 内容。
+    </p>
+    <p>
+      <strong>SessionStart 注入 system prompt:</strong>fake memoryStore 预设
+      user.preference.style = "简洁", 跑完一次 run() 后,
+      history.getSystemPrompt() 含 "# User Memory" 和 "简洁"。
+    </p>
+    <p>
+      <strong>scope 隔离:</strong>fake memoryStore 同时有 user 级和 project
+      级条目, renderForPrompt("user") 不含 project 级内容。
+    </p>
+    <p>
+      <strong>key 命名规范:</strong>save_memory 调用 key = "free_style" (不符合
+      &lt;scope-prefix&gt;.&lt;category&gt;.&lt;name&gt; 规范), 写 error tool
+      message, 拒绝写入。
+    </p>
+    <p>
+      <strong>memory 持久化:</strong>fake memoryStore 暴露 spy, 跑完 save_memory
+      后 spy.set 被调用, 参数含 scope / key / value。
+    </p>
+  </div>
+</div>
+
+<h2 id="lookback">回望第 00–08 章: 哪些原则在本章兑现了</h2>
+<ul>
+  <li>
+    <strong>事实与视图分离:</strong>memory 独立于 history, 是"长期事实", history
+    是"对话上下文"。这条原则在第 06 章 compress 隐含, 本章显式兑现。
+  </li>
+  <li>
+    <strong>稳定前缀原则:</strong>memory 拼到 system prompt 的固定位置, prefix
+    锚点不变, 为第 10 章 cache-friendly 布局做准备。
+  </li>
+  <li>
+    <strong>职责单一:</strong>memory 模块只管"读 / 写 memory 文件", 不参与
+    messages 构建 (那是 prepareMessages 的事)。
+  </li>
+  <li>
+    <strong>错误降级原则:</strong>memory 读失败 (文件不存在) 降级为"空 memory",
+    不让主 loop 崩。
+  </li>
+</ul>
+
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>memory 内容太长</dt>
+  <dd>
+    第 10 章 cache-friendly 布局会展开, memory 内容进 system prompt 时按 scope
+    分块, 不全量加载。
+  </dd>
+  <dt>memory 跨进程冲突</dt>
+  <dd>
+    第 15 章 atomic-write 兜底, memory 写新文件 + rename, 不直接改原文件。
+  </dd>
+  <dt>memory 落盘决策点</dt>
+  <dd>
+    第 12 章 task 区分"会话内 memory" (本章的 save_memory) 和"项目级 task"
+    (例如"未来要重构 X"), task 进 plan 文件, 不进 memory。
+  </dd>
+  <dt>memory 审计</dt>
+  <dd>
+    第 15 章 transcript 会记录"memory 何时被读、被写", 用于审计 user 偏好变更。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-09">本次如何 vibe code: 第 09 章的三件套</h2>
+
+<h3 id="vibe-feed-09">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>MemoryStore</code> /
+    <code>MemoryEntry</code> / <code>MemoryScope</code> 三个 interface, 以及 key
+    命名规范文档。本轮不写实现。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
+    <code>createMemoryStore()</code> 接受 scope 目录, SessionStart 注入仍是 stub
+    (永远注入空 memory)。本轮 review 重点: memoryStore 实例在
+    <code>index.ts</code> 只 new 一次。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createMemoryStore + save_memory
+    工具 + agent.SessionStart 注入。本轮 review 重点: scope 隔离, key
+    命名规范校验, atomic write (第 15 章会展开)。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写
+    <code>test/memory.test.ts</code>。本轮 review 重点: "memory 不进 history" 和
+    "key 命名规范" 两条必须有反向断言。
+  </li>
+</ol>
+
+<h3 id="vibe-review-09">Review: 第 09 章专属 checklist</h3>
+<ol>
+  <li>
+    <strong>memory 不进 history。</strong>save_memory 调用后
+    history.getMessages() 不含 memory value。验证:
+    <code>grep -n 'role: "user".*memory' src/agent.ts</code> 应当 0 行 (除
+    system prompt 注入路径)。
+  </li>
+  <li>
+    <strong>scope 隔离。</strong>renderForPrompt("user") 不返回 project
+    级内容。验证: Validation 卡片"scope 隔离" 那条测试通过。
+  </li>
+  <li>
+    <strong>key 命名规范。</strong>save_memory 拒绝不合规 key。验证: Validation
+    卡片"key 命名规范" 那条测试通过。
+  </li>
+  <li>
+    <strong>SessionStart 注入位置正确。</strong>memory 拼到 system prompt, 不写
+    history。验证: 跑完 run() 后 history.getSystemPrompt() 含 "# User Memory"。
+  </li>
+  <li>
+    <strong>memoryStore 是工厂, 不在 agent 内 new。</strong>验证:
+    <code>grep -n 'new MemoryStore' src/</code> 应当 0 行。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-09">调试: 第 09 章典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · memory 写进 history messages。</strong>症状: save_memory
+    工具内部
+    <code>history.add({role: "user", content: \`Saved: ${value}\`})</code
+    >。验证: Validation 卡片"memory 不进 history" 那条测试失败。
+  </li>
+  <li>
+    <strong>伪装 B · scope 混用, 渲染时不过滤。</strong>症状:
+    <code>renderForPrompt(scope)</code> 不过滤 scope, 总是返回所有 memory。验证:
+    Validation 卡片"scope 隔离" 那条测试失败。
+  </li>
+  <li>
+    <strong>伪装 C · LLM 写 memory 时 key 自由发挥。</strong>症状: save_memory
+    工具对 key 不校验, LLM 写 "my style" / "user_pref_1" 等自由 key。验证:
+    Validation 卡片"key 命名规范" 那条测试通过 (写不合规 key 应当拒绝)。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-09">迭代: 第 09 章 4 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(ch09): 钉 MemoryStore / MemoryEntry / MemoryScope 接口与 key
+      规范</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code>feat(ch09): createMemoryStore 工厂 + save_memory 工具 stub</code> ——
+    tsc 通过, 写空文件。
+  </li>
+  <li>
+    <code
+      >feat(ch09): agent.SessionStart 注入 + scope 隔离 + key 校验 + atomic
+      write</code
+    >
+    —— 跑通 Validation 卡片前 4 条。
+  </li>
+  <li><code>test(ch09): memory 持久化 spy 验证</code> —— 全绿。</li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 09 章</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>实现 Memory 模块, 区分 user 级与 project 级,
+      SessionStart 注入 system prompt, LLM 可通过 save_memory 工具更新 memory。
+    </p>
+    <p>
+      <strong>场景:</strong>用户在新会话说 "我喜欢简洁解释", agent 调
+      save_memory("user", "user.preference.explanation_style", "简洁"); 下次会话
+      SessionStart 时 system prompt 含 "用户偏好: 简洁", LLM
+      在新会话能引用这个事实。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/memory.ts</code> (新) 暴露
+      <code>createMemoryStore()</code>;
+      <code>src/tools/save_memory.ts</code> (新) 实现工具;
+      <code>src/agent.ts</code> 改 SessionStart 注入 memory 到 system prompt;
+      <code>src/index.ts</code> 接线 memoryStore。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>memory 不写进 history.messages, 只在 system prompt 注入</li>
+      <li>scope 区分 user / project, renderForPrompt 按 scope 过滤</li>
+      <li>
+        key 必须符合
+        <code>&lt;scope-prefix&gt;.&lt;category&gt;.&lt;name&gt;</code> 规范,
+        不合规拒绝
+      </li>
+      <li>memory 落盘走 atomic write (write tmp + fsync + rename)</li>
+      <li>memoryStore 工厂, Composition Root 唯一 new</li>
+    </ul>
+    <p><strong>验证 (用 fake memoryStore + spy, 逐条落到 vitest):</strong></p>
+    <ul>
+      <li>save_memory 调用后, history.getMessages() 不含 memory value</li>
+      <li>
+        fake 预设 user.preference.style = "简洁", SessionStart 后 system prompt
+        含 "简洁"
+      </li>
+      <li>
+        fake 同时有 user 级和 project 级, renderForPrompt("user") 不含 project
+        级
+      </li>
+      <li>
+        save_memory 调用 key = "free_style", 写 error tool message, 拒绝写入
+      </li>
+      <li>spy 验证 memoryStore.set 被调用, 参数含 scope / key / value</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="practice">本章练习</h2>
+<ol>
+  <li>
+    故意把 memory value 写进 history.messages, 跑测试, 看"memory 不进 history"
+    是否抓到。
+  </li>
+  <li>让 renderForPrompt 不过滤 scope, 跑测试, 看"scope 隔离" 是否抓到。</li>
+  <li>
+    在 save_memory 工具里不校验 key 格式, 跑测试, 看"key 命名规范" 是否抓到。
+  </li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章给 harness 加了 Memory 模块, 区分 user 级与 project 级长期事实。 memory
+  独立于 history, 通过 SessionStart 注入 system prompt 的固定 位置 (prefix 稳定,
+  内容动态), 既给 LLM 长期事实, 又不破坏 cache 友好布局。下一章 (第 10 章)
+  我们会展开 prompt cache 友好布局的 完整设计: 哪些进稳定前缀, 哪些走 reminder,
+  哪些靠 history。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  第 09 章把 memory 注入 system prompt, 但还没系统讲"如何让 system prompt 稳定 +
+  动态状态走 reminder + history 自然增长" 这套布局。 下一章 (第 10 章)
+  会基于前九章的所有设计选择 (memory 锚点、reminder 标签、tool 描述作为稳定前缀)
+  总结出 prompt cache 友好布局的完整 原则, 并讨论 token 成本和 cache hit rate
+  的权衡。
+</p>

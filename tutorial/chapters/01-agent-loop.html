@@ -1,0 +1,768 @@
+<p class="article__eyebrow">第 01 章 · 真正落 TypeScript</p>
+<h1 class="article__title">最小 Agent Loop: 从伪码到可测试模块</h1>
+<p class="article__lede">
+  第 00 章讲了"为什么需要 harness",并给出了一份 6 段 Prompt Card 模板。
+  这一章按那张卡片把最小 agent loop 真正写成 TypeScript 模块: History、 LLM
+  Client、Agent、REPL、Composition Root 五件套,加上 fake LLM 的 messages
+  顺序断言。读完后,你能跑通一份"两轮对话保留上下文"的最小 harness,
+  并能用测试验证它不是偶然跑通。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="delta-from-00">在第 00 章基础上改了什么</h2>
+<p>
+  在动手前,先明确这一章的"差量"。它是对第 00 章 Prompt Card 的兑现,
+  不是"另一份新设计"。下面这张表是这一章要在仓库里新增的文件、每个文件的
+  单一职责,以及它和第 00 章伪码的对应。
+</p>
+<div class="source-links" aria-label="本章改动清单">
+  <a class="source-link" href="#delta-files">新增 7 个文件,每个文件一个职责</a>
+  <a class="source-link" href="#delta-loop"
+    >loop 路径与第 00 章图 00-1 一一对应</a
+  >
+  <a class="source-link" href="#delta-test"
+    >test 用 fake LLM 验证 messages 顺序</a
+  >
+</div>
+<p>
+  之后所有章节 (02–15) 都会按这张差量表的格式开头: "在第 N 章基础上改了什么"。
+  这是一个硬规矩,目的是让学生能用 diff 而不是用记忆去跟读。
+</p>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<p>
+  按第 00 章 6 段 Prompt Card 模板倒推,写这一章 Prompt Card 之前,作者脑子里
+  经历了下面 4 步。第 00 章第 1 节已经讲过这 4 步的抽象,这里给具体例子。
+</p>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    现象是"两次 run 之后,模型还能引用第一轮的偏好"。这个现象的最小复现 是 REPL
+    里连续输入两句"我喜欢简洁"和"我喜欢什么风格"。如果实现错了,
+    第二句会得到"我不知道你喜欢什么"。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是第 00 章的 <code>ask(query)</code>: 它只把当前 query 发给
+    LLM,没有 History。这一章要"治"的就是这种"每次都是新会话"的问题。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    不变量有三: (1) History 是 messages 的唯一来源, (2) getMessages()
+    返回浅拷贝,(3) Composition Root 内同一份 history 实例被 agent 和 repl
+    共享。接口要暴露 <code>add</code> / <code>getMessages</code> /
+    <code>clear</code> 三个动作,不要暴露内部数组。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    验证用 fake LLM,断言"第二轮 LLM 收到的 messages 数量 == 3、第一条 role ==
+    user、最后一条 role == user"。这条断言比"最终文本对"强,
+    因为它要求"消息真的被保存并被重新发送"。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 三段故意有气味的代码</h2>
+<p>
+  在写正确实现之前,先看三段常见但"有气味"的最小实现,回答"它为什么
+  不行"。这一节不是练习,只是训练"看出哪里不对"的眼睛。
+</p>
+
+<div class="note">
+  <p class="note__title">观察 1 · 全局单例 History</p>
+  <pre class="code-block"><code>// history.ts
+export const history = createHistory();
+
+// agent.ts
+import { history } from "./history.js";
+export async function run(query: string) {
+  history.add({ role: "user", content: query });
+  const msgs = history.getMessages();
+  return (await llm.chat(msgs)).content;
+}</code></pre>
+  <p>
+    <strong>问:</strong>看上去很简洁。为什么 Composition Root 团队普遍禁止
+    module-level 单例?
+  </p>
+  <p>
+    <strong>答:</strong>单例失去三件事 —— 测试时无法替换; 子智能体或 多窗口 REPL
+    无法隔离; Composition Root 失去了"实例从哪里来"的可观测 性。第 00
+    章的"中级错法 B"已经讲过这一点。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 2 · getMessages 返回内部引用</p>
+  <pre class="code-block"><code>// history.ts (内部实现)
+getMessages(): Message[] {
+  return this.messages;
+}</code></pre>
+  <p><strong>问:</strong>返回引用比浅拷贝快,为什么不写?</p>
+  <p>
+    <strong>答:</strong>LLM client 拼下一轮 messages 时常见写法是
+    <code>[...msgs, thisTurnUser]</code>。如果 msgs 是内部数组,这个 spread
+    会让外部 push 写回 history,出现"我没调 add() 但 messages 变长"的隐性
+    bug。这正是第 00 章的"高级错法 C"。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 3 · 把 process.env 塞进 agent.ts</p>
+  <pre class="code-block"><code>// agent.ts
+const apiKey = process.env.ANTHROPIC_API_KEY;
+const llm = createLlm({ apiKey });</code></pre>
+  <p><strong>问:</strong>看上去"配置就近使用"很自然,为什么要搬到 config.ts?</p>
+  <p>
+    <strong>答:</strong>agent.ts 一旦读环境变量,测试就必须 mock 整个
+    process.env; 不同部署环境 (本地 / CI / 沙箱) 切换配置就要改业务文件;
+    子智能体想用同一份 agent 但不同 LLM provider 时也无从换起。 config.ts 是
+    Composition Root 的"配置版本",不是 agent.ts 的私货。
+  </p>
+</div>
+
+<h2 id="delta-files">新增文件清单 (差量表)</h2>
+<p>
+  这一章会新建 7 个文件。每个文件的第一行 import / export 决定了它的 职责边界;
+  不属于这个文件职责的代码,不要塞进来。
+</p>
+<dl class="defs">
+  <dt><code>src/config.ts</code></dt>
+  <dd>
+    读取环境变量并校验; 导出 <code>loadConfig()</code>,返回
+    <code>{ apiKey, model, ... }</code>。本文件不出现业务逻辑。
+  </dd>
+
+  <dt><code>src/terminal.ts</code></dt>
+  <dd>
+    封装 readline 的输入输出; 暴露 <code>ask()</code> / <code>print()</code> /
+    <code>close()</code>。本文件不出现 LLM 调用,也不出现 History。
+  </dd>
+
+  <dt><code>src/history.ts</code></dt>
+  <dd>
+    <code>createHistory()</code> 工厂; 内部 <code>messages: Message[]</code>。
+    暴露 <code>add</code> / <code>getMessages</code> / <code>clear</code>。
+    <code>getMessages</code> 必返回浅拷贝 (第 00 章不变量 2)。
+  </dd>
+
+  <dt><code>src/llm.ts</code></dt>
+  <dd>
+    <code>createLlm(config)</code> 工厂; 暴露 <code>chat(messages)</code>。
+    真实实现调 Anthropic SDK, fake LLM 由测试用同名 interface 注入。
+  </dd>
+
+  <dt><code>src/agent.ts</code></dt>
+  <dd>
+    <code>createAgent({ history, llm })</code> 工厂; 暴露
+    <code>run(query)</code>。本文件不读环境变量, 不 new LLMClient, 不直接用
+    readline (第 00 章边界 checklist)。
+  </dd>
+
+  <dt><code>src/repl.ts</code></dt>
+  <dd>
+    <code>createRepl({ agent, terminal })</code> 工厂; 暴露
+    <code>start()</code>。循环 <code>ask → agent.run → print</code>, 处理
+    <code>exit</code> / <code>quit</code> / 空输入。
+  </dd>
+
+  <dt><code>src/index.ts</code> (Composition Root)</dt>
+  <dd>
+    <code
+      >loadConfig → createHistory → createLlm → createTerminal →
+      createAgent(deps) → createRepl(deps) → repl.start()</code
+    >。 本文件不出现 if 分支, 不出现 try/catch 业务逻辑。
+  </dd>
+</dl>
+
+<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
+<p>
+  接口是给 LLM (也就是"另一个会读这段代码的智能体") 看的名片,好名字比
+  好实现更重要。
+</p>
+<pre class="code-block"><code>// src/history.ts
+export interface Message {
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  // 第 02 章会扩展 tool_calls, tool_call_id, name 等字段。
+}
+
+export interface History {
+  add(message: Message): void;
+  getMessages(): Message[];
+  clear(): void;
+}
+
+export function createHistory(): History { /* ... */ }</code></pre>
+
+<pre class="code-block"><code>// src/llm.ts
+export interface AssistantMessage {
+  role: "assistant";
+  content: string;
+  // 第 02 章会扩展 tool_calls。
+}
+
+export interface LLMClient {
+  chat(messages: Message[]): Promise&lt;AssistantMessage&gt;;
+}
+
+export function createLlm(config: Config): LLMClient { /* ... */ }</code></pre>
+
+<pre class="code-block"><code>// src/agent.ts
+export interface Agent {
+  run(query: string): Promise&lt;string&gt;;
+}
+
+export interface AgentDeps {
+  history: History;
+  llm: LLMClient;
+}
+
+export function createAgent(deps: AgentDeps): Agent { /* ... */ }</code></pre>
+
+<pre class="code-block"><code>// src/repl.ts
+export interface Terminal {
+  ask(): Promise&lt;string | null&gt;;  // null 表示 EOF / 关闭
+  print(text: string): void;
+  close(): void;
+}
+
+export interface ReplDeps {
+  agent: Agent;
+  terminal: Terminal;
+}
+
+export function createRepl(deps: ReplDeps): Repl { /* ... */ }</code></pre>
+
+<h2 id="delta-loop">loop 路径: 与第 00 章图 00-1 一一对应</h2>
+<p>
+  下面这段实现直接对应第 00 章的伪码。每行右侧标注了它在图 00-1 中
+  的节点,方便对照。
+</p>
+<pre class="code-block"><code>// src/agent.ts
+export function createAgent(deps: AgentDeps): Agent {
+  const { history, llm } = deps;
+
+  return {
+    async run(query: string): Promise&lt;string&gt; {
+      // 边界 checklist: 空 query 不写入 history
+      if (query.trim().length === 0) {
+        return "";
+      }
+
+      // 图 00-1 节点 3: 写 user message
+      history.add({ role: "user", content: query });
+
+      // 图 00-1 节点 4: 取 messages 浅拷贝
+      const messages = history.getMessages();
+
+      // 图 00-1 节点 5: 调 LLM
+      const assistant = await llm.chat(messages);
+
+      // 图 00-1 节点 6: 写 assistant message
+      history.add(assistant);
+
+      return assistant.content;
+    },
+  };
+}</code></pre>
+
+<h2 id="composition-root">Composition Root: 把 5 件套装到一根线</h2>
+<p>
+  <code>index.ts</code> 的存在意义是"5 件套的接线图"。它不出现 if 分支, 也不出现
+  try/catch,因为这两类代码一旦塞进 Composition Root,后续 子智能体和 e2e
+  都会变难。
+</p>
+<pre class="code-block"><code>// src/index.ts
+import { loadConfig } from "./config.js";
+import { createHistory } from "./history.js";
+import { createLlm } from "./llm.js";
+import { createTerminal } from "./terminal.js";
+import { createAgent } from "./agent.js";
+import { createRepl } from "./repl.js";
+
+export async function main(): Promise&lt;void&gt; {
+  const config = loadConfig();
+  const history = createHistory();
+  const llm = createLlm(config);
+  const terminal = createTerminal();
+  const agent = createAgent({ history, llm });
+  const repl = createRepl({ agent, terminal });
+  await repl.start();
+}
+
+main().catch((err) =&gt; {
+  console.error(err);
+  process.exit(1);
+});</code></pre>
+
+<h2 id="repl-edge">REPL 的边界: 退出命令和空输入</h2>
+<p>
+  REPL 这一层看起来是"输入输出",但它要承担三件事: (1) 拦截 <code>exit</code> /
+  <code>quit</code> 关闭 terminal, (2) 拦截空输入避免 agent 写入 History, (3)
+  拦截 Ctrl-D / EOF 优雅关闭。 这三件事都不应该让 agent 知道。
+</p>
+<pre class="code-block"><code>// src/repl.ts
+export function createRepl(deps: ReplDeps): Repl {
+  const { agent, terminal } = deps;
+
+  return {
+    async start(): Promise&lt;void&gt; {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const raw = await terminal.ask();
+        if (raw === null) break;            // EOF
+        const query = raw.trim();
+        if (query.length === 0) continue;   // 空输入不写入 history
+        if (query === "exit" || query === "quit") break;
+        const answer = await agent.run(query);
+        terminal.print(answer);
+      }
+      terminal.close();
+    },
+  };
+}</code></pre>
+
+<h2 id="fake-llm">Fake LLM Cookbook: 怎么写 messages 顺序断言</h2>
+<p>
+  这一节给出一份能直接抄的 fake LLM。它解决第 00 章"红灯 1"中提到的
+  "只断言最终文本"的隐患。
+</p>
+<pre class="code-block"><code>// test/_helpers/fake-llm.ts
+import type { LLMClient, AssistantMessage, Message } from "../../src/llm.js";
+
+export function createFakeLlm(scripted: string[]): LLMClient &amp; {
+  received: Message[][];
+} {
+  const received: Message[][] = [];
+  let i = 0;
+
+  return {
+    received,
+    async chat(messages: Message[]): Promise&lt;AssistantMessage&gt; {
+      // 记录每次调用收到的 messages 浅拷贝
+      received.push([...messages]);
+      const content = scripted[i++] ?? scripted[scripted.length - 1];
+      return { role: "assistant", content };
+    },
+  };
+}</code></pre>
+<p>
+  测试中只断言 <code>fake.received[N][M].role</code> /
+  <code>.content</code>,就能在不调真实 LLM 的情况下验证"第二次 LLM
+  收到了什么"。这种断言比"最终文本对"严格得多,它是后续每一章 Validation
+  卡片的基础。
+</p>
+
+<h2 id="delta-test">Validation: 把 Prompt Card 的 5 条断言落到 vitest</h2>
+<p>
+  下面 5 条断言直接来自第 00 章 Prompt Card 的"验证"一节。每条都能用 fake LLM 在
+  <code>&lt;100ms</code> 内跑完。
+</p>
+<pre class="code-block"><code>// test/agent.test.ts
+import { describe, it, expect } from "vitest";
+import { createAgent } from "../src/agent.js";
+import { createHistory } from "../src/history.js";
+import { createFakeLlm } from "./_helpers/fake-llm.js";
+
+describe("agent.run (最小 loop)", () =&gt; {
+  it("单轮: 透传 fake LLM 返回值", async () =&gt; {
+    const llm = createFakeLlm(["收到"]);
+    const agent = createAgent({ history: createHistory(), llm });
+    expect(await agent.run("你好")).toBe("收到");
+  });
+
+  it("多轮: 第二次 LLM 收到的 messages 包含第一轮 user 和 assistant", async () =&gt; {
+    const llm = createFakeLlm(["A1", "A2"]);
+    const agent = createAgent({ history: createHistory(), llm });
+
+    await agent.run("u1");
+    await agent.run("u2");
+
+    expect(llm.received[1]?.length).toBe(3);                  // [u1, a1, u2]
+    expect(llm.received[1]?.[0]?.role).toBe("user");
+    expect(llm.received[1]?.[0]?.content).toBe("u1");
+    expect(llm.received[1]?.[1]?.role).toBe("assistant");
+    expect(llm.received[1]?.[1]?.content).toBe("A1");
+    expect(llm.received[1]?.[2]?.role).toBe("user");
+  });
+
+  it("空 query 不写入 history", async () =&gt; {
+    const llm = createFakeLlm(["A"]);
+    const history = createHistory();
+    const agent = createAgent({ history, llm });
+
+    expect(await agent.run("")).toBe("");
+    expect(history.getMessages().length).toBe(0);
+    expect(llm.received.length).toBe(0);
+  });
+
+  it("getMessages 返回浅拷贝, 外部 push 不影响内部", () =&gt; {
+    const history = createHistory();
+    history.add({ role: "user", content: "u" });
+
+    const snap = history.getMessages();
+    snap.push({ role: "user", content: "hacked" });
+
+    expect(history.getMessages().length).toBe(1);
+    expect(history.getMessages()[0]?.content).toBe("u");
+  });
+});</code></pre>
+<p>
+  这 4 条断言 (5 条里第 5 条是 REPL 的,放到 <code>repl.test.ts</code>)
+  已经覆盖了第 00 章 Prompt Card 边界 checklist 的全部 5 条。 第 02
+  章开始,每一章都会沿用"fake LLM + messages 顺序断言"的模式, 只是 messages
+  数量和 role 序列变长。
+</p>
+
+<h2 id="trap">反例梯度: 新手 / 中级 / 高级</h2>
+<p>
+  本章的反例按"看起来能跑 / 看上去更优雅 / 用对了工具但放错位置"分三档。
+  读完后你应该能说出"为什么 LLM 经常写出 B 或 C"。
+</p>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>把 <code>agent.run()</code> 实现成"调一次
+      LLM,把响应拼接返回",不写 history。
+    </p>
+    <p>
+      <strong>为什么错:</strong>多轮上下文立刻断, 第二句会得到"我不知道
+      你喜欢什么"。
+    </p>
+    <p>
+      <strong>正确做法:</strong>严格按图 00-1 的 4 步, 写入 → 取 messages → 调
+      LLM → 写回。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>把 History 做成 module-level 单例, 在
+      <code>agent.ts</code> 内
+      <code>import { history } from "./history.js"</code>。
+    </p>
+    <p>
+      <strong>为什么错:</strong>测试时无法替换, 子智能体无法隔离, Composition
+      Root 失去可观测性 (第 00 章中级错法 B)。
+    </p>
+    <p><strong>正确做法:</strong>Composition Root 创建实例, 通过 deps 注入。</p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong><code>getMessages()</code> 返回内部数组引用。
+    </p>
+    <p>
+      <strong>为什么错:</strong>LLM client 拼下一轮 messages 时
+      <code>[...msgs, thisTurnUser]</code> 会反向污染 history (第 00 章 高级错法
+      C)。
+    </p>
+    <p>
+      <strong>正确做法:</strong>返回 <code>[...this.messages]</code> 浅拷贝,
+      并在 Validation 里写一条 push 反向断言。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>空字符串 query 仍然写 history 并调 LLM。</p>
+    <p>
+      <strong>为什么错:</strong>REPL 误触 (例如连续回车) 会让 history 出现
+      <code>role: "user", content: ""</code>, 既污染上下文又浪费 token。
+    </p>
+    <p>
+      <strong>正确做法:</strong>在 agent 层和 repl 层各加一次空输入拦截, 并在
+      Validation 里断言"空输入不增加 history 长度"。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · 第 01 章</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>单轮透传:</strong>fake LLM 返回 "收到",
+      <code>agent.run("x")</code> === "收到"。
+    </p>
+    <p>
+      <strong>多轮 messages 顺序:</strong>连续两次 run 后, fake LLM 第二次
+      收到的 messages 长度 == 3, role 序列 == [user, assistant, user], content
+      与第一轮输入一致。
+    </p>
+    <p>
+      <strong>空 query 不写 history:</strong><code>run("")</code> 返回 "",
+      history 长度不变, fake LLM 收到 0 次调用。
+    </p>
+    <p>
+      <strong>getMessages 浅拷贝:</strong>外部 push 新元素后, history
+      内部不受影响 (反向断言)。
+    </p>
+    <p>
+      <strong>Composition Root 实例共享:</strong>在 <code>index.ts</code> 内
+      <code>history</code> 只 new 一次, agent 和 repl 拿到的是同一份 引用 (用
+      <code>===</code> 断言)。
+    </p>
+  </div>
+</div>
+
+<h2 id="debug">如果实现失败,先查哪里</h2>
+<ol>
+  <li>
+    <strong>多轮断言失败:</strong>看 <code>agent.run()</code> 是不是漏写了
+    <code>history.add(assistant)</code>, 或者 <code>getMessages()</code>
+    返回了浅拷贝但外部没拿到。
+  </li>
+  <li>
+    <strong>空 query 仍然写 history:</strong>看
+    <code>agent.run()</code> 顶部是否做了
+    <code>if (query.trim().length === 0) return ""</code>。
+  </li>
+  <li>
+    <strong>浅拷贝断言失败:</strong>看 <code>getMessages()</code> 是不是 返回了
+    <code>this.messages</code> 而不是 <code>[...this.messages]</code>。
+  </li>
+  <li>
+    <strong>Composition Root 出现 if 分支:</strong>把 if 拆到对应的工厂 函数或
+    REPL 里, index.ts 只做接线。
+  </li>
+  <li>
+    <strong>fake LLM 收到 0 次调用:</strong>检查
+    <code>llm.received</code> 是不是被 fake 工厂外部覆盖 (要直接读
+    <code>llm.received</code>, 不要在测试里用 <code>fake.received</code>)。
+  </li>
+</ol>
+
+<h2 id="lookback">回望第 00 章: 哪些原则在本章兑现了</h2>
+<p>
+  这一节是"知识回环"。每章末尾都要把"自己兑现了哪些第 00 章原则"
+  列出来,作为对前章的差量验证。
+</p>
+<ul>
+  <li>
+    <strong>元方法 (4 步思考链):</strong>本章 "作者怎么想的" 一节把"现象 → 反例
+    → 接口 → 验证"完整走了一遍, Prompt Card 卡片里没有"注意架构" 这种空话。
+  </li>
+  <li>
+    <strong>术语锁定:</strong><code>History</code> / <code>LLMClient</code> /
+    <code>Composition Root</code> / <code>fake LLM</code> 全部以英文出现,
+    中文仅做"外层运行环境""消息列表"等一次性释义。
+  </li>
+  <li>
+    <strong>防自欺:</strong>红灯 1 "跑通 ≠ 正确" 体现在 fake LLM 的 messages
+    顺序断言上; 红灯 3 "LLM 说做完了" 体现在边界 checklist 的每条都可 翻译为
+    vitest 断言上; 红灯 4 "卡片漂亮 ≠ 实现漂亮" 体现在反例梯度 4 条具体错法上。
+  </li>
+  <li>
+    <strong>Prompt Card 6 段:</strong>第 00 章 Prompt Card 是 "6 段模板" 的
+    演示版, 第 01 章 Prompt Card 已经把 6 段全部按模板写, 不再空话。
+  </li>
+</ul>
+
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<p>
+  现在的 loop 能跑, 但还差几件事: assistant 里出现 tool call 时 (第 02
+  章)、上下文增长到模型放不下时 (第 06 章)、多轮里 LLM 临时 抽风时 (第 11
+  章)、需要让另一个 agent 接力时 (第 04 章)。这一节 把这些张力显式钉出来,
+  后续章节会逐个回来解决。
+</p>
+<dl class="defs">
+  <dt>tool call 分支</dt>
+  <dd>
+    当 assistant.content 是空但出现 tool_calls 数组时, loop 不能返回 文本,
+    而要执行工具、写入 tool result、再发一次 LLM。这条分支在 第 02 章接入, 但
+    prompt 模板里要提前留出 if 分支的形状。
+  </dd>
+  <dt>context 增长</dt>
+  <dd>
+    长对话会让 messages 超过模型窗口。History 之后会被 normalize / block /
+    compress (第 06 章), 这意味着 history 不能再"原样返回", 它要知道自己"是
+    prompt working context", 不等同于"原始记录"。
+  </dd>
+  <dt>LLM 异常</dt>
+  <dd>
+    LLM 返回空、超时、JSON 损坏时, agent 要决定"重试 / 跳过 / 中止"。 第 11
+    章会引入 recovery 边界, 现在的 agent.run() 还没考虑这些。
+  </dd>
+  <dt>子智能体</dt>
+  <dd>
+    第 04 章会让 agent.run() 内部"开第二个 loop", 但第二个 loop 的 History
+    必须和父 agent 隔离。这意味着 History 不能再 module-level, createHistory()
+    必须是工厂 (这一章已经做到)。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-01">本次如何 vibe code: 第 01 章的三件套</h2>
+<p>
+  按第 00 章 vibe-coding 方法论的拆卡 / review / 迭代三件套, 第 01
+  章的具体操作如下。 后续 02–15 章都会按这个格式给出 "本次如何 vibe code",
+  请你也按这个格式去写自己的 LLM 对话。
+</p>
+
+<h3 id="vibe-feed-01">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。只贴 "目标 + 场景 + 模块", 让 LLM 给出
+    <code>interface History</code> / <code>interface LLMClient</code> /
+    <code>interface Agent</code> / <code>interface Terminal</code> 四个
+    interface 的草案。本轮不写实现, 只钉形状与命名。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。贴 "模块 + 接线", 让 LLM 给出
+    <code>src/index.ts</code> 接线代码, 其中 <code>createHistory</code> /
+    <code>createLlm</code> / <code>createAgent</code> /
+    <code>createRepl</code> 都是返回空对象的 stub。本轮 review 重点:
+    <code>history</code> 实例是否 在 <code>index.ts</code> 中只 new 一次, agent
+    和 repl 拿到的是不是 同一份引用 (<code>===</code> 断言)。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。贴 "边界 (5 条 checklist)", 让 LLM 按
+    checklist 写每个工厂的真实实现。本轮 review 重点 (V1 review checklist
+    的"依赖方向"+"副作用"两栏): agent.ts 是否被偷偷塞进
+    <code>process.env</code> 读取, <code>getMessages</code> 是否返回浅拷贝。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。贴 "验证 (5 条 vitest 断言)", 让 LLM 写
+    <code>test/agent.test.ts</code>。本轮 review 重点: fake LLM 是否 真正记录
+    messages (而不是只返回字符串), 多轮断言是否同时检查 role 和 content。
+  </li>
+</ol>
+<div class="note">
+  <p class="note__title">为什么第 1 轮不允许写实现</p>
+  <p>
+    LLM 拿到 "目标 + 场景 + 模块" 后, 默认会直接写实现。写实现会触发"假装清单"
+    里的"假装做了边界检查"。本轮显式禁止 "do not write implementation yet", 强迫
+    LLM 把注意力放在命名、参数顺序、返回类型上, 后续轮次再补实现。
+  </p>
+</div>
+
+<h3 id="vibe-review-01">Review: 第 01 章专属 checklist</h3>
+<p>在第 00 章通用 review checklist 之上, 第 01 章额外要逐条核对的 5 条:</p>
+<ol>
+  <li>
+    <strong>history 是工厂而不是单例。</strong
+    ><code>grep -n 'export const history' src/</code>
+    应当 0 行。如果出现, 立即回退到第 2 轮让 LLM 改成工厂。
+  </li>
+  <li>
+    <strong>getMessages 返回浅拷贝。</strong>看实现是不是
+    <code>return [...this.messages]</code>, 而不是
+    <code>return this.messages</code>。 必须配合 Validation 卡片里 "外部 push
+    不影响 history" 这条反向断言。
+  </li>
+  <li>
+    <strong>agent.run() 内不读环境变量。</strong
+    ><code>grep -n 'process.env' src/agent.ts</code>
+    应当 0 行。
+  </li>
+  <li>
+    <strong>空 query 在 agent.run() 顶部拦截。</strong>看是不是有
+    <code>if (query.trim().length === 0) return ""</code> 这行, 而不是 REPL
+    拦截后直接 <code>continue</code>。两层都要有。
+  </li>
+  <li>
+    <strong>Composition Root 内 <code>history</code> 只 new 一次。</strong
+    >写一个 <code>__test__.ts</code> (不进 git) 把 agent 和 repl 拿到的 history
+    引用 <code>===</code> 比对, 不通过则立即重写。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-01">调试: 第 01 章典型伪装</h3>
+<p>LLM 在 01 章最常犯的两种伪装:</p>
+<ol>
+  <li>
+    <strong>伪装 A · 把 LLM 调用直接放进 REPL。</strong>症状:
+    <code>repl.ts</code> 里有 <code>await llm.chat(...)</code>。这意味着 REPL
+    绕过了 agent, history 不再唯一。验证:
+    <code>grep -n 'llm.chat' src/repl.ts</code> 应当 0 行;
+    <code>grep -n 'llm.chat' src/agent.ts</code> 应当 ≥ 1 行。
+  </li>
+  <li>
+    <strong>伪装 B · 把 history 写成 module-level 闭包单例。</strong>症状:
+    <code>history.ts</code> 顶层有
+    <code>let messages: Message[] = [];</code> 之类 module-level 状态。验证:
+    <code>grep -n '^let messages\|^const messages' src/history.ts</code> 应当 0
+    行 (只能在 <code>createHistory()</code> 函数体内出现)。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-01">迭代: 第 01 章 4 个 commit 节点</h3>
+<p>推荐的 4 个 commit 节点。每个 commit 跑通对应 vitest 集合后才进下一个:</p>
+<ol>
+  <li>
+    <code>feat(ch01): 钉 4 个 interface 形状, 不写实现</code> —— 跑
+    <code>tsc --noEmit</code> 通过, 没有任何实现代码。
+  </li>
+  <li>
+    <code>feat(ch01): Composition Root 接线, 工厂为 stub</code> —— 跑通
+    "Composition Root 实例共享" 那个一次性断言 (history 在 agent 和 repl 间是
+    <code>===</code>)。
+  </li>
+  <li>
+    <code>feat(ch01): 5 条边界 checklist 兑现</code> —— 跑通 Validation 卡片前 4
+    条 (单轮透传 / 多轮 messages 顺序 / 空 query / 浅拷贝)。
+  </li>
+  <li>
+    <code>test(ch01): REPL 边界 (exit / quit / EOF)</code> —— 跑通 第 5 条
+    Validation (REPL 边界)。
+  </li>
+</ol>
+<p>
+  每个 commit message 引用对应 Validation ID 是有意为之: 当某次回归测试 失败时,
+  你能立刻定位"是哪一条 Validation 被破坏了", 而不必从头读 diff。
+</p>
+
+<h2 id="practice">本章练习</h2>
+<ol>
+  <li>
+    按本章 4 条 Validation 断言写测试, 故意把 <code>getMessages()</code> 改回
+    <code>return this.messages;</code>, 验证测试会失败。
+  </li>
+  <li>
+    在 <code>agent.ts</code> 里加一个分支: 如果 <code>query</code> 以
+    <code>/echo </code> 开头, 不调 LLM, 直接把剩余部分作为 assistant 写回
+    history。验证多轮 messages 序列仍然正确 (echo 也算一轮)。
+  </li>
+  <li>
+    把 <code>index.ts</code> 故意塞进 <code>if (process.env.DRY_RUN)</code>
+    分支, 看看自己在看代码时能不能立刻识别"这里坏了" (第 00 章红灯 4)。
+  </li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章按 6 段 Prompt Card 模板兑现了第 00 章的承诺: 7 个文件, 5 件套 +
+  Composition Root + fake LLM, 4 条 messages 顺序断言覆盖了"多轮上下文 真的由
+  History 承担"这件事。读完后, 你能自己写一份能通过全部 Validation 的实现,
+  也能识别 LLM 给的代码"看上去对但其实偷懒"的几种典型手法。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  现在的 loop 只能聊天。下一章 (第 02 章) 把 tool call 分支接进来: 模型
+  只能提出结构化动作请求, 真正执行动作的是 harness; 工具执行前要过 permission,
+  工具结果要以 tool message 写回 History, 之后 loop 再走 下一轮。读完后, 你的
+  agent 就从"聊天循环"变成"能改代码的 agent"。
+</p>

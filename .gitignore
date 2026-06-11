@@ -10,3 +10,8 @@ logs/
 memory/
 dev_root/
 skills/
+.claude/
+.opencode/
+web/temp/
+doc/web-tutorial-plan.md
+doc/todo.md

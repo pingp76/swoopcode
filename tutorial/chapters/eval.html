@@ -1,0 +1,537 @@
+<p class="article__eyebrow">专题 B · 测试不确定系统</p>
+<h1 class="article__title">如何测试一个不确定的 Coding Agent</h1>
+<p class="article__lede">
+  Coding Agent 会调用真实 LLM, 但测试不能一开始就依赖真实 LLM。本专题
+  讨论"测试一个不确定系统" 的方法论: 用 deterministic LLM stub 让测试
+  稳定可重放, 用 trace assertion 让行为可观测, 用 live judge 在固定
+  路径上做现实校准。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="delta-from-15">在第 15 章基础上改了什么</h2>
+<p>
+  这一章不修改 harness 主代码, 而是在 <code>src/eval/</code> 下加一个
+  独立测试层。eval 层用 driver / trace / assertion 三个组件, 从外部 观察 agent
+  行为, 跑场景化的测试 case, 产出 report 文件。eval 层 与 harness 共享
+  <code>src/</code> 下的 interface (例如 LLMClient、
+  ToolRegistry、PermissionManager), 但不修改这些 interface 的实现。
+</p>
+<div class="source-links" aria-label="本章 GitHub 永久链接">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/eval/README.md"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/eval/README.md: eval 入口</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/driver.ts"
+    target="_blank"
+    rel="noreferrer"
+    >2. src/eval/core/driver.ts: 跑场景的驱动器</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/trace.ts"
+    target="_blank"
+    rel="noreferrer"
+    >3. src/eval/core/trace.ts: 行为 trace 采集</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/assertions.ts"
+    target="_blank"
+    rel="noreferrer"
+    >4. src/eval/core/assertions.ts: 行为断言</a
+  >
+</div>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    同一段 prompt 跑 10 次 coding agent, 可能 7 次对、3 次错。普通单元
+    测试只断言"返回了字符串", 抓不到这 30% 的失败。eval 必须能 "重放 + 断言 +
+    报告", 才能让 harness 的行为可被讨论。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"用 e2e 测试, 跑真 LLM"。这有两个问题: 一是 LLM 输出不确定,
+    测试 flaky, 跑 10 次挂 3 次, 团队对测试失去信任; 二是 token 成本贵, 跑一次
+    e2e 要花 $1, 跑 1000 个 case 就破产。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口:
+    <code
+      >interface Driver { run(scenario) }, interface Trace { events }, interface
+      Assertion { assert(trace) }</code
+    >。 不变量三条: (1) deterministic LLM stub 必须能预设 LLM 响应, 记录 所有
+    LLM 输入, 跑 1000 次结果一致, (2) trace 必须能反向回放 (从 trace 重现 agent
+    行为), (3) assertion 必须能拆"行为是否 符合 Prompt Card 边界",
+    而不是只断最终文本。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake LLM 预设 3 轮响应, 跑同一个 scenario 1000 次, 断言 trace 完全一致
+    (除了时间戳)。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
+<div class="note">
+  <p class="note__title">观察 1 · 用真 LLM 跑 e2e 测试</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+// 错误: 用真 LLM 跑测试
+it("agent 应该读文件", async () =&gt; {
+  const answer = await agent.run("读 src/agent.ts");
+  expect(answer).toContain("createAgent");  // flaky
+}, 60_000);  // 60s 超时</code></pre>
+  <p><strong>问:</strong>为什么不直接跑真 LLM?</p>
+  <p>
+    <strong>答:</strong>三件事同时坏掉 —— flakiness: 同一 prompt 跑 10 次, LLM
+    输出可能略有差异, 测试 30% 挂, 团队不敢信测试; 成本: 1000 个 case × $1 =
+    $1000/次 CI; 速度: 60s timeout, CI 跑 100 个 case 要 100 分钟。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 2 · 断言只断最终文本</p>
+  <pre class="code-block"><code>// 教学简化版
+expect(answer).toContain("createAgent");</code></pre>
+  <p><strong>问:</strong>为什么不只断最终文本?</p>
+  <p>
+    <strong>答:</strong>LLM 可能在不知道"createAgent" 是什么的情况下
+    也能输出这个字符串 (例如 hallucination)。最终文本对了, 但 行为完全错
+    (没读文件、没调工具、绕过了 permission)。要断 行为事实, 必须断 messages
+    序列、tool calls、permission 决策 这些结构性事实。
+  </p>
+</div>
+
+<h2 id="three-layers">三层验证策略</h2>
+<p>本章的核心方法论。harness 的测试分三层, 各有各的用途, 不混:</p>
+<dl class="defs">
+  <dt>第一层 · deterministic</dt>
+  <dd>
+    全部测试都跑。用 fake LLM (第 01 章 Cookbook) 预设响应, 跑 同一 scenario
+    1000 次结果完全一致。验证 harness 自身行为 (loop / state / 协议) 正确。token
+    成本: 0。CI 必跑。
+  </dd>
+  <dt>第二层 · live</dt>
+  <dd>
+    <strong>不</strong>在 CI 跑, 在本地 opt-in。跑真 LLM, 验证 deterministic
+    测试没覆盖的"实际 LLM 行为" (例如 LLM 是否真的调对了 tool name,
+    是否按预期思考)。token 成本: 中等。开发时偶尔跑一次, 不强制 CI。
+  </dd>
+  <dt>第三层 · judge</dt>
+  <dd>
+    <strong>不</strong>在 CI 跑, 单独 review 用。把 trace (LLM 输入输出 /
+    工具调用 / permission 决策) 喂给一个 "judge" LLM, 让 judge
+    评估"行为是否合理" (例如 "用户说删 /tmp, agent 真的删了 /tmp
+    没删错目录")。人 review judge 的输出, 不直接 CI。token 成本: 高。
+  </dd>
+</dl>
+<p>
+  这一章的"差 → 改 → 好": 普通单元测试只断最终文本, 跑真 LLM。 改进后:
+  deterministic 主 + live 副 + judge 复盘, 三层各司其职。
+</p>
+
+<h2 id="driver">Driver: 跑场景</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export interface Scenario {
+  name: string;
+  query: string;
+  fakeLlm: ScriptedLLM;
+  // 期望行为断言
+  expectations: Expectation[];
+}
+
+export interface Driver {
+  run(scenario: Scenario): Promise&lt;{ trace: Trace; passed: boolean; report: Report }&gt;;
+}</code></pre>
+<p>
+  driver 接受 scenario, 用 fakeLlm 跑 agent, 收集 trace (LLM 输入输出、
+  工具调用、permission 决策、reminder 注入), 把 trace 喂给 expectations 断言,
+  产出 report (通过 / 失败 + 失败原因)。
+</p>
+
+<h2 id="trace">Trace: 行为事实</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export interface Trace {
+  events: TraceEvent[];
+}
+
+export type TraceEvent =
+  | { type: "llm_call"; callIndex: number; inputMessages: Message[]; output: AssistantMessage }
+  | { type: "tool_call"; tool: string; args: unknown; result: ToolResult }
+  | { type: "permission_decision"; tool: string; action: "allow" | "ask" | "deny" }
+  | { type: "reminder_injected"; source: string; content: string }
+  | { type: "compaction"; beforeCount: number; afterCount: number }
+  | { type: "recovery_action"; kind: string; attempt: number };
+
+// trace 持久化到 JSON, 反向回放时从 trace 重现 agent 行为
+export function saveTrace(trace: Trace, path: string): Promise&lt;void&gt;;
+export function loadTrace(path: string): Promise&lt;Trace&gt;;</code></pre>
+<p>
+  trace 是 eval 的核心。它记录 agent 在跑 scenario 时做的所有事,
+  不仅是"返回了什么文本", 而是"调了哪些工具 / 过了哪些 permission / 注入了哪些
+  reminder"。trace 落盘后, 可以反向回放, 也能喂给 judge。
+</p>
+
+<h2 id="assertion">Assertion: 行为断言</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export type Expectation =
+  | { kind: "messages_at_least"; count: number }
+  | { kind: "last_message_role"; role: "user" | "assistant" | "tool" }
+  | { kind: "tool_called"; tool: string; atLeast?: number }
+  | { kind: "tool_not_called"; tool: string }
+  | { kind: "permission_asked"; tool: string }
+  | { kind: "reminder_with_source"; source: string }
+  | { kind: "no_compaction" | { kind: "compaction_at_least"; count: number } }
+  | { kind: "final_text_contains"; substring: string }
+  | { kind: "final_text_not_contains"; substring: string };
+
+export function assertExpectations(trace: Trace, expectations: Expectation[]): { passed: boolean; failures: string[] };</code></pre>
+<p>
+  断言不直接断最终文本 (那是 LLM 行为, 不稳定), 而是断"行为事实"。 例如:
+  "至少调了 1 次 read_file 工具"、"permission 至少问过 1 次"、 "messages 至少 5
+  条"。这些断言即使 LLM 输出变了也能稳定通过。
+</p>
+
+<h2 id="judge">Judge: 复盘</h2>
+<p>judge 是第三层, 不在 CI 跑。流程:</p>
+<ol>
+  <li>开发者本地跑一个 scenario, 收集 trace。</li>
+  <li>把 trace + scenario 描述喂给 judge LLM (通常用更强模型)。</li>
+  <li>
+    judge 评估"行为是否合理", 输出结构化反馈 (例如"agent 在 第 3 轮调错了工具,
+    应该是 read_file 不是 bash" / "agent 跳过 了 permission 检查, 危险!")。
+  </li>
+  <li>开发者看 judge 反馈, 决定改哪一章的 Prompt Card。</li>
+</ol>
+<p>judge 不替代单元测试, 而是用来"找出 Prompt Card 没覆盖的盲点"。</p>
+
+<h2 id="trap">反例梯度</h2>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>用真 LLM 跑 e2e 测试, 断言最终文本。</p>
+    <p><strong>为什么错:</strong>flaky + 贵 + 慢, CI 跑不起, 团队不信测试。</p>
+    <p>
+      <strong>正确做法:</strong>deterministic 主 + live 副 + judge 复盘,
+      三层各司其职。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>断言只断最终文本, 不断行为事实。</p>
+    <p>
+      <strong>为什么错:</strong>LLM 可能 hallucinate 出对的文本, 行为完全错。
+    </p>
+    <p>
+      <strong>正确做法:</strong>断言走 Expectation 类型 (tool_called /
+      permission_asked / messages_at_least 等), 不只断 final_text。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>judge LLM 直接决定测试通过 / 失败, 写进 CI。
+    </p>
+    <p>
+      <strong>为什么错:</strong>judge 自己也不稳定, 写进 CI 就把不确定性引入 CI,
+      团队还是不信测试。
+    </p>
+    <p>
+      <strong>正确做法:</strong>judge 输出只给开发者看, 不写进 CI; CI 只跑
+      deterministic + live (opt-in)。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>trace 只记录"成功路径", 不记录"被 permission
+      拒绝的工具调用"。
+    </p>
+    <p>
+      <strong>为什么错:</strong>调试时不知道"为什么 agent 没做某件事", 可能
+      permission 拒了但 trace 没记录。
+    </p>
+    <p>
+      <strong>正确做法:</strong>trace 记录所有事件, 包括 permission decision
+      (allow / ask / deny), judge 反馈能基于完整 trace。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · eval 专题</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>deterministic 1000 次结果一致:</strong>同一 scenario 跑 1000 次,
+      断言 trace 除了时间戳外完全一致 (deepEqual)。
+    </p>
+    <p>
+      <strong>trace 落盘 + 回放:</strong>saveTrace + loadTrace 之后, 跑 driver
+      回放, 断言产出的 trace 与原 trace 一致。
+    </p>
+    <p>
+      <strong>Expectation 覆盖行为事实:</strong>scenario 期望"至少调 1 次
+      read_file", trace 里 tool_called 事件 ≥ 1。
+    </p>
+    <p>
+      <strong>CI 不依赖真 LLM:</strong>CI 配置里没有 ANTHROPIC_API_KEY
+      等环境变量, 跑测试不需要任何 LLM 凭证。
+    </p>
+    <p>
+      <strong>judge 不写进 CI:</strong>judge 命令行工具存在, 但 CI 脚本不调用。
+    </p>
+  </div>
+</div>
+
+<h2 id="lookback">回望第 00–15 章: 哪些原则在 eval 中兑现了</h2>
+<ul>
+  <li>
+    <strong>fake LLM Cookbook 复用:</strong>第 01 章的 fake LLM 在 eval
+    层直接复用, 不重新发明。
+  </li>
+  <li>
+    <strong>事实与视图分离:</strong>trace 是事实, report 是视图, judge
+    反馈是另一个视图。三者职责清晰。
+  </li>
+  <li>
+    <strong>防自欺原则:</strong>eval 的核心就是"用 trace 取代肉眼判断",
+    直接兑现第 00 章的红灯 1。
+  </li>
+  <li>
+    <strong>append-only 原则:</strong>trace 是 append-only 事件流, 不修改不回放,
+    eval 重放是基于已存 trace 重现, 不修改 trace。
+  </li>
+</ul>
+
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>eval 跨模型对比</dt>
+  <dd>
+    同一 scenario 跑 Claude / GPT / Gemini, 收集 trace 对比, 反馈给 model-policy
+    专题章。
+  </dd>
+  <dt>eval 反馈 prompt 优化</dt>
+  <dd>
+    judge 反馈自动汇总成"Prompt Card 改进建议", 跑出一份 diff, 人工 review
+    后合并。
+  </dd>
+  <dt>eval 长期积累</dt>
+  <dd>
+    跑过的 scenario 和 trace 沉淀为 regression suite, 后续章节改动时跑全量,
+    看是否破坏老行为。
+  </dd>
+  <dt>eval 性能测试</dt>
+  <dd>
+    trace 里记录 token 用量 / 工具调用次数 / 压缩触发次数, 跑性能 regression。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-eval">本次如何 vibe code: eval 专题的三件套</h2>
+
+<h3 id="vibe-feed-eval">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>Scenario</code> /
+    <code>Driver</code> / <code>Trace</code> / <code>Expectation</code> /
+    <code>Report</code> 五个 interface。本轮不写实现, 重点钉"deterministic 主 +
+    live 副 + judge 复盘"。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出
+    <code>src/eval/</code> 目录结构, driver 是 stub (永远返回 passed=true)。本轮
+    review 重点: eval 层不修改 src/ 下任何实现。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写 driver + trace + assertion 实现 +
+    1 个 example scenario。本轮 review 重点: trace 记录所有事件 (含 permission
+    decision), assertion 走 Expectation 类型不只断文本。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写
+    <code>test/eval.test.ts</code>。本轮 review 重点: "deterministic 1000
+    次结果一致" 和 "trace 落盘 + 回放" 两条必须有 spy 验证。
+  </li>
+</ol>
+
+<h3 id="vibe-review-eval">Review: eval 专题专属 checklist</h3>
+<ol>
+  <li>
+    <strong>CI 不依赖真 LLM。</strong>验证: 跑
+    <code>npm run test</code> 不需要任何 API key。
+  </li>
+  <li>
+    <strong>trace 记录所有事件 (含 permission)。</strong>验证:
+    <code>grep -n 'permission_decision' src/eval/trace.ts</code> ≥ 1 行。
+  </li>
+  <li>
+    <strong>assertion 走 Expectation 类型。</strong>验证:
+    <code>grep -n 'final_text_contains' src/eval/assertion.ts</code>
+    应当是多个之一, 不应当是唯一断言类型。
+  </li>
+  <li>
+    <strong>judge 不写进 CI。</strong>验证: judge 命令行存在, 但 CI 配置 (例如
+    <code>.github/workflows/*.yml</code>) 不调用。
+  </li>
+  <li>
+    <strong>trace 落盘 + 回放。</strong>验证:
+    <code>saveTrace + loadTrace</code> 之后 driver 跑同一 scenario, trace 一致
+    (deepEqual)。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-eval">调试: eval 专题典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · 跑真 LLM 写进 CI。</strong>症状: CI 跑测试时要求
+    ANTHROPIC_API_KEY。验证:
+    <code>unset ANTHROPIC_API_KEY; npm test</code> 应当全部通过。
+  </li>
+  <li>
+    <strong>伪装 B · assertion 只断最终文本。</strong>症状: 期望 "agent
+    应该读文件" 写成 <code>final_text_contains("createAgent")</code>。验证:
+    写一个 LLM 不读文件但输出含 "createAgent" 的 scenario, deterministic
+    测试应当失败。
+  </li>
+  <li>
+    <strong>伪装 C · judge 写进 CI 自动判通过 / 失败。</strong>症状: CI 跑
+    <code>npm run eval:judge</code> 自动判通过。验证: 删掉 CI 配置里的 judge
+    调用, 仍然全部通过, judge 只在本地 opt-in。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-eval">迭代: eval 专题 4 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(eval): 钉 Scenario / Driver / Trace / Expectation / Report
+      接口</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code
+      >feat(eval): createDriver + createTraceRecorder + 1 个 example scenario
+      stub</code
+    >
+    —— tsc 通过, driver 永远 passed=true。
+  </li>
+  <li>
+    <code
+      >feat(eval): driver 跑 scenario + trace 落盘 + assertion 走
+      Expectation</code
+    >
+    —— 跑通 Validation 卡片前 3 条。
+  </li>
+  <li>
+    <code
+      >test(eval): 1000 次 deterministic 一致 + trace 回放 + CI 不依赖 API
+      key</code
+    >
+    —— 全绿。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · eval 专题</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>实现 eval 层, 用 deterministic 主 + live 副 + judge
+      复盘三层策略, 测试不确定的 Coding Agent。
+    </p>
+    <p>
+      <strong>场景:</strong>开发者跑一个 scenario "agent 应该读文件后回答",
+      deterministic 测试断言 trace 含 read_file 工具调用 + messages 末尾是
+      assistant 消息。跑 1000 次结果一致。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/eval/driver.ts</code> (新) 跑 scenario;
+      <code>src/eval/trace.ts</code> (新) 记录行为;
+      <code>src/eval/assertion.ts</code> (新) Expectation 类型;
+      <code>src/eval/judge.ts</code> (新, 不进 CI) judge LLM 反馈。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>CI 不依赖真 LLM, 不读环境变量里的 API key</li>
+      <li>
+        trace 记录所有事件, 含 permission_decision / tool_call /
+        reminder_injected / compaction
+      </li>
+      <li>assertion 走 Expectation 类型, 不只断 final_text</li>
+      <li>judge 不写进 CI, 只本地 opt-in</li>
+      <li>trace 落盘走 atomic write, 可回放</li>
+    </ul>
+    <p><strong>验证 (用 fake LLM + spy, 逐条落到 vitest):</strong></p>
+    <ul>
+      <li>同一 scenario 跑 1000 次, trace 除了时间戳完全一致 (deepEqual)</li>
+      <li>
+        saveTrace + loadTrace 后, driver 跑同一 scenario, 产出 trace 与原 trace
+        一致
+      </li>
+      <li>
+        scenario 期望 "至少调 1 次 read_file", trace 里 tool_called 事件 ≥ 1
+      </li>
+      <li>unset ANTHROPIC_API_KEY 后 npm test 全部通过</li>
+      <li>CI 脚本不调用 judge, judge 仅本地 opt-in</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="practice">本章练习</h2>
+<ol>
+  <li>
+    故意把 CI 配置里加 ANTHROPIC_API_KEY 依赖, 跑测试, 看"CI 不依赖真 LLM"
+    是否抓到。
+  </li>
+  <li>
+    把 assertion 改成只断 final_text, 跑测试, 看"Expectation 覆盖行为事实"
+    是否抓到 (写一个 hallucinate 的 scenario)。
+  </li>
+  <li>
+    把 judge 写进 CI, 跑测试, 看"judge 不写进 CI" 是否抓到 (CI 配置 grep 验证)。
+  </li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本专题给 harness 加了 eval 层, 用三层策略测试不确定的 Coding Agent:
+  deterministic 主 (CI 必跑, 跑 fake LLM, 0 token 成本) + live 副 (本地 opt-in,
+  跑真 LLM, 中等成本) + judge 复盘 (不进 CI, 单独 review, 高成本)。trace 是核心,
+  记录所有行为事件 (含 permission decision), 可落盘可回放。 assertion 走
+  Expectation 类型, 不只断最终文本。
+</p>

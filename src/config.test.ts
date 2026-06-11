@@ -62,7 +62,7 @@ describe("loadConfig", () => {
     expect(config.llmCapabilities.prefersStreaming).toBe(true);
   });
 
-  it("compression 默认值不受 provider 变更影响", () => {
+  it("compression 默认值从 runtime policy 派生", () => {
     mockResolveLLMProviderConfig.mockReturnValue({
       provider: "openai_compatible",
       displayName: "OpenAI-compatible",
@@ -79,11 +79,18 @@ describe("loadConfig", () => {
 
     const config = loadConfig();
 
-    expect(config.compression.thresholdToolOutput).toBe(2000);
-    expect(config.compression.decayThreshold).toBe(3);
-    expect(config.compression.decayPreviewTokens).toBe(100);
-    expect(config.compression.maxContextTokens).toBe(80000);
-    expect(config.compression.compactKeepRecent).toBe(4);
+    // generic-openai-compatible 使用 balanced 模式
+    expect(config.compression.thresholdToolOutput).toBe(4000);
+    expect(config.compression.decayThreshold).toBe(5);
+    expect(config.compression.decayPreviewTokens).toBe(200);
+    expect(config.compression.maxContextTokens).toBe(60000);
+    expect(config.compression.compactKeepRecent).toBe(6);
+
+    // Config 中应包含 modelProfile 和 runtimePolicy
+    expect(config.modelProfile).toBeDefined();
+    expect(config.modelProfile.id).toBe("generic-openai-compatible");
+    expect(config.runtimePolicy).toBeDefined();
+    expect(config.runtimePolicy.modelProfileId).toBe("generic-openai-compatible");
   });
 
   it("logLevel 默认值为 info", () => {

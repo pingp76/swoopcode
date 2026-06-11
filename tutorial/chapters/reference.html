@@ -1,0 +1,420 @@
+<p class="article__eyebrow">Reference · 整套教程的出口</p>
+<h1 class="article__title">术语表、Prompt Pack 与验证手册</h1>
+<p class="article__lede">
+  这一页不是新功能章节, 是把整套教程的术语、Prompt 写法、Validation 卡片
+  收束成查阅入口。你可以用这一页回到任何一章, 也能用 Prompt Pack 模板
+  写自己的重建 prompt。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="usage">怎么用这一页</h2>
+<p>
+  <strong>查术语</strong>: 第一节"术语锁定表" 列出 19 个核心术语,
+  每个标注首次出现章节和是否允许中文别名。
+</p>
+<p>
+  <strong>写 prompt</strong>: 第二节"6 段 Prompt Card 模板" 给你一份
+  完整的反例对照 (差 → 改 → 好), 你可以照着写。
+</p>
+<p>
+  <strong>做验证</strong>: 第三节"Validation 速查" 列出 16 章的 Validation
+  卡片一句话总结, 方便回头查具体断言。
+</p>
+<p>
+  <strong>走章节</strong>: 第四节"章节 Prompt Pack 总目录" 列出每章 的目标 /
+  模块 / 边界 / 验证一句话。
+</p>
+
+<h2 id="terms">术语锁定表</h2>
+<p>
+  下表是 19 个核心术语。第一次出现时用 <code>English</code> (中文释义) 格式,
+  之后只用英文。<strong>术语锁定原则</strong>: 同一概念只用 一种说法,
+  不允许中途换。
+</p>
+<table class="terms">
+  <thead>
+    <tr>
+      <th>术语</th>
+      <th>中文释义</th>
+      <th>首次出现</th>
+      <th>别名</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>harness</code></td>
+      <td>外层运行环境</td>
+      <td>00</td>
+      <td>不允许用"框架" / "包装"</td>
+    </tr>
+    <tr>
+      <td><code>agent loop</code></td>
+      <td>主循环</td>
+      <td>00</td>
+      <td>简称 <code>loop</code></td>
+    </tr>
+    <tr>
+      <td><code>History</code></td>
+      <td>消息列表</td>
+      <td>01</td>
+      <td>不允许用"上下文" / "对话历史"</td>
+    </tr>
+    <tr>
+      <td><code>LLMClient</code></td>
+      <td>大模型调用接口</td>
+      <td>01</td>
+      <td>不允许用"模型" / "AI"</td>
+    </tr>
+    <tr>
+      <td><code>tool call</code></td>
+      <td>工具调用请求</td>
+      <td>02</td>
+      <td>不允许用"工具请求" / "调用工具"</td>
+    </tr>
+    <tr>
+      <td><code>tool result</code></td>
+      <td>工具调用结果</td>
+      <td>02</td>
+      <td>role 必须是 "tool"</td>
+    </tr>
+    <tr>
+      <td><code>tool registry</code></td>
+      <td>工具注册表</td>
+      <td>02</td>
+      <td>不允许用"工具表" / "工具列表"</td>
+    </tr>
+    <tr>
+      <td><code>tool_call_id</code></td>
+      <td>工具调用 id</td>
+      <td>02</td>
+      <td>必须来自 LLM 返回, 不重生成</td>
+    </tr>
+    <tr>
+      <td><code>Composition Root</code></td>
+      <td>组装根 (<code>index.ts</code>)</td>
+      <td>01</td>
+      <td>不允许用"主入口" / "启动文件"</td>
+    </tr>
+    <tr>
+      <td><code>fake LLM</code></td>
+      <td>假模型</td>
+      <td>00</td>
+      <td>不允许用"mock 模型"</td>
+    </tr>
+    <tr>
+      <td><code>reminder</code></td>
+      <td>系统提醒消息</td>
+      <td>03</td>
+      <td>
+        role 是 "user", 标签 <code>&lt;system-reminder source="X"&gt;</code>
+      </td>
+    </tr>
+    <tr>
+      <td><code>stable prefix</code></td>
+      <td>稳定前缀</td>
+      <td>10</td>
+      <td>system prompt + tools 字段</td>
+    </tr>
+    <tr>
+      <td><code>SubAgent</code></td>
+      <td>子智能体</td>
+      <td>04</td>
+      <td>不允许用"子任务" / "分 agent"</td>
+    </tr>
+    <tr>
+      <td><code>Skill</code></td>
+      <td>按需加载工具集</td>
+      <td>05</td>
+      <td>不允许用"插件" / "扩展"</td>
+    </tr>
+    <tr>
+      <td><code>Permission</code></td>
+      <td>权限决策</td>
+      <td>07</td>
+      <td>action 是 "allow" / "ask" / "deny"</td>
+    </tr>
+    <tr>
+      <td><code>Hook</code></td>
+      <td>钩子</td>
+      <td>08</td>
+      <td>exitCode 0/1/2</td>
+    </tr>
+    <tr>
+      <td><code>Recovery</code></td>
+      <td>失败恢复</td>
+      <td>11</td>
+      <td>action 是 retry / compact_and_retry / abort</td>
+    </tr>
+    <tr>
+      <td><code>Async Run</code></td>
+      <td>后台任务</td>
+      <td>13</td>
+      <td>不允许用"异步任务" / "后台进程"</td>
+    </tr>
+    <tr>
+      <td><code>Schedule</code></td>
+      <td>定时任务</td>
+      <td>14</td>
+      <td>cron 表达式, source 标签 "schedule"</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  <strong>不变量原则</strong>: 任何一章引入新术语, 第一次出现时必须在本表
+  加一行; 别名替换在所有章节内生效。
+</p>
+
+<h2 id="prompt-template">6 段 Prompt Card 模板</h2>
+<p>
+  这是第 00 章确立的模板, 这里只列反例对照。完整示例见第 01 章 Prompt Card。
+</p>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">反例对照 · 差 → 改 → 好</span>
+  </div>
+  <div class="card__body">
+    <p><strong>差的卡片 (5 段, LLM 会偷懒):</strong></p>
+    <pre class="code-block"><code>目标: 实现 agent loop
+模块: history.ts, llm.ts, agent.ts, index.ts
+验证: 能跑通
+边界: 注意架构
+场景: 用户输入 query, agent 调用 LLM 返回文本</code></pre>
+    <p>
+      <strong>问题:</strong>"能跑通" 不是断言, "注意架构" 不可验证, 没说
+      messages 怎么拼。
+    </p>
+    <p><strong>改 (5 段, 有信息量但 LLM 仍会猜):</strong></p>
+    <pre class="code-block"><code>目标: 实现最小 agent loop, 多轮对话保留上下文
+模块: createHistory, createLlm, createAgent, createRepl, index.ts
+验证: 连续两次 run 后第二次 LLM 收到 messages 包含第一轮
+边界: agent.ts 不读环境变量, 不直接 new LLM client
+场景: 用户先说"我喜欢简洁", 再问"我喜欢什么风格"</code></pre>
+    <p><strong>改进:</strong>有 messages 顺序断言, 有"绝对不能" 的边界。</p>
+    <p><strong>好 (6 段, LLM 没空间偷懒):</strong></p>
+    <pre
+      class="code-block"
+    ><code>目标: 实现最小 agent loop, 多轮上下文由 History 提供
+场景: 用户依次输入 "我喜欢简洁" 与 "我喜欢什么风格",
+      agent 第二次回复应包含"简洁"
+模块:
+  - src/history.ts: createHistory(), 内部 messages: Message[]
+  - src/llm.ts: createLlm(config), 暴露 chat(messages)
+  - src/agent.ts: createAgent(deps), 暴露 run(query)
+  - src/repl.ts: createRepl(deps), 暴露 start()
+  - src/index.ts: 创建 history/llm/terminal, 传给 agent 和 repl
+接线: index.ts 内只做 new + 传参, 不出现 if 分支
+边界 (LLM 必须遵守):
+  - agent.ts 内不出现 process.env
+  - agent.ts 内不出现 new LLMClient
+  - history.getMessages() 返回浅拷贝
+  - 空 query 不写入 history
+验证:
+  - fake LLM 返回 "收到" 时 agent.run("x") === "收到"
+  - 连续两次 run, fake LLM 第二次收到的 messages.length === 3
+  - 第二次收到的 messages[0].role === "user"
+  - run("") 不增加 history 长度</code></pre>
+    <p>
+      <strong>关键差异</strong>: "边界" 是可枚举 checklist, "验证" 每条 都能落到
+      vitest 一行断言, "接线" 写明实例是不是同一份。
+    </p>
+  </div>
+</div>
+
+<h2 id="vibe-coding-template">vibe coding 4 轮拆卡</h2>
+<p>6 段卡片是总图, 喂给 LLM 要分 4 轮:</p>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>: 只贴 "目标 + 场景 + 模块", 让 LLM 给出
+    interface 草案 (不写实现, 只钉形状)。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>: 贴 "模块 + 接线", 让 LLM 给出
+    <code>index.ts</code> 接线, 工厂是 stub。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>: 贴 "边界 checklist", 让 LLM 按 checklist
+    写每个工厂实现。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>: 贴 "验证断言清单", 让 LLM 写测试, 优先 fake
+    LLM + messages 顺序断言。
+  </li>
+</ol>
+<p>4 轮独立可验证, 任一轮不通过单独回退。</p>
+
+<h2 id="validation-cheatsheet">Validation 速查</h2>
+<p>16 章 Validation 卡片一句话总结。完整的 Validation 卡片在每章末。</p>
+<table class="terms">
+  <thead>
+    <tr>
+      <th>章节</th>
+      <th>核心断言</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>00 · 元方法</td>
+      <td>vibe coding 4 轮拆卡 + review checklist + 防自欺 4 盏红灯</td>
+    </tr>
+    <tr>
+      <td>01 · 最小 loop</td>
+      <td>fake LLM 收到 messages 顺序 + history 浅拷贝 + 空 query 不写入</td>
+    </tr>
+    <tr>
+      <td>02 · 工具调用</td>
+      <td>tool_call_id 配对 + 错误仍写 tool message + 未知工具不崩</td>
+    </tr>
+    <tr>
+      <td>03 · TODO</td>
+      <td>状态机拒绝跳跃 + in_progress 唯一 + reminder 走 user 消息</td>
+    </tr>
+    <tr>
+      <td>04 · SubAgent</td>
+      <td>父子 history/todo 隔离 + 防递归 + maxRounds 触发截断</td>
+    </tr>
+    <tr>
+      <td>05 · Skill</td>
+      <td>activeSkills 闭包化 + 工具去重 + 父子 skill 隔离</td>
+    </tr>
+    <tr>
+      <td>06 · Compress</td>
+      <td>压缩不写回 history + tool_call_id 保留 + summary block 替换</td>
+    </tr>
+    <tr>
+      <td>07 · Permission</td>
+      <td>deny 必写 tool message + 子智能体 ask 降级 + denylist 优先</td>
+    </tr>
+    <tr>
+      <td>08 · Hook</td>
+      <td>
+        PreToolUse block 写 tool message + Hook 抛错降级 + 注入消息延迟追加
+      </td>
+    </tr>
+    <tr>
+      <td>09 · Memory</td>
+      <td>memory 不进 history + scope 隔离 + key 命名规范</td>
+    </tr>
+    <tr>
+      <td>10 · Cache</td>
+      <td>动态状态走 reminder + snapshot 字符串比较 + tools 拼装稳定</td>
+    </tr>
+    <tr>
+      <td>11 · Recovery</td>
+      <td>rate_limit 退避重试 + truncation 累积 + retry 上限放弃</td>
+    </tr>
+    <tr>
+      <td>12 · Task</td>
+      <td>renderActive 过滤 completed + 状态机校验 + id 由 harness 生成</td>
+    </tr>
+    <tr>
+      <td>13 · Async Run</td>
+      <td>不阻塞主 loop + 通知 drain + 冲突检测 + P1 压缩复用</td>
+    </tr>
+    <tr>
+      <td>14 · Schedule</td>
+      <td>tick 派发到 async run + 通知单独 source + timezone 解析</td>
+    </tr>
+    <tr>
+      <td>15 · Hardening</td>
+      <td>所有 IO 走 atomic write + dry-run 不真删 + 时间统一 number</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="chapter-pack">章节 Prompt Pack 总目录</h2>
+<p>每章一句话总结, 方便写"重建这个项目" 的总 prompt 时查阅。</p>
+<dl class="defs">
+  <dt>00 · 元方法</dt>
+  <dd>用 LLM 写 LLM agent 的元方法: 4 轮拆卡 + review + 防自欺。</dd>
+  <dt>01 · 最小 loop</dt>
+  <dd>History + LLMClient + Agent + REPL + Composition Root 五件套。</dd>
+  <dt>02 · 工具调用</dt>
+  <dd>tool registry + tool_call 协议 + agent 主循环加 tool 分支。</dd>
+  <dt>03 · TODO</dt>
+  <dd>TODO 状态机 + reminder 注入 + 不污染 system prompt。</dd>
+  <dt>04 · SubAgent</dt>
+  <dd>父子 history/todo 隔离 + 防递归 + maxRounds。</dd>
+  <dt>05 · Skill</dt>
+  <dd>activeSkills 闭包化 + 按需激活 + 工具去重。</dd>
+  <dt>06 · Compress</dt>
+  <dd>三层压缩管道 (Normalize / Block / Compress) + 不写回 history。</dd>
+  <dt>07 · Permission</dt>
+  <dd>同步拦截 + deny 必写 tool message + 子智能体 ask 降级。</dd>
+  <dt>08 · Hook</dt>
+  <dd>三个事件 (SessionStart / PreToolUse / PostToolUse) + exitCode 0/1/2。</dd>
+  <dt>09 · Memory</dt>
+  <dd>user / project 双 scope + key 命名规范 + SessionStart 注入。</dd>
+  <dt>10 · Cache</dt>
+  <dd>稳定前缀 / 动态状态 / 自然增量 三段布局。</dd>
+  <dt>11 · Recovery</dt>
+  <dd>6 种失败分类 + 不同策略 + retry 上限 + 不跨 run 共享。</dd>
+  <dt>12 · Task</dt>
+  <dd>结构化字段 + 状态机严格 + renderActive 过滤 + id 由 harness 生成。</dd>
+  <dt>13 · Async Run</dt>
+  <dd>后台派发 + drain 通知 + 冲突检测 + 复用 P1 压缩。</dd>
+  <dt>14 · Schedule</dt>
+  <dd>cron 调度 + 复用 async run + 单独 source 标签 + timezone 解析。</dd>
+  <dt>15 · Hardening</dt>
+  <dd>原子写 + 日志轮转 + output 引用计数 + dry-run + 时间统一。</dd>
+</dl>
+
+<h2 id="tension-map">张力地图: 章节之间的矛盾点</h2>
+<p>
+  harness 设计不是"哪一章节对的", 而是"在哪些约束下做哪种选择"。下面
+  是章节之间反复出现的张力, 回头查这里。
+</p>
+<dl class="defs">
+  <dt>压缩 vs cache (06 vs 10)</dt>
+  <dd>
+    压缩让 messages 短, 但破坏 system prompt 字符串的 cache 前缀稳定性。P2
+    总结的 LLM 调用本身吃 cache 配额, 需要 stable context 隔离。
+  </dd>
+  <dt>并行 vs 串行工具 (02 vs 13)</dt>
+  <dd>
+    同一个工具并行跑 (例如两个 run_bash) 容易写同一文件, async run +
+    冲突检测是折中方案。
+  </dd>
+  <dt>memory vs task (09 vs 12)</dt>
+  <dd>
+    memory 是"用户级偏好" (跨项目), task 是"项目级 plan"
+    (单项目)。用户换项目后项目级 fact 隐藏, user 级保留。
+  </dd>
+  <dt>reminder 频率 (03 vs 13 vs 14)</dt>
+  <dd>
+    TODO reminder / async run notification / schedule notification 都走 reminder
+    标签, 各自 source 区分。频率高时 reminder 累积, 需要各自内部去重。
+  </dd>
+  <dt>权限共享 vs 隔离 (07 vs 04)</dt>
+  <dd>
+    父子 agent 共享 permission 策略 (子不能绕过父), 但 history / todo
+    隔离。共享与隔离的边界是 harness 设计核心。
+  </dd>
+  <dt>eval 实时性 vs 重放 (eval vs 11)</dt>
+  <dd>
+    eval 跑真实 LLM 能反映现状, 但每次跑结果可能不同; 重放 deterministic LLM
+    stub 稳定但可能与真实行为漂移。两者结合用 (deterministic 主 + live 副)。
+  </dd>
+</dl>
+
+<h2 id="next-step">下一步</h2>
+<p>现在你已经走完整套教程。建议的下一步:</p>
+<ol>
+  <li>
+    挑一章 (建议从 02 章开始, 不依赖 00/01 的元方法), 用本章 6 段模板自己写一份
+    Prompt Card。
+  </li>
+  <li>
+    用第 01 章的 fake LLM Cookbook 写测试, 验证你写的卡片能让 LLM 实现通过
+    Validation。
+  </li>
+  <li>挑一章做 vibe coding 4 轮拆卡练习, 每轮跑通 Validation 才进下一轮。</li>
+  <li>
+    读 eval 专题章, 学习如何把"卡片的实现" 自动化回归 (eval 反馈 prompt 优化)。
+  </li>
+  <li>
+    读 model-policy 专题章, 学习不同大模型的差异 (cache / tool call / 错误码)。
+  </li>
+</ol>

@@ -47,7 +47,7 @@ export interface ProjectContext {
  * 第一版默认 projectRoot = process.cwd()，保持现有启动行为不变。
  * AGENT_PROJECT_ROOT 是启动时切换项目根目录的扩展点，不支持运行中切换。
  *
- * Agent 自身数据默认放到 ~/.learn-claude-code-ts，也可以通过 AGENT_HOME 覆盖。
+ * Agent 自身数据默认放到 ~/.swoopcode，也可以通过 AGENT_HOME 覆盖。
  * 这样切换项目时不会在目标项目里散落 skills、memory、logs 或 .task_outputs。
  */
 export function createProjectContext(options?: {
@@ -61,7 +61,7 @@ export function createProjectContext(options?: {
   const agentHome = resolve(
     options?.agentHome ??
       process.env["AGENT_HOME"] ??
-      resolve(homedir(), ".learn-claude-code-ts"),
+      resolve(homedir(), ".swoopcode"),
   );
   const memoryDirName =
     options?.memoryDirName ?? process.env["MEMORY_DIR"] ?? "memory";

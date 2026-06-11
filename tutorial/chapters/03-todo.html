@@ -1,0 +1,523 @@
+<p class="article__eyebrow">第 03 章 · 让多轮执行有节奏</p>
+<h1 class="article__title">给 Loop 加一个工作清单: TODO Manager</h1>
+<p class="article__lede">
+  第 02 章接上 tool call 之后, loop 有一个新问题: 模型可以一次调 10 个工具,
+  也可以一直调下去不结束。这一章给 loop 加一个"工作清单"——TODO Manager。
+  模型每轮开始前能看到当前 TODO 状态, 每轮结束后可以更新 TODO。 这是 harness
+  第一次具备"自我规划"能力。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="delta-from-02">在第 02 章基础上改了什么</h2>
+<p>
+  这一章在 agent 主循环里加一个 TODO 模块。loop 跑起来时, 每次 LLM
+  调用前都把当前 TODO 状态作为 system reminder 注入到 messages, LLM
+  返回后允许它通过一个特殊工具 (<code>update_todo</code>) 更新 TODO。
+  对应到代码, 改动集中在 3 个新文件 + 1 处改 agent.ts:
+  <code>src/todo.ts</code> (新)、
+  <code>src/tools/update_todo.ts</code> (新)、<code>src/agent.ts</code> (改)、
+  <code>src/index.ts</code> (改接线)。
+</p>
+<div class="source-links" aria-label="本章 GitHub 永久链接">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/todo.ts"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/todo.ts: TODO 数据结构与状态机 (新)</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
+    target="_blank"
+    rel="noreferrer"
+    >2. src/agent.ts: 每轮 LLM 调用前注入 TODO reminder</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/tools/registry.ts"
+    target="_blank"
+    rel="noreferrer"
+    >3. src/tools/registry.ts: 注册 update_todo 工具</a
+  >
+</div>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    长任务下 (例如"先读 3 个文件, 改 5 行, 跑测试"), 模型在第 5 轮
+    已经忘了"我刚才说要先读文件"。harness 必须替它保留一份工作清单,
+    每轮提醒它"现在在清单第几项"。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"把 TODO 写在 system prompt 里, 让 LLM 自己维护"。
+    这有两个问题: 一是 LLM 不会真去维护, 它会"假装"维护 (写漂亮 文本,
+    实际不再看); 二是 system prompt 写 TODO 会破坏第 10 章的 cache-friendly
+    布局。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口:
+    <code>interface TodoManager { get(), update(items), tickRound() }</code>。
+    不变量三条: (1) TODO 状态独立于 history, 不进 messages 序列, (2) 每轮 LLM
+    看到的 TODO 是 reminder 形式 (system-reminder user 消息), 不污染 system
+    prompt 稳定前缀, (3) TODO 状态机: pending → in_progress → completed,
+    不允许跳跃 (例如从 pending 直接 completed)。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake LLM 第一轮返回 assistant 携带 <code>update_todo</code> 工具调用,
+    跑完后断言 TODO 状态变了; 第二轮 LLM 收到的 messages 包含一条 reminder 消息,
+    content 描述新的 TODO 状态。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
+<div class="note">
+  <p class="note__title">观察 1 · 把 TODO 塞进 system prompt</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+const systemPrompt = `你是一个编码助手。当前 TODO: ${JSON.stringify(todos)}`;
+const messages = [{ role: "system", content: systemPrompt }, ...history.getMessages()];</code></pre>
+  <p><strong>问:</strong>看上去简洁, 为什么仍然不行?</p>
+  <p>
+    <strong>答:</strong>两件事同时坏掉 —— cache: system prompt 一旦包含 TODO
+    状态, 每次调用 LLM 的 system prompt 都不同, 整个 prompt cache 失效, token
+    成本涨 3-5 倍; 真实性: LLM 不会真去更新 system prompt 里的 TODO 字符串,
+    harness 必须用结构化数据维护 TODO, 不能用自由文本。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 2 · TODO 状态机不限制跳跃</p>
+  <pre class="code-block"><code>// 教学简化版
+class TodoManager {
+  update(items) { this.items = items; }  // 直接覆盖
+}
+}</code></pre>
+  <p><strong>问:</strong>为什么不直接覆盖, 要限制状态机?</p>
+  <p>
+    <strong>答:</strong>LLM 倾向于"全部 completed 一笔勾销"。如果不限制,
+    模型会在第一轮就把所有 TODO 标成 completed, 之后即使它根本没做完, harness
+    也不知道。这种"假装做完了"是红灯 3 的典型发作。
+  </p>
+</div>
+
+<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
+export interface TodoItem {
+  content: string;
+  status: TodoStatus;
+}
+
+export interface TodoManager {
+  get(): TodoItem[];
+  update(items: TodoItem[]): void;
+  // 每轮 LLM 调用前调用, 返回 reminder 字符串 (空表示无提醒)
+  tickRound(): string;
+  // 检查是否全部完成
+  isAllCompleted(): boolean;
+}
+
+export function createTodoManager(): TodoManager { /* ... */ }</code></pre>
+
+<h2 id="state-machine">状态机: 不允许跳跃</h2>
+<p>TODO 状态机是本章的关键不变量。它有三条规则:</p>
+<ol>
+  <li>新增: 任意状态都可以新增一条 pending。</li>
+  <li>激活: pending → in_progress, 任何时候一个清单只允许一条 in_progress。</li>
+  <li>
+    完成: in_progress → completed, 不允许 pending → completed (跳过
+    in_progress)。
+  </li>
+</ol>
+<p>
+  这三条规则保证 TODO 状态对 LLM 是可读的: 任意时刻, "in_progress"
+  那条就是"我现在在做的事"。如果 LLM 想把 pending 直接标 completed, harness 在
+  <code>update()</code> 里 reject 这条, 写一条 error tool message 告诉 LLM。
+</p>
+
+<h2 id="loop-injection">loop 注入点: reminder 而不是 system prompt</h2>
+<p>
+  TODO 状态变化很频繁 (几乎每轮都可能变), 但它不能进 system prompt。 折中方案:
+  每轮 LLM 调用前, TODO 状态被格式化成 reminder 字符串, 作为 user 消息注入到
+  messages 末尾。
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+async function run(query: string): Promise&lt;string&gt; {
+  history.add({ role: "user", content: query });
+
+  for (;;) {
+    // 第 03 章新增: 每轮注入 TODO reminder
+    const reminder = todo.tickRound();
+    if (reminder) {
+      history.add({ role: "user",
+        content: `&lt;system-reminder source="todo"&gt;\n${reminder}\n&lt;/system-reminder&gt;` });
+    }
+
+    const messages = history.getMessages();
+    const assistant = await llm.chat(messages);
+    history.add(assistant);
+
+    if (!assistant.tool_calls || assistant.tool_calls.length === 0) {
+      return assistant.content;
+    }
+
+    for (const call of assistant.tool_calls) {
+      const tool = registry.get(call.name);
+      if (!tool) { /* ... */ continue; }
+      const result = await tool.execute(call.args);
+      history.add({ role: "tool", tool_call_id: call.id, content: result.content });
+    }
+  }
+}</code></pre>
+<p>
+  reminder 用 <code>&lt;system-reminder&gt;</code> 标签包起来, LLM 看到这种
+  标签就知道"这是 harness 注入的, 不是用户写的", 不会把它当成普通 user
+  消息去回应。
+</p>
+
+<h2 id="trap">反例梯度</h2>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>TODO 状态作为 module-level 单例。</p>
+    <p>
+      <strong>为什么错:</strong>第 04 章子智能体需要独立的 TODO 列表,
+      单例会让子智能体的 TODO 污染主 agent。
+    </p>
+    <p>
+      <strong>正确做法:</strong>本章已示范,
+      <code>createTodoManager()</code> 是工厂, Composition Root 在
+      <code>index.ts</code> 创建并注入。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>不限制状态机, 允许 LLM 把 pending 直接
+      completed。
+    </p>
+    <p>
+      <strong>为什么错:</strong>LLM 倾向于"全部勾选", harness 必须强制它走过
+      in_progress, 否则 "in_progress 是不是当前正在做" 这条不变量就崩了。
+    </p>
+    <p>
+      <strong>正确做法:</strong>在 <code>update()</code> 入口校验, 拒绝
+      pending→completed 跳跃, 写 error tool message。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>reminder 直接放在 system prompt 末尾。</p>
+    <p>
+      <strong>为什么错:</strong>破坏第 10 章的 cache-friendly 布局, system
+      prompt 应当是稳定前缀, TODO 是动态状态。
+    </p>
+    <p>
+      <strong>正确做法:</strong>reminder 作为 user 消息, 标签
+      <code>&lt;system-reminder source="todo"&gt;</code>。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>LLM 调 update_todo 时不传 tool_call_id, 或者
+      role 写成 "user"。
+    </p>
+    <p>
+      <strong>为什么错:</strong>回顾第 02 章的 tool call 协议, role 必须是
+      "tool", id 必须来自 LLM。
+    </p>
+    <p>
+      <strong>正确做法:</strong>第 02 章的约束全部沿用,
+      不要在本章单独发明一套协议。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · 第 03 章</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>TODO 状态机拒绝跳跃:</strong>fake LLM 调用 update_todo 试图把
+      pending 直接 completed, harness 写一条 error tool message, TODO 状态没变。
+    </p>
+    <p>
+      <strong>reminder 注入位置正确:</strong>fake LLM 第一轮不调 update_todo,
+      第二轮收到的 messages 仍然包含
+      <code>&lt;system-reminder source="todo"&gt;</code>
+      标签, 描述初始 TODO 状态。
+    </p>
+    <p>
+      <strong>reminder 不在 system prompt:</strong>断言 messages[0].role !==
+      "system" 仍然成立, reminder 是 user 角色。
+    </p>
+    <p>
+      <strong>in_progress 唯一:</strong>fake LLM 试图把两条都标 in_progress,
+      harness 拒绝, 写 error tool message。
+    </p>
+    <p>
+      <strong>tickRound 幂等:</strong>连续两次 <code>todo.tickRound()</code>
+      返回同一份 reminder 字符串, 不会"消耗"状态。
+    </p>
+  </div>
+</div>
+
+<h2 id="lookback">回望第 00–02 章: 哪些原则在本章兑现了</h2>
+<ul>
+  <li>
+    <strong>工厂模式:</strong>TODO 是工厂, 不是单例, 为第 04 章子智能体隔离 TODO
+    列表做准备。
+  </li>
+  <li>
+    <strong>不污染 system prompt:</strong>reminder 用 user 消息 + 标签, 保留
+    cache-friendly 布局 (第 10 章的伏笔)。
+  </li>
+  <li>
+    <strong>tool call 协议沿用:</strong>update_todo 复用第 02 章的 Tool
+    interface, 不发明新协议。
+  </li>
+  <li>
+    <strong>状态机约束:</strong>不变量写进 update() 入口, 用 Validation
+    卡片"状态机拒绝跳跃"和"in_progress 唯一"反向断言。
+  </li>
+</ul>
+
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>子智能体用 TODO</dt>
+  <dd>
+    第 04 章会让子智能体继承父 agent 的 dependencies, 但 TODO 列表必须独立
+    (本章工厂模式已经在准备这件事)。
+  </dd>
+  <dt>TODO 列表本身太长</dt>
+  <dd>
+    第 06 章 compress 会处理"TODO 列表本身占据 context" 的情况,
+    通常的方案是只把"前 3 条 in_progress" 注入 reminder, 不注入全表。
+  </dd>
+  <dt>TODO 跨会话保留</dt>
+  <dd>
+    第 09 章 memory 会讨论"TODO 是不是用户级长期事实", 倾向是: 当次会话的 TODO
+    不入 memory, 跨会话的 plan 入 task (第 12 章)。
+  </dd>
+  <dt>TODO 触发 reminder 频率</dt>
+  <dd>
+    第 13 章 async run 会有"后台 agent 完成后通知", 那时也会复用 reminder 机制,
+    不会单独发明通道。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-03">本次如何 vibe code: 第 03 章的三件套</h2>
+
+<h3 id="vibe-feed-03">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>TodoItem</code> /
+    <code>TodoStatus</code> / <code>TodoManager</code> 三个 interface,
+    以及状态机规则文档 (3 条规则 + 一段说明)。本轮不写实现。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
+    todo 实例是 stub (返回空数组)。本轮 review 重点: todo 与 history / llm /
+    registry 是同级依赖, 都从 <code>index.ts</code> 注入。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createTodoManager() + update_todo
+    工具 + agent.ts 注入 reminder。本轮 review 重点: update() 入口的状态机校验,
+    reminder 标签格式。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写 <code>test/todo.test.ts</code> +
+    <code>test/agent.todo.test.ts</code>。本轮 review 重点: Validation 卡片 5
+    条都要在测试里, 特别是"reminder 不在 system prompt"和"tickRound 幂等"。
+  </li>
+</ol>
+
+<h3 id="vibe-review-03">Review: 第 03 章专属 checklist</h3>
+<ol>
+  <li>
+    <strong>reminder 标签格式严格。</strong>必须
+    <code>&lt;system-reminder source="todo"&gt;...&lt;/system-reminder&gt;</code
+    >, source 写 "todo", 不是 "todo-manager" 之类的自由发挥。验证: grep
+    <code>source="todo"</code> 在 agent.ts 内 ≥ 1 行。
+  </li>
+  <li>
+    <strong>状态机校验在 update() 入口。</strong>不依赖上层 agent 去校验,
+    否则子智能体复用 TODO 时会绕过校验。验证:
+    <code>grep -n 'pending' src/todo.ts</code> 在 update() 函数体内 ≥ 1 行
+    (说明有校验)。
+  </li>
+  <li>
+    <strong>tickRound 无副作用。</strong>连续调用不修改 TODO 状态。验证:
+    写一个测试 <code>tickRound(); tickRound()</code> 两次后状态没变。
+  </li>
+  <li>
+    <strong>TODO 工厂不是单例。</strong>复用前两章检查:
+    <code>grep -n 'export const todo' src/</code> 应当 0 行。
+  </li>
+  <li>
+    <strong>不污染 history 的稳定结构。</strong>TODO 数据本身不进
+    history.getMessages(), 只把 reminder 字符串作为 user 消息写入。验证:
+    跑完一轮后 history.getMessages() 不含 TodoItem 类型对象。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-03">调试: 第 03 章典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · 状态机校验写在 agent.ts 里。</strong>症状: agent.ts 有
+    <code
+      >if (item.status === "pending" &amp;&amp; newStatus === "completed")
+      reject(...)</code
+    >。这意味着子智能体用自己的 todo manager 时会绕过校验。验证:
+    <code>grep -n 'pending.*completed' src/agent.ts</code> 应当 0 行, 应当在
+    todo.ts 内。
+  </li>
+  <li>
+    <strong>伪装 B · reminder 拼到 system prompt 字符串里。</strong>症状: system
+    prompt 末尾出现 "Current TODO: ..."。验证: 跑完一轮后 messages[0].content
+    不应含 "Current TODO"。
+  </li>
+  <li>
+    <strong>伪装 C · update_todo 写完不返回新状态。</strong>症状: 工具 execute
+    返回成功, 但下一轮 LLM 收到的 reminder 还是旧状态。验证: Validation
+    卡片"reminder 注入位置正确"那条, 必须断言"第二轮 reminder 的 content
+    与第一轮不同"。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-03">迭代: 第 03 章 4 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(ch03): 钉 TodoItem / TodoStatus / TodoManager 接口与状态机规则</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code>feat(ch03): createTodoManager 工厂 + update_todo 工具 stub</code> ——
+    tsc 通过, agent.run 仍未注入 reminder。
+  </li>
+  <li>
+    <code>feat(ch03): agent.ts 注入 reminder, 状态机校验在 update() 入口</code>
+    —— 跑通 Validation 卡片前 4 条。
+  </li>
+  <li>
+    <code>test(ch03): tickRound 幂等 + reminder 标签格式断言</code> —— 全绿。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 03 章</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>给 agent loop 加 TODO Manager,
+      模型可以看到/更新工作清单, 状态机不允许跳跃。
+    </p>
+    <p>
+      <strong>场景:</strong>用户输入 "重构 user 组件, 先读再改再测", agent
+      第一轮调 update_todo 创建 3 条 pending 并把第一条标 in_progress, 之后每轮
+      reminder 显示当前 in_progress 那条。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/todo.ts</code> (新) 暴露
+      <code>createTodoManager()</code>;
+      <code>src/tools/update_todo.ts</code> (新) 实现 update_todo 工具;
+      <code>src/agent.ts</code> 每轮 LLM 调用前注入 reminder;
+      <code>src/index.ts</code> 接线 todo 到 agent 和 registry。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>
+        TODO 状态机: pending → in_progress → completed, 拒绝 pending→completed
+        跳跃
+      </li>
+      <li>同一时刻只允许一条 in_progress</li>
+      <li>
+        reminder 用 <code>&lt;system-reminder source="todo"&gt;</code> 标签,
+        role 是 "user", 不是 "system"
+      </li>
+      <li>tickRound 幂等, 不修改 TODO 状态</li>
+      <li>TODO 数据本身不进 history.getMessages()</li>
+    </ul>
+    <p><strong>验证 (用 fake LLM + fake registry, 逐条落到 vitest):</strong></p>
+    <ul>
+      <li>
+        LLM 调 update_todo 把 pending 直接 completed, 写 error tool message,
+        TODO 状态不变
+      </li>
+      <li>LLM 试图激活第二条 in_progress, 写 error tool message</li>
+      <li>连续两次 tickRound() 返回同一份 reminder 字符串</li>
+      <li>跑完一轮后 messages[0].role !== "system" 仍然成立</li>
+      <li>
+        第二轮 LLM 收到的 messages 包含 reminder 标签, content 描述新 TODO 状态
+      </li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="practice">本章练习</h2>
+<ol>
+  <li>
+    故意把状态机校验挪到 agent.ts, 跑测试, 看 Validation 卡片"in_progress 唯一"
+    是否还能抓到。
+  </li>
+  <li>
+    在 reminder 里直接拼 TodoItem 对象的 JSON.stringify, 跑测试, 看是否破坏
+    system prompt 稳定性检查 (本节没有这条, 但你可以为第 10 章留一个伏笔)。
+  </li>
+  <li>
+    把 update_todo 工具的 role 写成 "user", 跑测试, 看 Validation 卡片"tool
+    message role" 是否抓到 (这条是第 02 章的约束, 本章沿用)。
+  </li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章给 loop 加了一个"工作清单": TODO Manager。loop 现在每轮能看到 当前
+  in_progress 那条 TODO, 也能通过 update_todo 工具更新清单。状态机 不允许跳跃,
+  防止 LLM "全部勾选" 假装做完了。下一章 (第 04 章) 我们 会让 harness
+  学会"分身"——SubAgent, 让一个 agent 在 loop 内开第二个 agent 处理子任务, 但隔离
+  history 与 TODO。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  第 03 章让 loop 有节奏, 但仍然只有一个 agent 在工作。第 04 章 SubAgent 会让
+  agent 在 loop 内"开第二个 agent" 处理子任务, 关键约束是: 子智能体的
+  history、todo、permission 都必须和父 agent 隔离, 但 tool registry
+  可以共享。这一章准备的"工厂模式"就是为这一步服务的。
+</p>

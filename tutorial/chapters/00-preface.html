@@ -1,0 +1,1085 @@
+<p class="article__eyebrow">第 00 章 · 在写代码之前</p>
+<h1 class="article__title">用 LLM 写 LLM Agent 的元方法</h1>
+<p class="article__lede">
+  这一章不写代码。它要回答一个比"如何实现 loop"更前置的问题：
+  <strong
+    >当你打算让 LLM 帮你写一个让 LLM
+    持续工作的系统时，你自己要先想清楚什么？</strong
+  >
+  读完后，你应该能看懂后续所有章节的 Prompt Card 是怎么来的，也能判断 LLM
+  帮你写出来的实现是不是真的"做对了"。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="meta-question">这门课的真正主题</h2>
+<p>
+  表面上看，这是一本"从零实现 coding agent"的教程。往深一层看，它示范的是
+  <strong>如何与 LLM 协作完成一类特殊的工作：搭建承载 LLM 自身工作的环境</strong
+  >。 这件事有三个特点，让它和普通"让 LLM 写个函数"不同：
+</p>
+<dl class="defs">
+  <dt>对象是 LLM 本身</dt>
+  <dd>
+    你的最终用户是另一个 LLM。你写的接口、命名、错误信息,都是在教一个
+    模型"如何更好地使用你的代码"。这意味着好名字比好实现更重要。
+  </dd>
+  <dt>现场是长生命周期</dt>
+  <dd>
+    一个 harness 跑几小时甚至几天,中途会有多轮对话、工具调用、异常恢复。
+    你的代码必须能在"现场丢失"后从历史里重新拼出语义。这是普通 Web
+    后端不太需要关心的事。
+  </dd>
+  <dt>失败模式是隐性的</dt>
+  <dd>
+    一次跑通不等于实现正确。LLM 生成的代码可能"看起来对、用起来也跑、
+    但悄悄把上下文弄丢"。你必须靠 trace 而不是肉眼判断它是否真的做对了。
+  </dd>
+</dl>
+<p>
+  知道这三点,你就不会把这一章当成"普通项目实战",而会理解为什么后面的 Prompt Card
+  要写成"目标/场景/模块/接线/边界/验证"六件套 —— 它是为了
+  强迫你自己在写代码前先把"对象/现场/失败模式"想清楚。
+</p>
+
+<h2 id="meta-method">与 LLM 协作的 4 个动作</h2>
+<p>
+  接下来 16 章的每一章,本质都在重复同一个循环。把它单独拎出来, 你就能识别 LLM
+  在哪个环节最容易骗你。
+</p>
+<ol>
+  <li>
+    <strong>想清楚一现象。</strong>这一章要解决什么具体问题?用一段话写出来,
+    写到"我能给一个非工程师讲明白"为止。
+  </li>
+  <li>
+    <strong>想一个反例。</strong>如果不解决,最朴素的实现会长什么样?为什么它
+    不行?这一步是为了逼自己定义"边界"而不是"功能"。
+  </li>
+  <li>
+    <strong>想清楚接口和不变量。</strong>哪些模块、哪些函数、哪些"绝对不能
+    被破坏"的规则。这一步是为了让 LLM 知道"改哪里是安全的"。
+  </li>
+  <li>
+    <strong>想清楚怎么验证它做对了。</strong>用 fake LLM、用 trace assertion、
+    用 e2e 测试,而不是只靠"它没报错"判断。
+  </li>
+</ol>
+<div class="note">
+  <p class="note__title">这一章的最低目标</p>
+  <p>
+    读完后,你能看懂后续每一章为什么是这四步的循环,也能识别出 LLM
+    在哪一步上容易"看起来做完了"但其实偷懒。
+  </p>
+</div>
+
+<h2 id="terms">术语地图: 把后面反复出现的词钉死</h2>
+<p>
+  下面这些词在后续章节会反复出现。第一次出现时,我会用
+  <code>English</code> (中文释义) 的格式;之后只用英文。请你在自己的笔记里
+  也保持这套对应,不要中途换说法。
+</p>
+<dl class="defs">
+  <dt><code>harness</code> (外层运行环境)</dt>
+  <dd>
+    LLM 之外、替它保管现场、执行工具、约束副作用、记录事实的所有代码。
+    本教程的全部代码都属于 harness。
+  </dd>
+
+  <dt><code>agent loop</code> (主循环)</dt>
+  <dd>
+    "用户输入 → 写历史 → 调 LLM → 写回复 → 决定下一步"这条反复执行的路径。 简称
+    <code>loop</code>。本教程主线索就是 loop 一圈一圈地长。
+  </dd>
+
+  <dt><code>History</code> (消息列表)</dt>
+  <dd>
+    当前会话的全部 message (user / assistant / tool / system),它的唯一职责
+    是构造下一次 LLM 请求。不要把"日志""审计""可观测"塞进 History,它们 由
+    <code>Transcript</code> 单独承担 (第 15 章会讲)。
+  </dd>
+
+  <dt><code>tool call</code> (工具调用请求)</dt>
+  <dd>
+    LLM 返回的结构化动作请求,而不是文本里的"我想读这个文件"。 对应 LLM 协议里的
+    <code>tool_use</code> / <code>function_call</code> 字段。
+  </dd>
+
+  <dt>
+    <code>Composition Root</code> (组装根, 通常是 <code>src/index.ts</code>)
+  </dt>
+  <dd>
+    创建共享依赖 (<code>history</code> / <code>llm</code> /
+    <code>terminal</code>)
+    并把它们传给各模块的位置。业务分支一旦塞进这里,后续测试和子智能体 都会变难。
+  </dd>
+
+  <dt><code>fake LLM</code> (假模型)</dt>
+  <dd>
+    测试时替代真实 LLM 的对象:能预设返回文本、记录所有收到的 messages、 断言
+    messages 顺序。本教程要求每一章都用 fake LLM 验证,而不是只跑 e2e
+    看最终输出。
+  </dd>
+</dl>
+<p>
+  还有一些更细的术语会在用到时引入 (例如第 02 章的 <code>tool registry</code>、
+  第 06 章的 <code>normalize / block / compress</code>、第 10 章的
+  <code>cache-friendly prefix</code>)。届时同样采用"首次出现钉死,之后只用英文"
+  的规则。
+</p>
+
+<h2 id="anti-self-deception">防自欺: 这门课里 4 句不能信的话</h2>
+<p>
+  vibe coding 最大的陷阱不是写不出代码,而是"看起来写完了"。下面 4 句话
+  在后续章节会反复以各种形式出现,请你把每一条都当成红灯。
+</p>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">红灯 1 · 跑通 ≠ 正确</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见说法：</strong>"我跑了一次,模型回了正确文本,说明 loop
+      工作了。"
+    </p>
+    <p>
+      <strong>为什么错：</strong>模型回正确文本,可能是因为这一轮 messages 凑巧
+      包含全部所需信息。一旦轮次增加、上下文被压缩、或者 History 被某个 bug
+      弄丢,问题才会暴露。
+    </p>
+    <p>
+      <strong>正确做法：</strong>用 fake LLM 断言"第二轮 LLM 收到的 messages
+      长度 == N、最后一条 role == user、第一条 role == user"这类结构性事实,
+      而不只是断言最终文本。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">红灯 2 · 测试通过 ≠ 设计合理</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见说法：</strong>"vitest 跑过了,这个模块就完成了。"</p>
+    <p>
+      <strong>为什么错：</strong>测试只覆盖了你想到的 case。harness 的真正考验
+      是"多轮 + 异常 + 并发 + 长时间"。这些场景在 happy path 测试里几乎
+      不会触发。
+    </p>
+    <p>
+      <strong>正确做法：</strong>把测试分成两层: 一层是 fake LLM 的"messages
+      顺序断言",另一层是真实 e2e 的"行为断言"。后者要故意包含异常恢复
+      和上下文压缩。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">红灯 3 · LLM 说"做完了" ≠ 真的做完了</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见说法：</strong>"我让 LLM 实现工具系统,LLM 回我'已完成',
+      我去看了下文件都在。"
+    </p>
+    <p>
+      <strong>为什么错：</strong>LLM 倾向于"把请求理解为已经满足"。它会跳过
+      你没显式要求的部分,例如权限检查、错误返回结构、History 写入顺序。
+    </p>
+    <p>
+      <strong>正确做法：</strong>Prompt Card 里"边界"和"验证"两节必须写得 像
+      checklist —— 越具体越好,不要写"注意权限"这种空话,要写 "执行 rm
+      前必须确认路径在白名单内,否则抛 PermissionError"。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">红灯 4 · Prompt Card 漂亮 ≠ 实现漂亮</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见说法：</strong>"我卡片写得很完整,实现应该也漂亮。"</p>
+    <p>
+      <strong>为什么错：</strong>Prompt Card 是给 LLM 的"需求文档",但 LLM
+      仍然可能在命名、模块拆分、依赖方向上做出和你想象不同的选择。
+    </p>
+    <p>
+      <strong>正确做法：</strong>LLM 给的实现要先做"逆向核对": 把每个
+      文件的职责读一遍,确认它和卡片"模块/接线/边界"三节里描述的一致。
+      不一致的地方,要么改实现,要么回卡片里把规则说更死。
+    </p>
+  </div>
+</div>
+
+<h2 id="vibe-coding">Vibe Coding 方法论: Prompt Card 怎么交给 LLM</h2>
+<p>
+  6 段 Prompt Card 解决了"如何把需求说死",但还有另一半没解决:
+  <strong
+    >如何把这张卡片交给 LLM,让它真的按卡片交付、而不是用漂亮文本交差</strong
+  >。 这一节是教程的元方法,后续每一章末尾都会有 "本次如何 vibe code" 三件套
+  (拆卡 / review / 迭代) 复述这里的规则。
+</p>
+
+<h3 id="feed-strategy">拆卡: 不要一次性全给</h3>
+<p>
+  6 段 Prompt Card 是一张总图,不是一次 prompt 的全部内容。把 6 段一次性 贴给
+  LLM,会触发两种典型失败:
+</p>
+<dl class="defs">
+  <dt>上下文溢出与失焦</dt>
+  <dd>
+    一次性贴 200 行 prompt,LLM 会在"模块 / 接线 / 边界 / 验证"中轮换注意力,
+    最终通常只在它最后读到的那段做对。
+  </dd>
+  <dt>无法回滚</dt>
+  <dd>
+    一次性给完,LLM 一次性写完,你只能整体 reject,无法定位"它哪一段开始走偏"。
+    这正是第 00 章红灯 4 "Prompt Card 漂亮 ≠ 实现漂亮" 的具体发作场景。
+  </dd>
+</dl>
+<p>
+  推荐的拆卡顺序是 <strong>接口 → 接线 → 边界 → 验证</strong>,四轮迭代,
+  每轮独立可验证:
+</p>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>:只贴"目标 + 场景 + 模块",请 LLM 给出
+    interface 草案 (例如 <code>interface History</code>、
+    <code>interface LLMClient</code>)。 这一轮不写实现,只钉形状。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>:贴"模块 + 接线",请 LLM 给出
+    <code>index.ts</code> 的接线代码。注意此时 <code>createHistory</code>
+    等工厂还是 stub,返回任意对象即可。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>:贴"边界 (checklist)",请 LLM 按 checklist
+    实现每个工厂的真实逻辑。这一轮是 LLM 偷懒的重灾区, review checklist
+    全部要逐条核对。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>:贴"验证 (vitest 断言清单)",请 LLM
+    写测试。优先让它写 fake LLM + messages 顺序断言, 再写 happy path e2e。
+  </li>
+</ol>
+<div class="note">
+  <p class="note__title">为什么不一次给完</p>
+  <p>
+    四轮迭代的核心是"每轮交付都有独立可验证产物": 第 1 轮交付 interface 草案, 你
+    review 命名; 第 2 轮交付接线图, 你 review 依赖方向; 第 3 轮 交付工厂实现, 你
+    review checklist; 第 4 轮交付测试, 你跑测试。任一轮 不通过,
+    都可以单独回退而不必推翻全部。
+  </p>
+</div>
+
+<h3 id="review-checklist">Review: AI 写完一段代码后,看什么</h3>
+<p>
+  LLM 给的实现不是"读一遍"就能判断对错的, 也不是"跑一遍测试"就能判断 对错的
+  (红灯 1)。这一节给出一份通用 review checklist, 适用于每一章、 每一段 LLM
+  生成的代码。
+</p>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">通用 review checklist · V1</span>
+  </div>
+  <div class="card__body">
+    <p><strong>依赖方向 (Composition Root 反向检查):</strong></p>
+    <ul>
+      <li>
+        agent.ts / 子智能体 / tool executor 内不出现
+        <code>new LLMClient</code> / <code>new OpenAI()</code>
+      </li>
+      <li>
+        agent.ts / REPL 内不出现 <code>process.env</code> 读取 (配置走
+        <code>config.ts</code>)
+      </li>
+      <li>
+        不存在 module-level 单例依赖 (例如
+        <code>export const history = createHistory();</code>)
+      </li>
+      <li>工厂函数返回 interface 而不是 class instance, 便于 fake 注入</li>
+    </ul>
+    <p><strong>边界 (Prompt Card checklist 逐条核对):</strong></p>
+    <ul>
+      <li>
+        checklist 里每条"绝对不能"都对应一行 grep 验证 (例如
+        <code>grep -n 'process.env' src/agent.ts</code> 应当 0 行)
+      </li>
+      <li>边界对应到 validation 里的至少一条 vitest 断言</li>
+    </ul>
+    <p><strong>命名 (给 LLM 看的名片):</strong></p>
+    <ul>
+      <li>
+        导出符号命名稳定, 不会因为 LLM 自由发挥就改名 (例如不能
+        <code>createHistory</code> 写到一半变成 <code>createMessageStore</code>)
+      </li>
+      <li>
+        interface 名不带实现细节 (不要 <code>interface HistoryImpl</code>、<code
+          >interface HistoryV2</code
+        >)
+      </li>
+    </ul>
+    <p><strong>副作用 (隐性失败):</strong></p>
+    <ul>
+      <li>
+        <code>getMessages</code> / <code>getEntries</code> /
+        <code>getConfig</code> 之类返回集合的方法都返回浅拷贝或冻结,
+        不是内部引用
+      </li>
+      <li>
+        没有"读外部文件"隐式行为 (例如
+        <code>createAgent</code> 工厂函数内不应当读 <code>package.json</code>)
+      </li>
+      <li>
+        工具执行、文件写入、命令执行前都有明确的 permission 边界 (第 02 / 07
+        章会展开)
+      </li>
+    </ul>
+  </div>
+</div>
+<p>
+  上述 checklist 适用于任何章节。每一章还会给出"本章专属"的几条, 例如 01
+  章的"getMessages 返回浅拷贝"、02 章的"tool call 与 tool result 配对"、07
+  章的"permission 在工具执行前同步插入"。
+</p>
+
+<h3 id="debug-ai-pretend">调试: AI 常常"假装"实现了</h3>
+<p>
+  LLM 写代码时最危险的失败不是"写错", 而是
+  <strong>"看起来对、跑得通、但其实在偷偷绕过"</strong>。
+  这一节给出一份"假装清单",帮你识别三种最常见的伪装。
+</p>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">伪装 1 · 假装实现了 tool call</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>症状:</strong>agent 跑通, 模型能"读文件", 但
+      <code>history.getMessages()</code> 里没有任何
+      <code>role: "tool"</code> 消息。
+    </p>
+    <p>
+      <strong>怎么发生的:</strong>LLM 倾向把 tool call 写成"读取文本中的命令行",
+      在 agent 内部用 <code>exec()</code> 跑, 再把输出塞回
+      <code>user</code> 消息。 它跑得通, 模型也"知道"读到了什么, 但 messages
+      序列错了, 后续 compress / replay 全部坏掉。
+    </p>
+    <p>
+      <strong>怎么验证:</strong>fake LLM 强制返回
+      <code>{ role: "assistant", content: "", tool_calls: [...] }</code>,
+      跑完一轮后断言
+      <code>history.getMessages().some(m =&gt; m.role === "tool")</code>。
+      这是第 02 章 Validation 卡片必含的一条。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">伪装 2 · 假装做了边界检查</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>症状:</strong>代码里能看到
+      <code>if (!fs.existsSync(...))</code> 之类的 守卫, 但实际跑起来仍然越界。
+    </p>
+    <p>
+      <strong>怎么发生的:</strong>LLM 在错误位置加守卫 (例如权限检查写在工具
+      内部 <code>if</code> 里, 而不是 agent 主循环), 或者只检查了 happy path
+      一个分支。
+    </p>
+    <p>
+      <strong>怎么验证:</strong>Prompt Card 的 checklist 每条都要对应到"反向
+      输入"的测试 (例如 "空字符串 query 不写入 history" 对应
+      <code>run("")</code> 测试)。边界检查必须在调用栈更外层, 这条要写进 边界
+      checklist 里, 不能让 LLM 自由决定位置。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">伪装 3 · 假装有测试</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>症状:</strong>仓库里有 <code>*.test.ts</code> 文件, vitest 跑过,
+      但实际只测了"返回非 undefined"。
+    </p>
+    <p>
+      <strong>怎么发生的:</strong>LLM 喜欢写 happy path 断言, 不会主动写
+      反向断言或顺序断言。
+    </p>
+    <p>
+      <strong>怎么验证:</strong>每章 Validation 卡片里至少包含一条"顺序断言"
+      (例如 "messages.length === 3") 和一条"反向断言" (例如 "外部 push 不影响
+      history")。红灯 2 "测试通过 ≠ 设计合理" 的具体发作场景。
+    </p>
+  </div>
+</div>
+
+<h3 id="iteration-cadence">迭代节奏: 写多少测多少, 不一次写完</h3>
+<p>
+  vibe coding 最大的诱惑是"让 LLM 一次写完整个模块"。这几乎一定踩坑。 推荐节奏是
+  <strong>小步提交, 每步可测, 不让上下文长到无法 review</strong>。
+</p>
+<ol>
+  <li>
+    <strong>每写完一个工厂, 跑一次该工厂的测试。</strong>
+    不要等所有工厂都写完才跑测试 —— 早期失败定位成本是后期的 1/5。
+  </li>
+  <li>
+    <strong
+      >每跑通一个 Validation 条目, 在 commit message 里引用对应 ID。</strong
+    >
+    例如
+    <code>feat(history): 实现 add/getMessages, 满足 V-01 章 Validation #3</code
+    >。 这样 git log 就是一份"vibe coding 进度表"。
+  </li>
+  <li>
+    <strong
+      >每章结束前, 把"差量表"(本章新增/修改文件)与实际 diff 对一遍。</strong
+    >
+    LLM 经常顺手"优化"你没要求改的代码 (例如把 <code>terminal.ts</code>
+    重命名)。差量对账是发现这种偷偷越界的唯一办法。
+  </li>
+  <li>
+    <strong>每章结束前, 把 fake LLM 跑一次并保留输出。</strong>
+    这一步等价于把"messages 顺序"事实存档, 后续章节会反复引用 (例如 02
+    章会断言"第二轮 messages 末尾是 tool message, 不是 user message")。
+  </li>
+</ol>
+<div class="note">
+  <p class="note__title">红灯 1 / 2 / 3 在迭代节奏里的应用</p>
+  <p>
+    红灯 1 (跑通 ≠ 正确) 的对策: 顺序断言 + 反向断言。红灯 2 (测试通过 ≠
+    设计合理) 的对策: 差量对账 + boundary checklist 逐条 grep。红灯 3 (LLM
+    说做完了 ≠ 做完) 的对策: 拆卡 4 轮迭代 + 每轮独立 review。 后续 01–15 章的
+    "本次如何 vibe code" 三件套, 会把这 3 盏红灯翻译成 本章具体的 3 步操作。
+  </p>
+</div>
+
+<h2 id="prompt-card">Prompt Card 写法: 让 LLM 没法偷懒的 6 段模板</h2>
+<p>
+  后续每一章末尾都会有一张 Prompt Card。这张卡片不是"prompt 润色", 而是"把第 1
+  节到第 4 节的思考压成可交给 LLM 的格式"。它有 6 段, 缺一段都会让 LLM
+  在某个位置偷懒。
+</p>
+<ol>
+  <li>
+    <strong>目标 (Goal)</strong>: 一句话讲清这一章要让 LLM 帮你交付什么。
+    <em>不写"完成 X 模块",写"实现 X, 使得 Y 测试通过"</em>。
+  </li>
+  <li>
+    <strong>场景 (Scene)</strong>: 给出 1 个具体用户请求 + 期望的 agent
+    行为。不要写"一般情况下",写"用户输入'帮我读 agent.ts',agent 应当先 read
+    tool、再把内容拼到回复里"。
+  </li>
+  <li>
+    <strong>模块 (Modules)</strong>: 列出这一章要新建/修改的文件,
+    写明每个文件的职责。名字要稳定,不要让 LLM 自由发挥。
+  </li>
+  <li>
+    <strong>接线 (Wiring)</strong>: 写明 Composition Root 怎么创建共享
+    实例、传给哪些模块。这一段是防止"业务逻辑塞进 index.ts"的关键。
+  </li>
+  <li>
+    <strong>边界 (Boundaries)</strong>: 用 checklist 写"绝对不能做"的事。
+    每条都要可验证。例如"agent.ts 内不要直接 new LLMClient", 而不是"注意架构"。
+  </li>
+  <li>
+    <strong>验证 (Validation)</strong>: 至少 3 条具体测试断言,包括 happy
+    path、异常路径、和 messages 顺序断言。
+  </li>
+</ol>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">反例对照 · 差 → 改 → 好</span>
+  </div>
+  <div class="card__body">
+    <p><strong>差的卡片 (5 段、但 LLM 会偷懒):</strong></p>
+    <pre class="code-block"><code>目标: 实现 agent loop
+模块: history.ts, llm.ts, agent.ts, index.ts
+验证: 能跑通
+边界: 注意架构
+场景: 用户输入 query, agent 调用 LLM 返回文本</code></pre>
+    <p>
+      <strong>问题：</strong>"能跑通"不是断言;"注意架构"不可验证; "调用
+      LLM"没说从哪里调、messages 怎么拼。
+    </p>
+    <p><strong>改 (5 段、有信息量但 LLM 仍会猜):</strong></p>
+    <pre class="code-block"><code>目标: 实现最小 agent loop, 多轮对话保留上下文
+模块: createHistory, createLlm, createAgent, createRepl, index.ts
+验证: 连续两次 run 后第二次 LLM 收到 messages 包含第一轮
+边界: agent.ts 不读环境变量, 不直接 new LLM client
+场景: 用户先说"我喜欢简洁", 再问"我喜欢什么风格"</code></pre>
+    <p><strong>改进：</strong>有 messages 顺序断言、有"绝对不能"的边界。</p>
+    <p><strong>好 (6 段、LLM 没空间偷懒):</strong></p>
+    <pre
+      class="code-block"
+    ><code>目标: 实现最小 agent loop, 多轮上下文由 History 提供
+场景: 用户依次输入 "我喜欢简洁" 与 "我喜欢什么风格",
+      agent 第二次回复应包含"简洁"
+模块:
+  - src/history.ts: createHistory(), 内部 messages: Message[]
+  - src/llm.ts: createLlm(config), 暴露 chat(messages)
+  - src/agent.ts: createAgent(deps), 暴露 run(query)
+  - src/repl.ts: createRepl(deps), 暴露 start()
+  - src/index.ts: 创建 history/llm/terminal, 传给 agent 和 repl
+接线:
+  index.ts 内只做 new + 传参, 不出现 if 分支
+  history / llm 在 agent 和 repl 间是同一实例
+边界 (LLM 必须遵守):
+  - agent.ts 内不出现 process.env
+  - agent.ts 内不出现 new LLMClient
+  - history.getMessages() 返回浅拷贝
+  - 空 query 不写入 history
+验证:
+  - fake LLM 返回 "收到" 时 agent.run("x") === "收到"
+  - 连续两次 run, fake LLM 第二次收到的 messages.length === 3
+  - 第二次收到的 messages[0].role === "user"
+  - run("") 不增加 history 长度</code></pre>
+    <p>
+      <strong>关键差异：</strong>"边界"是可枚举的 checklist; "验证"每条 都能落到
+      vitest 一行断言; "接线"写明实例是不是同一份 (避免双 factory
+      造成状态分裂,这是 <code>AGENTS.md</code> 里特别强调的)。
+    </p>
+  </div>
+</div>
+<p>
+  后续章节的 Prompt Card 都会按这个 6 段模板写。请你在自己的项目里也照
+  这个模板,不要自由发挥。模板本身就是把"对象/现场/失败模式"翻译成 LLM
+  能照搬的形式。
+</p>
+
+<h2 id="known-and-unknown">你已经知道什么,还不知道什么</h2>
+<p>
+  这门课不会从变量、函数、模块这些编程基础讲起。我们默认你知道 TypeScript
+  项目大概如何组织,也知道可以通过 HTTP API 或 SDK 调用大模型。你可能已经 让某个
+  coding agent 帮你改过代码,甚至已经习惯了让它跑测试、读报错、 继续修。
+</p>
+<p>
+  但这里要补的是另一层知识: 一个 coding agent 到底靠什么把"模型生成的
+  下一步意图"变成"真实工程动作"?为什么它不是简单的
+  <code>await llm.chat(query)</code>?为什么它需要 history、tool call、
+  permission、日志、持久化和 eval?
+</p>
+<p>
+  接下来,我们先建立对"普通 LLM 调用"和"coding agent harness"差别的
+  直观认识,再真正落到 TypeScript 模块 (第 01 章)。
+</p>
+
+<h2 id="study-path">本章怎么学</h2>
+<p>
+  接下来分两步。先做一个朴素的 LLM 调用,看它在哪里断;再回到 agent loop
+  的最小骨架,明确 History 怎么写、messages 怎么拼、assistant 怎么回写。 第 01
+  章会把这个骨架用真实 TypeScript 模块搭起来。
+</p>
+<p>
+  读这一段时,请一直问自己: 如果 LLM 本身是无状态的,外层程序到底要
+  替它保存什么、执行什么、验证什么?这个问题会贯穿后面所有章节。
+</p>
+
+<h2 id="scene">本章场景</h2>
+<p>
+  先想一个很普通的请求: 用户说"帮我记住, 我喜欢简洁直接的解释"。
+  下一轮用户又问:"我刚刚说我喜欢什么风格?"如果只是一次普通 LLM 调用,
+  第二次请求里并没有第一句话,模型其实无从知道答案。
+</p>
+<p>
+  再想一个更像 coding agent 的请求: 用户说"帮我看看项目里主循环是怎么
+  写的"。模型自己没有文件系统,它不能真的打开
+  <code>src/agent.ts</code>。它最多能生成"我想读这个文件"的意图,真正读
+  文件的是外层程序,也就是 harness。
+</p>
+<p>
+  这就是我们要手搓 coding agent 的原因: 我们不是训练一个新模型,
+  而是在模型外面搭一套运行环境,让它能记住上下文、提出动作、接收观察
+  结果,并在安全边界内持续工作。
+</p>
+
+<h2 id="naive">先试一个朴素方案</h2>
+<p>
+  有经验的程序员第一反应可能是: 这不就是包一层 LLM API 吗?写成这样 似乎就能跑。
+</p>
+<pre class="code-block"><code>async function ask(query: string) {
+  const response = await llm.chat([
+    { role: "user", content: query },
+  ]);
+
+  return response.content;
+}</code></pre>
+<p>
+  这段代码对"翻译一句话""解释一个概念"这类任务确实够用。它的优点是 直观:
+  输入一段文本,调用一次模型,返回一段文本。问题是, coding agent
+  的任务通常不是一次问答,而是一个不断积累现场、决定动作、观察
+  结果、再决定下一步的过程。
+</p>
+
+<h2 id="why-naive-fails">朴素方案为什么不够</h2>
+<p>上面的朴素方案至少会在四个地方失败。</p>
+<dl class="defs">
+  <dt>它没有记忆现场</dt>
+  <dd>
+    第二次调用时,第一轮用户说过什么、模型回答过什么都不在请求里。 LLM API
+    本身是无状态的; 如果你不把旧消息重新发过去,它不会自动记得。
+  </dd>
+
+  <dt>它不能行动</dt>
+  <dd>
+    模型无法直接读文件、写文件或执行命令。coding agent 需要工具系统,
+    让模型提出结构化动作请求,再由 harness 执行。
+  </dd>
+
+  <dt>它没有安全边界</dt>
+  <dd>
+    如果模型说"删除这个目录",程序不能无条件照做。工具执行前必须有 permission
+    检查、路径边界和危险命令过滤。
+  </dd>
+
+  <dt>它不可验证</dt>
+  <dd>
+    如果只看最终文本,你很难知道模型有没有真的读取文件、有没有按顺序 保留
+    history、有没有绕过权限。后面我们会用 trace 和 eval 记录行为事实。
+  </dd>
+</dl>
+
+<h2 id="what-is-agent">Coding Agent 到底是什么</h2>
+<p>在这门课里,我们先把 coding agent 看成一个工程系统,而不是一个神秘模型。</p>
+<div class="note">
+  <p class="note__title">一个实用定义</p>
+  <p>
+    <strong
+      >coding agent = LLM + agent loop + tools + context + permission +
+      persistence + eval。</strong
+    >
+  </p>
+  <p>
+    LLM 负责推理和生成意图; agent loop 负责让它持续工作; tools
+    让它接触文件系统和命令行; context 让它记住现场; permission 约束副作用;
+    persistence 保存长期状态; eval 证明行为不是偶然跑通。
+  </p>
+</div>
+<p>
+  你可以把 LLM 想成"脑",但这个脑没有手、没有文件系统、不会自动保留
+  对话历史,也不知道哪些命令危险。harness 就是给它配上的工作台:
+  记事本、工具箱、安全规则、执行记录和测试仪表盘。
+</p>
+
+<h2 id="loop-flow">回到 Agent Loop</h2>
+<p>
+  最小 agent loop 先不打开工具分支,只处理"用户输入 → 模型回答 →
+  进入下一轮"的路径。即使如此,它也已经比普通聊天调用多了两个关键 动作: 写入
+  history,以及从 history 重新构造 messages。
+</p>
+
+<figure class="figure">
+  <div class="flow-map" role="img" aria-label="最小 Agent Loop 流程图">
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">用户输入 query</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">REPL 接收输入</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">History 写入 user message</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node">准备 system + history messages</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node flow-node--accent">LLM.chat(messages)</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">得到 assistant message</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node">History 写入 assistant</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">没有 tool call: 返回文本</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node flow-node--accent">等待下一次输入</span>
+    </div>
+  </div>
+  <figcaption>
+    图 00-1 · 第 00/01 章只实现没有工具的路径; 第 02 章会把"assistant 请求 tool
+    call"这条分支接上。
+  </figcaption>
+</figure>
+
+<h2 id="walkthrough">一次真实运行 walkthrough</h2>
+<p>我们用一个没有工具调用的多轮对话,走一遍最小 loop。</p>
+<ol>
+  <li>用户在 REPL 输入: "记住我喜欢简洁直接的解释。"</li>
+  <li>REPL 不调用模型,只把这行文本交给 <code>agent.run(query)</code>。</li>
+  <li>
+    Agent 把它包装成 <code>{ role: "user", content: "..." }</code>,写入
+    History。
+  </li>
+  <li>
+    Agent 从 History 取出 messages; 如果已经设置 system prompt,也会把 system
+    message 放在最前面。
+  </li>
+  <li>
+    LLM Client 把 messages 发给模型,模型返回 assistant message:
+    "好的,我会尽量简洁直接。"
+  </li>
+  <li>
+    Agent 把 assistant message 写回 History。现在 History 里有一轮 user 和
+    assistant。
+  </li>
+  <li>
+    用户第二次输入: "我刚才说我喜欢什么风格?" Agent 再次把新 user message 写入
+    History。
+  </li>
+  <li>
+    这一次发给 LLM 的 messages 包含上一轮内容,所以模型可以回答:
+    "你说你喜欢简洁直接的解释。"
+  </li>
+</ol>
+<p>
+  注意这里的关键点: 所谓"记住",不是模型在服务器端替你保存了什么, 而是 harness
+  在下一次请求时把必要历史重新组织进 messages。
+</p>
+
+<h2 id="interfaces">关键接口和伪码</h2>
+<p>
+  本章不需要贴完整源码,但要先把接口形状定下来。接口越清楚,后面让 coding agent
+  实现时越不容易把所有逻辑糊进一个文件。
+</p>
+<pre class="code-block"><code>interface History {
+  add(message: Message): void;
+  getMessages(): Message[];
+  clear(): void;
+}
+
+interface LLMClient {
+  chat(messages: Message[]): Promise&lt;AssistantMessage&gt;;
+}
+
+interface Agent {
+  run(query: string): Promise&lt;string&gt;;
+}</code></pre>
+
+<p>最小 loop 的伪码可以先短到这样:</p>
+<pre class="code-block"><code>async function run(query: string) {
+  history.add({ role: "user", content: query });
+
+  const messages = history.getMessages();
+  const assistant = await llm.chat(messages);
+
+  history.add(assistant);
+  return assistant.content;
+}</code></pre>
+<p>
+  这段伪码已经埋下了后续扩展点: 当 <code>assistant</code> 里出现 tool call
+  时,不能直接返回文本,而要执行工具、写入 tool result,再进入下一轮 LLM 调用。
+</p>
+
+<h2 id="source-map">源码地图</h2>
+<p>
+  下面 5 个链接指向 GitHub <code>main</code> 分支的
+  <strong>当前最新</strong>代码,
+  而非历史快照。教程正文里描述的接口/函数名/职责边界基于本仓库的稳定设计,
+  不会随每次提交漂移; 但具体实现会持续演进, 学生读到时可能看到比教程更
+  多的字段和分支 (例如 <code>History.add</code> 已演进为
+  <code>add(message, meta?)</code>)。 第一次阅读时,
+  建议只看"导出符号"和"职责边界", 不要逐行对位。
+</p>
+<div class="source-links" aria-label="源码阅读路线">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/index.ts"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/index.ts: 组装根,创建共享实例并接线</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/repl.ts"
+    target="_blank"
+    rel="noreferrer"
+    >2. src/repl.ts: 把用户输入交给 agent.run()</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
+    target="_blank"
+    rel="noreferrer"
+    >3. src/agent.ts: think → act → observe 主循环</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/history.ts"
+    target="_blank"
+    rel="noreferrer"
+    >4. src/history.ts: 保存 messages 和元信息</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/llm.ts"
+    target="_blank"
+    rel="noreferrer"
+    >5. src/llm.ts: 把 messages 发给模型并收敛响应</a
+  >
+</div>
+
+<h2 id="state-boundary">状态与边界</h2>
+<p>最小 loop 虽然简单,但已经有几条边界要分清。</p>
+<dl class="defs">
+  <dt>History 是 prompt working context</dt>
+  <dd>
+    它服务下一次 LLM 请求,会影响模型看到什么。第 00/01 章先只关心 user 和
+    assistant message,后续会加入 tool result、system reminder、 压缩摘要。
+  </dd>
+  <dt>REPL 不是业务逻辑层</dt>
+  <dd>
+    REPL 负责输入输出和退出命令。它不应该知道 messages 怎么拼, 也不应该直接创建
+    LLM client。
+  </dd>
+  <dt>LLM Client 不应该知道终端</dt>
+  <dd>
+    LLM Client 的职责是请求模型并解析响应。它不关心用户从哪里输入,
+    也不关心最后如何打印。
+  </dd>
+  <dt>Composition Root 只接线</dt>
+  <dd>
+    <code>index.ts</code> 创建共享依赖,然后传给各模块。业务分支一旦
+    塞进这里,后续测试和子智能体都会变难。
+  </dd>
+</dl>
+
+<h2 id="design">设计直觉</h2>
+<p>
+  从第一章开始就拆模块,可能看起来有点"架构过度"。但它其实是在为后续 章节省成本:
+  工具系统需要复用同一个 History; 权限管理要在 Agent 执行工具前插入; Eval
+  需要把真实 LLM 换成 fake LLM; 子智能体需要复用 同样的 loop,但换一套隔离
+  History。
+</p>
+<p>
+  如果第一天把所有逻辑写进 <code>index.ts</code>,第二天加工具时还能
+  凑合,第三天加权限就开始痛苦,第六天加压缩和子智能体时基本只能重写。
+  所以教学项目的"可理解性"不是少写文件,而是让每个文件的职责足够稳定。
+</p>
+
+<h2 id="prompt">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 01 章任务</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>实现一个最小 TypeScript coding agent loop: REPL
+      接收用户输入,Agent 写入 History,调用 LLM,保存 assistant 回复并返回文本。
+    </p>
+    <p>
+      <strong>场景:</strong>先不实现文件工具、bash、权限、压缩和记忆,
+      只搭出后续章节可以扩展的最小可运行骨架。
+    </p>
+    <p>
+      <strong>模块:</strong>创建
+      <code>config.ts</code>、<code>terminal.ts</code>、
+      <code>history.ts</code>、<code>llm.ts</code>、<code>agent.ts</code>、
+      <code>repl.ts</code>、<code>index.ts</code>。模块使用
+      <code>createXxx()</code> 工厂函数和 interface。
+    </p>
+    <p>
+      <strong>接线:</strong><code>index.ts</code> 创建共享
+      <code>history</code>、<code>llm</code>、<code>terminal</code>,传给
+      <code>createAgent()</code> 和 <code>createRepl()</code>。业务逻辑 不要写在
+      <code>index.ts</code>。
+    </p>
+    <p>
+      <strong>边界 (LLM 必须遵守的 checklist):</strong>
+    </p>
+    <ul>
+      <li>agent.ts 内不出现 <code>process.env</code> 读取</li>
+      <li>agent.ts 内不出现 <code>new LLMClient</code></li>
+      <li>history.getMessages() 返回浅拷贝,不是内部数组</li>
+      <li>空 query 不写入 history</li>
+      <li>这一章不要实现 tool call 分支,只预留循环结构</li>
+    </ul>
+    <p>
+      <strong>验证 (用 fake LLM,逐条落到 vitest 断言):</strong>
+    </p>
+    <ul>
+      <li>fake LLM 返回 "收到" 时, <code>agent.run("x")</code> === "收到"</li>
+      <li>
+        连续两次 <code>run</code> 后, fake LLM 第二次收到的 messages.length ===
+        3
+      </li>
+      <li>第二次收到的 messages[0].role === "user"</li>
+      <li><code>run("")</code> 不增加 history 长度</li>
+      <li><code>exit</code> / <code>quit</code> 能关闭 REPL</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="trap">容易踩坑 (反例梯度)</h2>
+<p>
+  这一节按"新手 / 中级 / 高级"三个梯度,展示三类容易被 LLM 写出、但
+  实际破坏边界的实现。
+</p>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>把 coding agent 理解成"一次更长的 prompt"。</p>
+    <p>
+      <strong>为什么错:</strong>prompt 只能描述意图,不能替你保存状态、
+      执行工具、检查权限或记录事实。
+    </p>
+    <p>
+      <strong>正确做法:</strong>把模型放进 loop 里理解: 它每轮只看到 harness
+      准备好的 messages,并通过 harness 才能影响真实世界。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>把 <code>history</code> 定义成 module-level 单例
+      (例如 <code>export const history = createHistory();</code>)。
+    </p>
+    <p>
+      <strong>为什么错:</strong>单例看上去省事,但 Composition Root
+      失去了"控制实例生命周期"的能力; 测试时也无法替换; 后续引入子
+      智能体或多窗口 REPL 时,所有调用方会共享同一份 messages,造成 上下文污染。
+    </p>
+    <p>
+      <strong>正确做法:</strong>在 <code>index.ts</code> 用
+      <code>const history = createHistory();</code> 创建一次,再以参数 形式注入
+      agent / repl / 后续的 todo manager。这是 <code>AGENTS.md</code> 里"Shared
+      instances must be literally shared"那条铁律。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>在 <code>history.getMessages()</code> 里
+      直接返回内部数组 (<code>return this.messages;</code>)。
+    </p>
+    <p>
+      <strong>为什么错:</strong>LLM client 在拼下一轮 messages 时可能
+      <code>push</code> 临时元素 (例如 <code>[...msgs, thisTurnUser]</code>),
+      而这会反向写入 History 内部数组,导致"未调用 add() 但 messages 增长"的隐性
+      bug。后续做 context 压缩和 replay 时,这种 bug 几乎 不可定位。
+    </p>
+    <p>
+      <strong>正确做法:</strong><code>getMessages()</code> 返回
+      <code>[...this.messages]</code> 浅拷贝,或冻结为 readonly array。
+      这一条要在 Validation 卡片里写死,不能省。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>第一章就把工具、权限、压缩、记忆全部 做进去。
+    </p>
+    <p>
+      <strong>为什么错:</strong>读者还没有理解最小 loop,就会 被后续能力淹没;
+      实现也容易一次性变成不可测试的大函数。
+    </p>
+    <p>
+      <strong>正确做法:</strong>第 00/01 章只建立最小 loop,明确哪些分支
+      留给后续章节。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · 第 01 章</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>单轮行为:</strong>fake LLM 返回"收到",调用
+      <code>agent.run("你好")</code> 后应返回"收到"。这证明 query 能 进入
+      loop,assistant 回复能返回给调用方。
+    </p>
+    <p>
+      <strong>History 顺序:</strong>运行后 History 中应先有 user,再有
+      assistant。这证明上下文不是只打印出来,而是真的被保存。
+    </p>
+    <p>
+      <strong>多轮上下文:</strong>连续调用两次 <code>agent.run()</code>, 第二次
+      fake LLM 观察到的 messages 必须包含第一轮内容。这证明 LLM 的"记忆"来自
+      harness 重新发送 messages。
+    </p>
+    <p>
+      <strong>REPL 边界:</strong>空输入不调用 agent, <code>exit</code> 或
+      <code>quit</code> 关闭 terminal。这证明交互层没有把无意义输入 写进
+      History。
+    </p>
+  </div>
+</div>
+
+<h2 id="debug">如果实现失败,先查哪里</h2>
+<ol>
+  <li>
+    看 REPL 是否真的调用了 <code>agent.run(query)</code>,而不是直接调用 LLM。
+  </li>
+  <li>看 <code>agent.run()</code> 是否先写入 user message,再调用 LLM。</li>
+  <li>
+    看 <code>history.getMessages()</code> 是否返回浅拷贝,且包含上一轮 消息。
+  </li>
+  <li>看 fake LLM 测试是否能观察到传入的 messages,而不是只断言最终文本。</li>
+  <li>看 <code>index.ts</code> 是否只做接线,没有塞进业务分支。</li>
+</ol>
+
+<h2 id="practice">本章练习</h2>
+<p>
+  不看 Prompt Card,试着自己写一段 prompt,让 coding agent 只实现最小
+  loop。写完后检查它有没有包含 6 段 (目标/场景/模块/接线/边界/验证),
+  以及边界一节是否每条都"可逐字翻译成 vitest 断言"。
+</p>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章先讲了"用 LLM 写 LLM agent"的元方法 (想清楚现象/反例/接口/验证), 钉死了
+  harness/loop/History/tool call/Composition Root/fake LLM 这 6 个术语,点了 4
+  句"不能信的话",给出了一份可复用的 6 段 Prompt Card 模板。然后才把 coding agent
+  从"普通 LLM 调用"里拆出来: 模型只是 loop 中的一环,真正让它能持续工作的,是
+  History、Agent、REPL、LLM Client 和 Composition Root 组成的 harness。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  下一章会真正落到 TypeScript 模块: 怎么写 <code>createHistory()</code>、
+  <code>createAgent()</code> 和 <code>createRepl()</code>,怎么用 fake LLM
+  写"messages 顺序断言",怎么为第 02 章的工具调用预留分支。读完后,
+  你应该能自己完成本章的 Prompt Card 任务。
+</p>
+
+<div class="ack">
+  <p>
+    致谢:本教程受到
+    <a
+      href="https://github.com/shareAI-lab/learn-claude-code"
+      target="_blank"
+      rel="noreferrer"
+      >shareAI-lab/learn-claude-code</a
+    >
+    启发。感谢原项目把 coding agent harness 的核心思想讲得足够清楚, 让这个
+    TypeScript 教学版本有了起点。
+  </p>
+</div>

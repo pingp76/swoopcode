@@ -226,8 +226,7 @@ export function createLLMLogger(options?: {
   const logDir =
     options?.logDir ??
     path.resolve(
-      process.env["AGENT_HOME"] ??
-        path.resolve(homedir(), ".learn-claude-code-ts"),
+      process.env["AGENT_HOME"] ?? path.resolve(homedir(), ".swoopcode"),
       "logs",
     );
   const maxSize = options?.maxSize ?? 5 * 1024 * 1024; // 5MB
@@ -242,9 +241,7 @@ export function createLLMLogger(options?: {
   // 每次启动追加启动标记。写入前先检查轮转，避免一个长期运行的 llm.log
   // 因为反复 append 变成无限增长的单个大文件。
   const bootTimestamp = new Date().toISOString();
-  appendLog(
-    `${SEPARATOR}\n[BOOT] ${bootTimestamp}\n${SEPARATOR}\n\n`,
-  );
+  appendLog(`${SEPARATOR}\n[BOOT] ${bootTimestamp}\n${SEPARATOR}\n\n`);
 
   /**
    * appendLog — 追加日志，超过大小限制时清空重来
@@ -300,15 +297,48 @@ export function createLLMLogger(options?: {
     logResponse(response, durationMs) {
       const elapsed = (durationMs / 1000).toFixed(1);
       const timestamp = new Date().toISOString();
-      const log = [
+      const lines = [
         SEPARATOR,
         `[RESPONSE] ${timestamp} (${elapsed}s)`,
         SEPARATOR,
         `Content: ${response.content ?? "(null)"}`,
         formatToolCalls(response),
-        "",
-      ].join("\n");
-      appendLog(log);
+      ];
+
+      // 记录 usage telemetry（如果可用）
+      if (response.usage) {
+        const u = response.usage;
+        const usageParts: string[] = [];
+        if (u.promptTokens !== undefined)
+          usageParts.push(`prompt=${u.promptTokens}`);
+        if (u.completionTokens !== undefined)
+          usageParts.push(`completion=${u.completionTokens}`);
+        if (u.totalTokens !== undefined)
+          usageParts.push(`total=${u.totalTokens}`);
+        if (u.reasoningTokens !== undefined)
+          usageParts.push(`reasoning=${u.reasoningTokens}`);
+        if (u.cacheHitTokens !== undefined)
+          usageParts.push(`cache_hit=${u.cacheHitTokens}`);
+        if (u.cacheMissTokens !== undefined)
+          usageParts.push(`cache_miss=${u.cacheMissTokens}`);
+        if (u.cachedTokens !== undefined)
+          usageParts.push(`cached=${u.cachedTokens}`);
+        if (usageParts.length > 0) {
+          lines.push(`Usage: ${usageParts.join(", ")}`);
+        }
+      }
+
+      // 记录 reasoning 内容摘要（截断至 200 字符，避免日志爆炸）
+      if (response.reasoning?.content) {
+        const reasoningPreview = response.reasoning.content.slice(0, 200);
+        const suffix = response.reasoning.content.length > 200 ? "..." : "";
+        lines.push(
+          `Reasoning (${response.reasoning.source}): ${reasoningPreview}${suffix}`,
+        );
+      }
+
+      lines.push("");
+      appendLog(lines.join("\n"));
     },
   };
 }

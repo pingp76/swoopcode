@@ -1,0 +1,502 @@
+<p class="article__eyebrow">第 04 章 · 让 Agent 学会分身</p>
+<h1 class="article__title">在 Loop 内开第二个 Agent: SubAgent</h1>
+<p class="article__lede">
+  前面三章的 loop 只有一个 agent 在工作。这一章给 harness 加"分身"能力: 一个
+  agent 在 loop 内开第二个 agent 处理子任务, 子智能体跑完把结果 拼回主
+  loop。关键约束是: 子智能体的 history、todo、permission 都必须 独立, 但 tool
+  registry 可以共享。这一章是 harness 第一次处理"递归 agent"。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="delta-from-03">在第 03 章基础上改了什么</h2>
+<p>
+  这一章在 agent 主循环里加一个"开子智能体"的工具
+  (<code>spawn_subagent</code>)。 子智能体复用 createAgent() 工厂,
+  但接收一组独立 dependencies: 新的 history (空)、新的 todo (空)、可选的 tool
+  registry 子集。父 agent 拿到子智能体的最终输出, 写一条 user message 拼回主
+  loop。 对应到代码, 改动集中在 3 个文件: <code>src/agent.ts</code> (改)、
+  <code>src/tools/spawn_subagent.ts</code> (新)、<code>src/index.ts</code>
+  (改接线, 注入 subagentFactory)。
+</p>
+<div class="source-links" aria-label="本章 GitHub 永久链接">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/agent.ts: createAgent 工厂接受 subagentFactory</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/tools/registry.ts"
+    target="_blank"
+    rel="noreferrer"
+    >2. src/tools/registry.ts: 注册 spawn_subagent 工具</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/hooks.ts"
+    target="_blank"
+    rel="noreferrer"
+    >3. src/hooks.ts: 子智能体的 SubagentStart / SubagentEnd 钩子 (第 08
+    章展开)</a
+  >
+</div>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    长任务下, 一个 agent 跑 30 轮 context 就撑爆了。更糟的是, 子任务 (例如 "调研
+    react-query 文档") 不需要污染主 loop 的 history, 只需要把 结论拼回来。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"父子共用一个 history"。这有两个问题: 一是子任务 上下文把主
+    loop 撑爆, 二是子任务的工具调用也会出现在主 loop, 主 agent
+    会被自己的子任务搞糊涂。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口: <code>interface SubagentFactory { create(overrides): Agent }</code>。
+    不变量三条: (1) 子智能体 history 与父 agent 严格隔离, (2) 子智能体 todo 与父
+    agent 严格隔离, (3) tool registry 默认共享, 但子智能体 不允许用
+    spawn_subagent (防递归爆炸, 除非显式 enable)。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake LLM 第一轮返回 assistant 携带 spawn_subagent 调用, 跑完后 父 history
+    末尾出现一条 user 消息 (子智能体的最终输出), 但子智能体 内部的 messages
+    不进父 history。fake LLM 给子智能体的预设是返回 "调研结论: X", 父 agent
+    第二轮能看到 "X"。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
+<div class="note">
+  <p class="note__title">观察 1 · 父子共用 history</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+async function spawnSubagent(task: string) {
+  // 错误: 共用父 history
+  const child = createAgent({ history, llm, tools, todo });
+  return await child.run(task);
+}</code></pre>
+  <p><strong>问:</strong>看上去省事, 为什么仍然不行?</p>
+  <p>
+    <strong>答:</strong>三件事同时坏掉 —— 隔离性: 子任务的 30 轮 messages 全进父
+    history, 主 loop 立刻撑爆; 真实性: 子任务的 tool_calls 也进 父 history, 父
+    agent 在第 5 轮看到的是子任务的工具调用, 推理时 混乱; 安全:
+    子任务的权限被父权限覆盖, 一旦父 agent 拒绝了某个工具, 子任务也无法使用
+    (即使子任务场景完全合理)。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 2 · 子智能体直接读父 todo</p>
+  <pre class="code-block"><code>// 教学简化版
+const child = createAgent({
+  history: createHistory(),
+  todo: parentTodo,  // 错误: 共用父 todo
+});</code></pre>
+  <p><strong>问:</strong>为什么不复用父 todo?</p>
+  <p>
+    <strong>答:</strong>子智能体的 TODO 是"调研 react-query 文档" 的子清单, 父
+    agent 的 TODO 是"用户给我的 5 件事"。两者不同。共用会让子任务的 临时项 (例如
+    "查 GitHub README") 出现在父 reminder 里, 父 agent
+    看到后以为这是用户要求的。
+  </p>
+</div>
+
+<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export interface SubagentDeps {
+  history: History;
+  llm: LLMClient;
+  tools: ToolRegistry;
+  todo: TodoManager;
+  permission: PermissionManager;
+  // 子智能体允许的轮次上限, 防止死循环
+  maxRounds: number;
+}
+
+export type SubagentFactory = (overrides: Partial&lt;SubagentDeps&gt;) =&gt; Agent;
+
+export interface SubagentConfig {
+  task: string;
+  // 可选: 子智能体允许使用的工具白名单, 不填默认是 registry 全部
+  toolAllowlist?: string[];
+  // 可选: 子智能体的最大轮次, 默认 10
+  maxRounds?: number;
+}</code></pre>
+
+<h2 id="factory-pattern">工厂模式: 第 01–03 章都在准备这一步</h2>
+<p>
+  第 01 章强制 history 是工厂, 第 03 章强制 todo 是工厂, 当时看起来
+  "架构过度"。这一章就是回报: createSubagentFactory() 可以无副作用地
+  创建任意多个独立 agent, 因为它每次都调用 createHistory() / createTodoManager()
+  而不是用 module-level 单例。
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export function createSubagentFactory(parentDeps: SubagentDeps): SubagentFactory {
+  return (overrides) =&gt; {
+    const childDeps: SubagentDeps = {
+      ...parentDeps,
+      history: overrides.history ?? createHistory(),
+      todo: overrides.todo ?? createTodoManager(),
+      maxRounds: overrides.maxRounds ?? 10,
+      // 默认子智能体不能用 spawn_subagent, 防止递归爆炸
+      tools: filterTools(parentDeps.tools, {
+        deny: ["spawn_subagent", ...],
+        allow: overrides.toolAllowlist,
+      }),
+      permission: parentDeps.permission,  // 共享 permission 策略
+    };
+    return createAgent(childDeps);
+  };
+}</code></pre>
+<p>
+  关键设计: <code>permission</code> 和 <code>tools</code> 是"父策略 + 子过滤",
+  子智能体不能绕过父策略, 也不能递归 spawn 新的子智能体 (除非显式 enable)。
+  <code>history</code> 和 <code>todo</code> 是"完全独立", 子任务的细节不进父
+  loop。
+</p>
+
+<h2 id="loop-integration">loop 接入: spawn 是一次 tool call</h2>
+<p>
+  子智能体对父 agent 而言, 就是一个普通工具 (<code>spawn_subagent</code>)。 父
+  agent 决定什么时候用、用哪个子任务、允许多少轮次。父 agent 拿到
+  子智能体的最终输出, 写一条 user 消息拼回主 loop, 然后继续自己的 loop。
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+async function executeTool(call: ToolCall): Promise&lt;ToolResult&gt; {
+  if (call.name === "spawn_subagent") {
+    const config = call.args as SubagentConfig;
+    const childAgent = subagentFactory({ maxRounds: config.maxRounds });
+    const childOutput = await childAgent.run(config.task);
+    return { toolCallId: call.id, content: childOutput };
+  }
+  // 其它工具走 registry
+  const tool = registry.get(call.name);
+  return await tool.execute(call.args);
+}</code></pre>
+
+<h2 id="trap">反例梯度</h2>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>子智能体用 module-level 单例 history。</p>
+    <p>
+      <strong>为什么错:</strong>完全打乱父子隔离, 子任务的 messages 立刻污染父
+      history。
+    </p>
+    <p>
+      <strong>正确做法:</strong>子智能体在 factory 内调用
+      <code>createHistory()</code>, 每次都新建。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>子智能体允许递归 spawn_subagent。</p>
+    <p>
+      <strong>为什么错:</strong>LLM 容易写出 "子任务里再开子任务" 的指令,
+      形成无限递归, token 瞬间撑爆。
+    </p>
+    <p>
+      <strong>正确做法:</strong>默认 deny "spawn_subagent" 在子工具列表里,
+      除非父 agent 显式 enable。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>子智能体的 tool_calls 写进父 history。</p>
+    <p>
+      <strong>为什么错:</strong>子任务的工具调用 (例如"读 30 个文件") 出现在父
+      history, 父 agent 第 5 轮被自己的子任务搞糊涂。
+    </p>
+    <p>
+      <strong>正确做法:</strong>子智能体只把"最终文本输出"作为 tool result
+      写回父 history, 中间过程全部隔离。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>子智能体超时 (maxRounds) 时抛异常, 中断父 loop。
+    </p>
+    <p>
+      <strong>为什么错:</strong>父 agent 拿到的是异常, 而不是"子任务未完成,
+      建议这样做" 的可读输出。
+    </p>
+    <p>
+      <strong>正确做法:</strong>子智能体超时时返回 "[Round limit reached] ...",
+      父 agent 看到后能选择"重试"或"放弃子任务"。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · 第 04 章</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>父子 history 隔离:</strong>父 agent 调 spawn_subagent, 跑完后 父
+      history 末尾出现 1 条 user 消息 (子智能体输出), 但子智能体内部
+      调用的工具不进父 history。验证: <code>parentHistory.getMessages()</code>
+      中不含子任务用过的 tool name。
+    </p>
+    <p>
+      <strong>父子 todo 隔离:</strong>父 todo 含 3 条, 子智能体创建了 2 条,
+      跑完后父 todo 仍只含 3 条, 子 todo 含 2 条 (且不重叠)。
+    </p>
+    <p>
+      <strong>防递归:</strong>子智能体在自己的 loop 内试图调 spawn_subagent,
+      fake registry 拒绝 (工具列表不含 spawn_subagent), 写 error tool message。
+    </p>
+    <p>
+      <strong>maxRounds 触发截断:</strong>子智能体 maxRounds=2, fake LLM
+      永远返回带 tool_call 的 assistant, 跑完后子智能体返回 "[Round limit
+      reached] ..." 而不是抛异常。
+    </p>
+    <p>
+      <strong>子智能体输出拼回主 loop:</strong>父 agent 调 spawn_subagent 后,
+      下一轮 LLM 收到的 messages 末尾出现一条 user 消息, content
+      等于子智能体输出。
+    </p>
+  </div>
+</div>
+
+<h2 id="lookback">回望第 00–03 章: 哪些原则在本章兑现了</h2>
+<ul>
+  <li>
+    <strong>工厂模式回报:</strong>第 01 章 history 工厂 + 第 03 章 todo 工厂,
+    在本章终于体现出价值 —— 不重写 agent.ts 就能创建独立子智能体。
+  </li>
+  <li>
+    <strong>共享 + 隔离的边界:</strong>permission 共享 (策略一致), history/todo
+    隔离 (状态独立), tools 受控共享 (默认 + 白名单)。这三条是 harness 设计"分身"
+    的标准模式, 第 13 章 async run 也会沿用。
+  </li>
+  <li>
+    <strong>tool call 协议沿用:</strong>spawn_subagent 是普通工具, 复用第 02
+    章的 Tool interface, 不发明新协议。
+  </li>
+  <li>
+    <strong>maxRounds 防爆炸:</strong>子智能体必须有上限, 否则 LLM
+    倾向无限递归。这是 harness "反 LLM 偷懒" 的关键阀门。
+  </li>
+</ul>
+
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>子智能体的工具集动态变化</dt>
+  <dd>第 05 章 Skill 会让子智能体"按需加载"工具子集, 进一步收紧工具白名单。</dd>
+  <dt>子智能体也用 TODO</dt>
+  <dd>第 03 章工厂模式直接复用, 子智能体有自己的 TODO 列表, 跑完自动丢弃。</dd>
+  <dt>子智能体超时常发生</dt>
+  <dd>第 11 章 recovery 会处理"子任务反复超时怎么办", 引入退避重试。</dd>
+  <dt>子智能体用 async run</dt>
+  <dd>
+    第 13 章 async run 会让 spawn_subagent 不阻塞主 loop, 改为"启动后台 agent,
+    完成后通知"。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-04">本次如何 vibe code: 第 04 章的三件套</h2>
+
+<h3 id="vibe-feed-04">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>SubagentDeps</code> /
+    <code>SubagentFactory</code> / <code>SubagentConfig</code> 三个
+    interface。本轮不写实现, 重点钉"父策略 + 子过滤" 的边界。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
+    <code>createSubagentFactory()</code> 接受父 deps。本轮 review 重点: factory
+    是闭包, 不是 class。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createSubagentFactory +
+    spawn_subagent 工具 + agent.ts 接入。本轮 review 重点: 工具列表默认 deny
+    "spawn_subagent", history / todo 必须独立。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写
+    <code>test/subagent.test.ts</code>。本轮 review 重点: "父子 history 隔离" 和
+    "maxRounds 触发截断" 两条必须有反向断言 (例如"父 history 不含子工具名")。
+  </li>
+</ol>
+
+<h3 id="vibe-review-04">Review: 第 04 章专属 checklist</h3>
+<ol>
+  <li>
+    <strong>子智能体 history 严格独立。</strong>不得在 factory 内复用
+    <code>parentDeps.history</code>。验证:
+    <code>grep -n 'parentDeps.history' src/agent.ts</code> 应当 0 行。
+  </li>
+  <li>
+    <strong>子智能体 todo 严格独立。</strong>同上,
+    <code>grep -n 'parentDeps.todo' src/agent.ts</code> 应当 0 行。
+  </li>
+  <li>
+    <strong>工具列表默认 deny spawn_subagent。</strong>验证: factory 内 filter
+    显式 deny "spawn_subagent", 除非 overrides.toolAllowlist 显式包含。
+  </li>
+  <li>
+    <strong>maxRounds 必传。</strong>factory 必须给子智能体 maxRounds, 默认
+    10。验证: <code>grep -n 'maxRounds' src/agent.ts</code> 在
+    createSubagentFactory 内 ≥ 1 行。
+  </li>
+  <li>
+    <strong>子智能体超时返回字符串, 不抛异常。</strong>验证: Validation
+    卡片"maxRounds 触发截断"必须断言返回 string, 不抛错。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-04">调试: 第 04 章典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · 父子共用 todo, 假装"只是没填新 todo"。</strong>症状:
+    子智能体没有创建 todo, 但子任务的中间步骤会写进父 reminder。验证: Validation
+    卡片"父子 todo 隔离" 必须断言"父 todo 仍只含 3 条"。
+  </li>
+  <li>
+    <strong>伪装 B · 子智能体 spawn_subagent 没被 deny。</strong>症状:
+    工具列表里仍然有 spawn_subagent。验证: 子智能体调 spawn_subagent 时应当写
+    error tool message, 不进入子 loop。
+  </li>
+  <li>
+    <strong>伪装 C · 子智能体输出被父 history 当成 tool message。</strong>症状:
+    父 history 末尾有 <code>role: "tool"</code> 消息, 描述子智能体输出。验证:
+    应当是 <code>role: "user"</code> 消息, 因为父 agent
+    看到子输出是"我刚刚做的事的结果", 归类为 user 视角更自然。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-04">迭代: 第 04 章 4 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(ch04): 钉 SubagentDeps / SubagentFactory / SubagentConfig 接口</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code
+      >feat(ch04): createSubagentFactory 工厂 + spawn_subagent 工具 stub</code
+    >
+    —— tsc 通过, agent.run 仍未接入。
+  </li>
+  <li>
+    <code>feat(ch04): agent.run 接入 spawn_subagent, 父子隔离 + 防递归</code> ——
+    跑通 Validation 卡片前 4 条。
+  </li>
+  <li>
+    <code>test(ch04): 子智能体输出拼回主 loop, role 断言为 "user"</code> ——
+    全绿。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 04 章</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>实现 SubAgent, 父 agent 可在 loop 内开第二个 agent
+      处理子任务, history/todo 隔离, tool registry 受控共享。
+    </p>
+    <p>
+      <strong>场景:</strong>用户输入 "调研 react-query 文档后帮我重构", 父 agent
+      调 spawn_subagent, 子任务查 3 个文件后返回 "调研结论: X", 父 agent 拿到 X
+      继续主 loop。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/agent.ts</code> 改 createAgent 接受
+      subagentFactory; <code>src/tools/spawn_subagent.ts</code> (新) 实现工具;
+      <code>src/index.ts</code> 接线 subagentFactory;
+      <code>src/tools/filter.ts</code> (新) 实现工具列表过滤。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>子智能体 history 与父 agent 严格隔离 (不共享引用)</li>
+      <li>子智能体 todo 与父 agent 严格隔离 (不共享引用)</li>
+      <li>子智能体工具列表默认不含 "spawn_subagent", 防递归</li>
+      <li>子智能体 maxRounds 必传, 默认 10, 超时返回字符串不抛异常</li>
+      <li>permission 策略与父 agent 共享 (子不能绕过父权限)</li>
+    </ul>
+    <p><strong>验证 (用 fake LLM + fake registry, 逐条落到 vitest):</strong></p>
+    <ul>
+      <li>
+        父 agent 调 spawn_subagent 后, 父 history 末尾出现 1 条 role: "user"
+        消息, content = 子智能体输出
+      </li>
+      <li>父 history 不含子智能体调过的 tool name</li>
+      <li>
+        子智能体在自己的 loop 内调 spawn_subagent, 写 error tool message,
+        不进入子子 loop
+      </li>
+      <li>
+        子智能体 maxRounds=2 + fake LLM 永远返回带 tool_call, 子智能体返回
+        "[Round limit reached] ..." 字符串
+      </li>
+      <li>子 todo 与父 todo 不重叠, 各自独立</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="practice">本章练习</h2>
+<ol>
+  <li>
+    故意把子智能体 history 改成 <code>parentDeps.history</code>, 跑测试, 看"父子
+    history 隔离" 是否抓到。
+  </li>
+  <li>在 filter 里忘记 deny "spawn_subagent", 跑测试, 看"防递归" 是否抓到。</li>
+  <li>
+    把子智能体 maxRounds 改成 0, 跑测试, 看 "maxRounds 触发截断" 是否能识别
+    (可能直接抛 "maxRounds must be > 0", 提示你 maxRounds 校验要写在哪里)。
+  </li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章给 harness 加了"分身" 能力。createSubagentFactory() 利用前三章 的工厂模式,
+  每次创建独立 history / todo, 受控共享 tool registry 与 permission
+  策略。maxRounds 是防止 LLM 递归爆炸的关键阀门。 下一章 (第 05 章)
+  我们会处理"工具太多装不下" 的问题——Skill, 让 agent 按需加载工具子集,
+  进一步收紧 prompt 中的工具描述前缀。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  第 04 章的 spawn_subagent 默认使用全量 tool registry。当工具数到 30+ 之后, 父
+  agent 的 tool schema 描述会撑爆 system prompt。下一章 Skill
+  模块会按场景动态加载工具子集, 同时也作为"按需暴露能力" 的元机制, 为第 10 章
+  cache-friendly 布局 (工具描述作为稳定前缀) 做准备。
+</p>

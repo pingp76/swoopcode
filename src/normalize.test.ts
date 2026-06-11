@@ -321,3 +321,73 @@ describe("normalizeMessages - purity", () => {
     expect(result[0]).toHaveProperty("_round", 3);
   });
 });
+
+describe("normalizeMessages - provider field preservation", () => {
+  it("preserves reasoning_content on assistant messages", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: "The answer is 42",
+        reasoning_content: "Let me think step by step...",
+      },
+    ] as unknown as ChatCompletionMessageParam[];
+
+    const result = normalizeMessages(messages);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toHaveProperty("reasoning_content", "Let me think step by step...");
+  });
+
+  it("preserves reasoning_content on assistant messages with tool_calls", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "I need to run a command",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"ls"}' },
+          },
+        ],
+      },
+    ] as unknown as ChatCompletionMessageParam[];
+
+    const result = normalizeMessages(messages);
+
+    // ensureToolResults 会补全缺失的 tool 消息
+    expect(result).toHaveLength(2);
+    expect(result[0]).toHaveProperty("reasoning_content", "I need to run a command");
+    const toolCalls = (result[0] as unknown as { tool_calls: unknown[] }).tool_calls;
+    expect(toolCalls).toHaveLength(1);
+  });
+
+  it("preserves provider fields through ensureToolResults", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "Thinking...",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"ls"}' },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_1",
+        content: "file.txt",
+      },
+    ] as unknown as ChatCompletionMessageParam[];
+
+    const result = normalizeMessages(messages);
+
+    // ensureToolResults 跳过原始 tool 位置，在 assistant 后重新插入，仍是 2 条
+    expect(result).toHaveLength(2);
+    expect(result[0]).toHaveProperty("reasoning_content", "Thinking...");
+  });
+});

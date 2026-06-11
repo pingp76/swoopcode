@@ -1,7 +1,24 @@
 {
-  "name": "learn-claude-code-ts",
+  "name": "swoopcode",
   "version": "0.1.0",
-  "description": "A teaching-purpose coding agent built with TypeScript",
+  "description": "A teaching-purpose TypeScript coding agent demonstrating the full harness: agent loop, tools, permissions, context, memory, async runs, schedules, and an eval harness",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pingp76/swoopcode.git"
+  },
+  "homepage": "https://github.com/pingp76/swoopcode",
+  "bugs": {
+    "url": "https://github.com/pingp76/swoopcode/issues"
+  },
+  "keywords": [
+    "agent",
+    "coding-agent",
+    "typescript",
+    "llm",
+    "tool-use",
+    "tutorial"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "engines": {
@@ -10,9 +27,20 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
+    "tutorial:dev": "npm --prefix tutorial run dev",
+    "tutorial:check": "npm --prefix tutorial run check",
+    "tutorial:format": "npm --prefix tutorial run format",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:eval": "vitest run src/eval/cases/deterministic.test.ts",
+    "test:eval:live": "vitest run src/eval/live/live-suite.test.ts",
+    "test:eval:live:regression": "vitest run src/eval/live/live-regression-suite.test.ts",
+    "test:eval:live:full": "vitest run src/eval/live/live-full-suite.test.ts",
+    "test:eval:live:mcp": "vitest run src/eval/live/live-mcp-suite.test.ts",
+    "test:eval:live:team": "vitest run src/eval/live/live-team-suite.test.ts",
+    "test:eval:live:team:mcp": "vitest run src/eval/live/live-team-suite.test.ts",
+    "test:eval:judge": "vitest run src/eval/judge/judge-suite.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "format": "prettier --write \"src/**/*.ts\"",

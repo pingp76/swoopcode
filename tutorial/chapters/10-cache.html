@@ -1,0 +1,548 @@
+<p class="article__eyebrow">第 10 章 · Prompt Cache 友好布局</p>
+<h1 class="article__title">稳定前缀 + 动态状态: Prompt Cache 友好布局</h1>
+<p class="article__lede">
+  前面九章让 harness 拥有完整能力, 但每次 LLM 调用都从头发送完整 messages, token
+  成本居高不下。这一章系统讲 prompt cache 友好布局: 哪些进稳定前缀, 哪些走
+  reminder, 哪些靠 history 自然增长。基于前九章的所有设计选择 (memory
+  锚点、reminder 标签、tool 描述作为稳定前缀) 总结出完整原则。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="delta-from-09">在第 09 章基础上改了什么</h2>
+<p>
+  这一章不新增模块, 而是基于已有的 memory (第 09 章) / system prompt / tools (第
+  02 章) / reminders (第 03/04/05 章) / history (第 01 章) 重新组织 prompt
+  拼装顺序, 最大化 LLM provider 的 prompt cache hit rate。 改动集中在 2 个文件:
+  <code>src/system-prompt.ts</code> (新, 之前散落在 history.ts) 和
+  <code>src/stable-context.ts</code> (新, 负责 stable snapshot 的 invalidate
+  逻辑)。
+</p>
+<div class="source-links" aria-label="本章 GitHub 永久链接">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/system-prompt.ts"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/system-prompt.ts: System prompt 组装 (新)</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/stable-context.ts"
+    target="_blank"
+    rel="noreferrer"
+    >2. src/stable-context.ts: Stable context snapshot (新)</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/cache-debug.ts"
+    target="_blank"
+    rel="noreferrer"
+    >3. src/cache-debug.ts: Cache hit rate 监控 (新)</a
+  >
+</div>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    长任务下, harness 跑 50 轮 LLM 调用, 总 token 成本是单轮的 50 倍。 但实际上
+    system prompt + tool 描述 + 前 20 轮 messages 几乎不变。 现象是"harness
+    重复发送相同内容, 浪费 token"。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"system prompt 里塞 TODO 状态 / skill 状态 / memory
+    当前值"。这有两个问题: 一是每次 LLM 调用 system prompt 字符串不同, 整个
+    prompt cache 失效, 二是 token 成本按"全量" 计费, 不按 "增量" 计费。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口:
+    <code
+      >interface SystemPromptProvider { build(query), buildTurnReminders(query)
+      }</code
+    >。 不变量四条: (1) system prompt 拼装顺序固定, 不依赖 query 内容, (2)
+    动态状态 (TODO / skill 激活集合) 走 reminder 消息, 不进 system prompt
+    字符串, (3) tool 描述 (按 skill 集合) 在一次 run() 内一旦确定就稳定, (4)
+    history 是自然增量, 不试图"重写为压缩态"。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake LLM 跑 3 轮, 每次记录 system prompt + tools 字段的 hash, 断言前 2 轮
+    hash 相同 (稳定前缀), 第 3 轮 (有 reminder 注入) hash 仍可不同但 tools
+    字段不变。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
+<div class="note">
+  <p class="note__title">观察 1 · 动态状态进 system prompt</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+// 错误: 动态状态拼进 system prompt
+const systemPrompt = `${basePrompt}\n\nCurrent TODO: ${JSON.stringify(todos)}\n\nActive skills: ${activeSkills.join(", ")}`;</code></pre>
+  <p><strong>问:</strong>为什么不直接拼字符串?</p>
+  <p>
+    <strong>答:</strong>每次 LLM 调用的 system prompt 字符串都不同, 整个 prompt
+    cache 失效。LLM provider (Anthropic / OpenAI) 的 cache 是按 前缀字符串匹配,
+    system prompt 一变, 后面所有 token 都要重新计费。 正确做法: 动态状态走
+    reminder (user 消息), system prompt 保持稳定。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 2 · tools 字段每次都重新拼</p>
+  <pre class="code-block"><code>// 教学简化版
+const tools = activeSkills.tools().map(t =&gt; ({ name: t.name, description: t.description, schema: t.schema }));
+// 即使 skill 集合没变, 每次拼出的对象字面量都不同 (引用不同)</code></pre>
+  <p><strong>问:</strong>对象字面量内容相同, 为什么 cache 仍然不命中?</p>
+  <p>
+    <strong>答:</strong>JSON 序列化后内容相同, 多数 provider 是按 JSON
+    字符串前缀匹配, 不是对象引用。问题是: 如果代码逻辑 (例如 skill 加载顺序变化)
+    让 JSON 字符串顺序变了, cache 也会失效。 正确做法: tools 数组的拼装顺序稳定,
+    加载 skill 时不重新排序。
+  </p>
+</div>
+
+<h2 id="layout">稳定前缀 / 动态状态 / 自然增量 三段布局</h2>
+<p>这一节是本章的核心。基于前九章的设计选择, 整理出一份"哪些进哪里" 的清单:</p>
+
+<h3>稳定前缀 (system prompt + tools)</h3>
+<ul>
+  <li>
+    <strong>Base system prompt</strong>: 静态指令, 在
+    <code>history.setSystemPrompt()</code> 时一次性写入, 后续不变。
+  </li>
+  <li>
+    <strong>Memory 锚点</strong>: "# User Memory" / "# Project Memory" 标题,
+    加上当前值 (变也只变这一段, prefix 锚点稳定)。
+  </li>
+  <li>
+    <strong>Tool 描述 (按 skill 集合)</strong>: 一旦 skill 集合在 run() 内确定,
+    tools 数组不再变化。
+  </li>
+</ul>
+
+<h3>动态状态 (reminder 消息)</h3>
+<ul>
+  <li>
+    <strong>TODO 状态</strong>: 每轮 reminder 注入, 标签
+    <code>&lt;system-reminder source="todo"&gt;</code>。
+  </li>
+  <li>
+    <strong>Skill 激活集合变化</strong>: 加载新 skill 后追加 reminder 描述。
+  </li>
+  <li>
+    <strong>子智能体输出</strong>: 父 agent 调 spawn_subagent 后追加 user 消息
+    (子智能体输出)。
+  </li>
+  <li>
+    <strong>Async run 通知</strong>: 第 13 章, 后台 agent 完成后注入 reminder。
+  </li>
+</ul>
+
+<h3>自然增量 (history)</h3>
+<ul>
+  <li><strong>用户消息</strong>: 每次 run() 追加一条 user message。</li>
+  <li><strong>助手消息</strong>: 每次 LLM 响应追加一条 assistant message。</li>
+  <li><strong>工具结果</strong>: 每次工具执行追加一条 role: "tool" 消息。</li>
+</ul>
+<p>
+  history 是 LLM 视角的"对话上下文", 不试图"重写为压缩态"。压缩只 发生在
+  prepareMessages() 阶段 (第 06 章), history 内部保留原始。
+</p>
+
+<h2 id="snapshot">stable snapshot: 显式声明"这部分稳定"</h2>
+<p>
+  当 LLM 修改了 memory (例如 save_memory 工具调用) 时, system prompt 中的 "#
+  User Memory" 段会变。如果每次 save_memory 都让 system prompt 变, cache
+  仍然失效。stable-context 模块解决这个问题: 在 memory 内容 之外, 把 "# User
+  Memory" / "# Project Memory" 标题与"当前值"作为 一个 snapshot, 只有当 snapshot
+  内容真的变了 (字符串 hash 不同) 才 更新 system prompt, 否则复用上次的 system
+  prompt 字符串。
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export function createStableContextManager(history: History) {
+  let lastSnapshot = "";
+
+  return {
+    buildMessages({ currentQuery, recentFiles }): Message[] {
+      const userMemory = memoryStore.renderForPrompt("user");
+      const projectMemory = memoryStore.renderForPrompt("project");
+      const snapshot = `# User Memory\n${userMemory}\n\n# Project Memory\n${projectMemory}`;
+
+      if (snapshot !== lastSnapshot) {
+        // 真的变了, 更新 system prompt
+        const base = history.getSystemPrompt() ?? "";
+        history.setSystemPrompt(`${base}\n\n${snapshot}`);
+        lastSnapshot = snapshot;
+      }
+      return [];  // 稳定, 不注入 user 消息
+    },
+    notifyFileChanged(path: string): void {
+      // 文件改了, 相关 project memory 可能 stale, 下一轮重新渲染
+      lastSnapshot = "";  // 强制刷新
+    },
+  };
+}</code></pre>
+<p>
+  关键设计: <code>lastSnapshot</code> 是闭包内状态, 比较的是字符串内容
+  (不是对象引用)。这意味着: 即使 LLM 频繁调 save_memory 但 value 相同, snapshot
+  不变, cache 仍然命中。
+</p>
+
+<h2 id="cache-debug">cache hit rate 监控</h2>
+<p>
+  cache-debug 模块记录每次 LLM 调用的 cache 命中情况。Anthropic / OpenAI 的 API
+  响应里有 <code>cache_read_input_tokens</code> /
+  <code>cache_creation_input_tokens</code> 字段, harness 解析后写到 日志和
+  metrics, 用于评估布局效果。
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+function trackCacheUsage(response: LLMResponse) {
+  if (response.usage.cacheReadTokens &gt; 0) {
+    cacheDebugTracker.recordHit(response.usage.cacheReadTokens);
+  } else {
+    cacheDebugTracker.recordMiss();
+  }
+}</code></pre>
+
+<h2 id="trap">反例梯度</h2>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>动态状态拼进 system prompt 字符串。</p>
+    <p>
+      <strong>为什么错:</strong>每次 LLM 调用 system prompt 都不同, 整个 cache
+      失效, token 成本涨 3-5 倍。
+    </p>
+    <p>
+      <strong>正确做法:</strong>动态状态走 reminder 消息 (user 角色), system
+      prompt 字符串保持稳定。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>save_memory 每次都让 system prompt 变。</p>
+    <p>
+      <strong>为什么错:</strong>即使 memory value 没变, 重新渲染也会让 system
+      prompt 字符串变, cache 失效。
+    </p>
+    <p>
+      <strong>正确做法:</strong>stable-context 比较 snapshot 字符串 hash,
+      内容相同不更新 system prompt。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>tools 数组每次调用都重新 sort, 即使 skill
+      集合没变。
+    </p>
+    <p><strong>为什么错:</strong>JSON 序列化顺序变了, cache 不命中。</p>
+    <p>
+      <strong>正确做法:</strong>tools 数组按注册顺序, 加载 skill 时追加到末尾,
+      不重新排序。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>项目级 memory 在新项目自动失效, 但 harness
+      不通知 LLM。
+    </p>
+    <p>
+      <strong>为什么错:</strong>LLM 看不到 system prompt 变化,
+      继续引用旧项目的事实。
+    </p>
+    <p>
+      <strong>正确做法:</strong>stable-context 在项目切换时 invalidate,
+      重新渲染并注入 "Project context changed" reminder。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · 第 10 章</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>系统 prompt 拼装顺序固定:</strong>跑 3 轮 LLM, 每次记录 system
+      prompt 字符串 hash, 前 2 轮 hash 相同。
+    </p>
+    <p>
+      <strong>动态状态走 reminder:</strong>fake LLM 跑 2 轮, 第 2 轮 TODO
+      状态变化, history 末尾出现
+      <code>&lt;system-reminder source="todo"&gt;</code>
+      标签, system prompt 字符串 hash 不变。
+    </p>
+    <p>
+      <strong>memory snapshot 复用:</strong>save_memory 调用 value 与原值 相同,
+      stable-context 不更新 system prompt, spy 验证 history.setSystemPrompt
+      没被调用。
+    </p>
+    <p>
+      <strong>tools 数组拼装稳定:</strong>加载 2 个 skill 后跑 2 轮, 第 2 轮
+      tools 数组 JSON 字符串与第 1 轮完全相同。
+    </p>
+    <p>
+      <strong>项目切换 invalidate:</strong>fake project context 切换,
+      stable-context 重新渲染 system prompt, 注入 reminder 描述新项目。
+    </p>
+  </div>
+</div>
+
+<h2 id="lookback">回望第 00–09 章: 哪些原则在本章兑现了</h2>
+<ul>
+  <li>
+    <strong>稳定前缀 / 动态状态 / 自然增量 三段布局:</strong
+    >这是前九章所有设计选择的总结, 不是新发明, 而是"显式命名"。
+  </li>
+  <li>
+    <strong>事实与视图分离:</strong>memory 是"长期事实" (第 09 章), history
+    是"对话上下文" (第 01 章), reminders 是"动态状态" (第 03
+    章)。三者职责严格分离。
+  </li>
+  <li>
+    <strong>稳定 prefix 锚点:</strong>"# User Memory" / "# Project Memory" /
+    "&lt;system-reminder source='X'&gt;" 都是锚点, 内容可换, 锚点本身稳定。
+  </li>
+  <li>
+    <strong>不污染 system prompt 字符串:</strong>所有动态状态走 reminder /
+    history, 永不拼进 system prompt 字符串。
+  </li>
+</ul>
+
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>cache hit 降级</dt>
+  <dd>
+    第 11 章 recovery 会处理"LLM 调用因 cache miss 突然变贵" 的告警, 让 harness
+    在 cache 失效时主动告知用户。
+  </dd>
+  <dt>跨模型 cache 兼容</dt>
+  <dd>
+    不同 LLM provider (Anthropic / OpenAI / Google) 的 cache 边界不同,
+    llm-adapter 模块 (第 02 章提到) 会统一抽象。
+  </dd>
+  <dt>memory 太大时怎么办</dt>
+  <dd>
+    user 级 memory 累积到 50k tokens 时, system prompt 也会撑爆, 需要 memory
+    内做摘要 (类似第 06 章 compress 思路)。
+  </dd>
+  <dt>cache hit 监控的副作用</dt>
+  <dd>cache-debug 自身是副作用, 测试时要 mock 它的 IO, 不让它污染测试输出。</dd>
+</dl>
+
+<h2 id="vibe-coding-10">本次如何 vibe code: 第 10 章的三件套</h2>
+
+<h3 id="vibe-feed-10">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出
+    <code>SystemPromptProvider</code> / <code>StableContextManager</code> /
+    <code>CacheDebugTracker</code> 三个 interface, 以及"稳定 / 动态 / 增量"
+    三段布局的清单。本轮不写实现, 重点钉"动态状态永不拼进 system prompt"。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
+    <code>createStableContextManager()</code> 是 stub (永远返回空), agent.run
+    仍然走第 09 章的 system prompt (无 stable snapshot)。本轮 review 重点:
+    stableContextManager 实例在 <code>index.ts</code> 只 new 一次。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createStableContextManager +
+    createCacheDebugTracker + agent.prepareMessages 接入。本轮 review 重点:
+    snapshot 字符串比较, 不污染 system prompt 字符串。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写
+    <code>test/cache.test.ts</code>。本轮 review 重点: "system prompt
+    拼装顺序固定" 和 "memory snapshot 复用" 两条必须有 hash 比较断言。
+  </li>
+</ol>
+
+<h3 id="vibe-review-10">Review: 第 10 章专属 checklist</h3>
+<ol>
+  <li>
+    <strong>动态状态不进 system prompt 字符串。</strong>验证:
+    <code
+      >grep -n 'JSON.stringify(todos)\|activeSkills.join'
+      src/system-prompt.ts</code
+    >
+    应当 0 行。
+  </li>
+  <li>
+    <strong>stable snapshot 是字符串比较。</strong>验证: stable-context 内
+    snapshot 比较用 <code>===</code>, 不用 deepEqual (对象引用不靠谱)。
+  </li>
+  <li>
+    <strong>tools 数组不重排。</strong>验证: registry / skill loader 的 list()
+    内部不调用 sort, 顺序由注册顺序决定。
+  </li>
+  <li>
+    <strong>cache debug 是副作用, 不污染业务路径。</strong>验证: agent.ts 内
+    cacheDebugTracker 调用全部在 <code>try { llm.chat() }</code> 之后的 finally
+    或 catch 块, 不在主流程内。
+  </li>
+  <li>
+    <strong>memory snapshot 复用不更新 system prompt。</strong>验证: Validation
+    卡片"memory snapshot 复用" 那条, spy 验证 setSystemPrompt 没被调用。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-10">调试: 第 10 章典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · 动态状态拼进 system prompt 字符串。</strong>症状: system
+    prompt 含 "Current TODO: ..."。验证: Validation 卡片"动态状态走 reminder"
+    那条, 跑测试, system prompt 字符串 hash 不变, 但 history 末尾有 reminder。
+  </li>
+  <li>
+    <strong>伪装 B · snapshot 比较用 deepEqual。</strong>症状:
+    <code>JSON.stringify(snapshot) === JSON.stringify(lastSnapshot)</code
+    >。功能上能跑, 但性能差 (每次都要 JSON 序列化)。验证: 本章不显式测性能,
+    但应当用 <code>===</code> 字符串比较。
+  </li>
+  <li>
+    <strong>伪装 C · 加载 skill 时重新 sort tools 数组。</strong>症状:
+    registry.list() 内部
+    <code>.sort((a, b) =&gt; a.name.localeCompare(b.name))</code>。验证: 加载
+    skill 后, tools 数组 JSON 字符串与加载前比较, 末尾追加新工具, 顺序不重排。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-10">迭代: 第 10 章 4 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(ch10): 钉 SystemPromptProvider / StableContextManager /
+      CacheDebugTracker 接口与三段布局清单</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code
+      >feat(ch10): createStableContextManager 工厂 stub + agent.prepareMessages
+      接入</code
+    >
+    —— tsc 通过, snapshot 永远不变。
+  </li>
+  <li>
+    <code
+      >feat(ch10): snapshot 字符串比较 + cache debug tracker + 动态状态走
+      reminder</code
+    >
+    —— 跑通 Validation 卡片前 4 条。
+  </li>
+  <li>
+    <code>test(ch10): 项目切换 invalidate + memory snapshot 复用 spy 验证</code>
+    —— 全绿。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 10 章</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>基于前九章的设计选择, 显式落实 prompt cache
+      友好布局: 稳定前缀 (system prompt + tools) / 动态状态 (reminders) /
+      自然增量 (history)。
+    </p>
+    <p>
+      <strong>场景:</strong>长任务跑 50 轮, 前 20 轮 system prompt + tools
+      字符串 hash 相同, cache hit rate 应当 &gt; 80%, 单轮成本下降 3-5 倍。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/system-prompt.ts</code> (新) 集中管理
+      system prompt 拼装; <code>src/stable-context.ts</code> (新) 暴露
+      <code>createStableContextManager()</code>;
+      <code>src/cache-debug.ts</code> (新) 暴露
+      <code>createCacheDebugTracker()</code>;
+      <code>src/agent.ts</code> prepareMessages 接入 stable context。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>
+        动态状态 (TODO / skill 激活集合 / 子智能体输出) 永不拼进 system prompt
+        字符串
+      </li>
+      <li>stable snapshot 用字符串比较 (===), 不用 deepEqual</li>
+      <li>tools 数组按注册顺序, 加载 skill 时追加到末尾, 不重排</li>
+      <li>cache debug 调用全部在副作用边界 (try / catch 之后), 不在主流程</li>
+      <li>项目级 memory 切换时 invalidate stable snapshot</li>
+    </ul>
+    <p><strong>验证 (用 fake LLM + spy, 逐条落到 vitest):</strong></p>
+    <ul>
+      <li>跑 3 轮 LLM, system prompt 字符串 hash 前 2 轮相同</li>
+      <li>
+        第 2 轮 TODO 状态变化, history 末尾有 reminder 标签, system prompt hash
+        不变
+      </li>
+      <li>
+        save_memory 调用 value 与原值相同, spy 验证 setSystemPrompt 没被调用
+      </li>
+      <li>加载 2 个 skill 后跑 2 轮, tools 数组 JSON 字符串完全相同</li>
+      <li>项目切换, stable-context 重新渲染 system prompt, 注入 reminder</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="practice">本章练习</h2>
+<ol>
+  <li>
+    故意把动态状态拼进 system prompt 字符串, 跑测试, 看"system prompt
+    拼装顺序固定" 是否抓到 (hash 会变)。
+  </li>
+  <li>
+    在 stable snapshot 比较里用 deepEqual, 跑测试, 看"memory snapshot 复用"
+    是否能抓到 (本节用 ===, 不写测试能跑通, 但性能差)。
+  </li>
+  <li>
+    加载 skill 时重新 sort tools 数组, 跑测试, 看"tools 数组拼装稳定" 是否抓到。
+  </li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章系统讲 prompt cache 友好布局: 稳定前缀 (system prompt + tools) / 动态状态
+  (reminders) / 自然增量 (history)。基于前九章的设计选择 显式命名这套布局, 并用
+  stable snapshot + cache debug 监控来保证 cache hit rate。下一章 (第 11 章)
+  我们会处理"LLM 调用失败" 的 情况——Recovery, 在网络异常 / 输出截断 / context
+  overflow 时 自动恢复, 不让 harness 因单次失败就崩。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  第 10 章让 harness 在长任务下保持稳定成本, 但 LLM 调用本身可能 失败 (rate
+  limit、timeout、context overflow、JSON 损坏)。下一章 Recovery
+  模块会分类失败模式, 在不同失败下采取不同策略: 重试 退避、强制压缩、续写、终止,
+  让 harness 在面对不确定的 LLM 时 仍然能持续工作。
+</p>

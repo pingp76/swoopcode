@@ -511,3 +511,84 @@ describe("estimateMessagesTokens", () => {
     expect(tokens).toBeGreaterThan(0);
   });
 });
+
+describe("message-block - provider field preservation", () => {
+  it("preserves reasoning_content through groupToBlocks and flattenToMessages", () => {
+    const messages = [
+      { role: "user", content: "what is 2+2?" },
+      {
+        role: "assistant",
+        content: "4",
+        reasoning_content: "Addition of two and two yields four.",
+      },
+    ] as unknown as ChatCompletionMessageParam[];
+
+    const blocks = groupToBlocks(messages);
+    const result = flattenToMessages(blocks);
+
+    expect(result).toHaveLength(2);
+    expect(result[1]).toHaveProperty(
+      "reasoning_content",
+      "Addition of two and two yields four.",
+    );
+  });
+
+  it("preserves reasoning_content on tool_use assistant through round-trip", () => {
+    const messages = [
+      { role: "user", content: "list files" },
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "Need to check directory contents",
+        tool_calls: [
+          {
+            id: "tc_pres",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"ls"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "tc_pres", content: "a.txt\nb.txt" },
+    ] as unknown as ChatCompletionMessageParam[];
+
+    const blocks = groupToBlocks(messages);
+    const result = flattenToMessages(blocks);
+
+    // user + assistant + tool = 3 条消息
+    expect(result).toHaveLength(3);
+    expect(result[1]).toHaveProperty(
+      "reasoning_content",
+      "Need to check directory contents",
+    );
+    expect(
+      (result[1] as unknown as { tool_calls: unknown[] }).tool_calls,
+    ).toHaveLength(1);
+  });
+
+  it("preserves reasoning_content through normalize + group + flatten pipeline", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "Thinking about tools...",
+        tool_calls: [
+          {
+            id: "tc_pipe",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"pwd"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "tc_pipe", content: "/tmp" },
+    ] as unknown as ChatCompletionMessageParam[];
+
+    const normalized = normalizeMessages(messages);
+    const blocks = groupToBlocks(normalized);
+    const result = flattenToMessages(blocks);
+
+    expect(result[0]).toHaveProperty(
+      "reasoning_content",
+      "Thinking about tools...",
+    );
+  });
+});

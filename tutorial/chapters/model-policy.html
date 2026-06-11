@@ -1,0 +1,573 @@
+<p class="article__eyebrow">专题 A · 模型差异</p>
+<h1 class="article__title">不同大模型不是只换模型名</h1>
+<p class="article__lede">
+  Claude / GPT / Gemini 在 tool call 协议、cache 边界、错误码、输出
+  截断规则上都不一样。本专题讲 harness 应当如何吸收这些差异, 不让模型
+  切换变成"改十几处代码" 的体力活。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="delta-from-15">在第 15 章基础上改了什么</h2>
+<p>
+  这一章不修改 harness 主结构, 而是在 <code>src/llm-adapter.ts</code> 下
+  收口所有模型差异。LLM Provider 维度拆 4 个 adapter (Anthropic / OpenAI /
+  Google / 本地兼容), 每个 adapter 实现 <code>LLMClient</code> interface,
+  把模型差异 (tool call 协议 / cache 边界 / 错误码 / 截断 规则) 收口在 adapter
+  内部。Composition Root 通过 <code>Config</code>
+  字段选 adapter, harness 其他部分完全不感知。
+</p>
+<div class="source-links" aria-label="本章 GitHub 永久链接">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/llm-adapter.ts"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/llm-adapter.ts: 模型差异适配</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/llm-providers.ts"
+    target="_blank"
+    rel="noreferrer"
+    >2. src/llm-providers.ts: provider 解析</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/swoopcode/blob/main/src/foundation-models.ts"
+    target="_blank"
+    rel="noreferrer"
+    >3. src/foundation-models.ts: 基座模型画像</a
+  >
+</div>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    harness 默认跑 Claude 3.5 Sonnet, 用户想换 GPT-4o, 改了一行 model 名, 结果
+    tool call 字段名不一样、cache 边界不一样、错误 码不一样, harness
+    立刻崩。现象是"模型切换像换引擎, 不是换轮胎"。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"在主代码里 if (provider === "anthropic") {...} else if
+    (provider === "openai") {...}"。这有两个问题: 一是 主代码被 provider
+    分支污染, 难以维护; 二是新增 provider 时要 改十几处 if, 容易漏。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口:
+    <code
+      >interface LLMClient { chat(messages): Promise&lt;AssistantMessage&gt;
+      }</code
+    >。 不变量三条: (1) 暴露给 harness 的是统一 <code>AssistantMessage</code>
+    形态 (role / content / tool_calls), 内部差异完全不外泄, (2) cache 边界由
+    adapter 内部实现, harness 不知道细节, (3) 错误码统一收敛到 6 种 LLMErrorKind
+    (第 11 章), adapter 负责把 provider 特定错误翻译过来。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    同一 scenario 跑 4 个 adapter, 断言 trace 里 tool_calls 字段 完全一致 (虽然
+    provider 内部表示不同), LLMErrorKind 分类一致 (虽然 provider 错误码不同)。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
+<div class="note">
+  <p class="note__title">观察 1 · 在主代码里 if provider</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+// 错误: provider 分支散落在主代码
+async function run(query: string) {
+  history.add({ role: "user", content: query });
+  let assistant;
+  if (config.provider === "anthropic") {
+    assistant = await callAnthropic(messages);  // Anthropic 特有格式
+  } else if (config.provider === "openai") {
+    assistant = await callOpenAI(messages);  // OpenAI 特有格式
+  } else if (config.provider === "google") {
+    assistant = await callGoogle(messages);  // Google 特有格式
+  }
+  history.add(assistant);
+  /* ... */
+}</code></pre>
+  <p><strong>问:</strong>为什么不直接 if provider?</p>
+  <p>
+    <strong>答:</strong>三件事同时坏掉 —— 污染: agent.ts 不该知道 provider 存在,
+    职责被越界; 维护: 新增 provider 要改十几处 if, 容易漏; 测试: 主代码被
+    provider 分支污染, 单元测试要 mock 多个 provider。
+  </p>
+</div>
+
+<div class="note">
+  <p class="note__title">观察 2 · 错误码不翻译直接抛</p>
+  <pre class="code-block"><code>// 教学简化版
+catch (err) {
+  // 错误: provider 错误码直接抛
+  throw err;  // harness 看到的是 Anthropic 特定错误码
+}</code></pre>
+  <p><strong>问:</strong>为什么不直接抛 provider 错误?</p>
+  <p>
+    <strong>答:</strong>三件事同时坏掉 —— 跨模型: 切到 OpenAI 后, 第 11 章的
+    Recovery 模块不知道是 rate_limit 还是 rate_limit_exceeded; 抽象: harness
+    不该知道 provider 内部错误码, 这是 adapter 职责; 演化: provider 升级 SDK
+    改了错误码, harness 全挂。
+  </p>
+</div>
+
+<h2 id="differences">4 个 adapter 收口的差异</h2>
+<p>不同 provider 在以下 4 个维度上有差异, adapter 负责收口:</p>
+
+<h3>1. tool call 协议</h3>
+<dl class="defs">
+  <dt>Anthropic</dt>
+  <dd><code>tool_use</code> 字段, content 是数组 (text + tool_use 块)。</dd>
+  <dt>OpenAI</dt>
+  <dd><code>tool_calls</code> 字段, content 字符串 + tool_calls 数组并列。</dd>
+  <dt>Google</dt>
+  <dd>
+    <code>functionCall</code> 字段, parts 数组, 命名 <code>functionCall</code>。
+  </dd>
+  <dt>本地兼容 (Ollama / vLLM)</dt>
+  <dd>通常模仿 OpenAI, 但 tool name 可能需要规范化 (例如不允许 ".")。</dd>
+</dl>
+<p>
+  adapter 内部把 4 种表示都翻译成统一的
+  <code>AssistantMessage.tool_calls</code>。
+</p>
+
+<h3>2. cache 边界</h3>
+<dl class="defs">
+  <dt>Anthropic</dt>
+  <dd>
+    prompt cache 4 个 breakpoint (system / messages / tools / 末尾), 自动 5 分钟
+    TTL, 命中按 1/10 计费。
+  </dd>
+  <dt>OpenAI</dt>
+  <dd>自动 cache, 无显式 breakpoint, 命中按 1/2 计费 (o1 系列)。</dd>
+  <dt>Google</dt>
+  <dd>implicit cache, TTL 短, 命中按 1/4 计费。</dd>
+  <dt>本地兼容</dt>
+  <dd>无 cache, 所有 token 全价。</dd>
+</dl>
+<p>
+  第 10 章的"稳定前缀 / 动态状态 / 自然增量" 布局在 Anthropic 效果 最好 (cache
+  hit rate 最高), 在 OpenAI 中等, 在本地模型无效但也没坏处。 adapter 在 metadata
+  里返回 cache hit 状态, harness 记录到 cache-debug (第 10 章)。
+</p>
+
+<h3>3. 错误码</h3>
+<dl class="defs">
+  <dt>Anthropic</dt>
+  <dd>
+    HTTP 429 (rate_limit) / 529 (overloaded) / 400 (context_overflow) / 500
+    (api_error)。
+  </dd>
+  <dt>OpenAI</dt>
+  <dd>
+    HTTP 429 / 503 / 400 / 500, 错误码字符串 "rate_limit_error" /
+    "context_length_exceeded"。
+  </dd>
+  <dt>Google</dt>
+  <dd>
+    HTTP 429 / 503 / 400 / 500, 错误码字符串 "RESOURCE_EXHAUSTED" /
+    "INVALID_ARGUMENT"。
+  </dd>
+</dl>
+<p>
+  adapter 翻译成 6 种 <code>LLMErrorKind</code> (第 11 章), Recovery 模块只认
+  LLMErrorKind, 不认 provider 错误码。
+</p>
+
+<h3>4. 输出截断规则</h3>
+<dl class="defs">
+  <dt>Anthropic</dt>
+  <dd>
+    <code>stop_reason === "max_tokens"</code>, content 截断在最后一个完整
+    token。
+  </dd>
+  <dt>OpenAI</dt>
+  <dd>
+    <code>finish_reason === "length"</code>, content 截断在最后一个完整 token。
+  </dd>
+  <dt>Google</dt>
+  <dd><code>finishReason === "MAX_TOKENS"</code>, 行为类似。</dd>
+</dl>
+<p>
+  adapter 统一翻译成 <code>finishReason === "length"</code> +
+  <code>truncated === true</code>, Recovery 模块 (第 11 章) 一致处理。
+</p>
+
+<h2 id="foundation-models">基座模型画像</h2>
+<p>
+  同样是 "claude-3-5-sonnet", 也有 4 个版本 (claude-3-5-sonnet-20240620,
+  claude-3-5-sonnet-20241022, ...), 不同版本 cache 行为 / 工具协议 /
+  错误码都略有差异。本章用 <code>foundation-models.ts</code> 维护一份
+  "基座模型画像", 描述每个具体版本的差异, harness 启动时根据 model 名选画像,
+  应用到 adapter。
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export interface FoundationModelProfile {
+  provider: LLMProviderId;
+  model: string;
+  supportsCache: boolean;
+  cacheBreakpoints: number;
+  maxContextTokens: number;
+  supportsTools: boolean;
+  supportsCompaction: boolean;  // 是否支持原生 compaction
+  notes: string;
+}
+
+export function resolveFoundationModelProfile(opts: { provider, model, explicitProfileId? }): FoundationModelProfile;</code></pre>
+
+<h2 id="wiring">Composition Root 接线</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export async function main() {
+  const config = loadConfig();  // 读 ANTHROPIC_API_KEY / OPENAI_API_KEY / etc
+  const modelProfile = resolveFoundationModelProfile({
+    provider: config.provider,
+    model: config.model,
+  });
+  const llm = createLlm(config, modelProfile);  // 选 adapter
+  // 之后 agent / subagent / 评测 都只看到 LLMClient interface
+  // 完全不感知 provider
+}</code></pre>
+<p>
+  Composition Root 唯一感知 provider 的地方, 其他模块全部只看到
+  <code>LLMClient</code> interface。切模型 = 改环境变量, 不改代码。
+</p>
+
+<h2 id="trap">反例梯度</h2>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>在 agent.ts 主代码里 if provider ===
+      "anthropic"。
+    </p>
+    <p>
+      <strong>为什么错:</strong>主代码被 provider 污染, 维护噩梦, 测试难写。
+    </p>
+    <p>
+      <strong>正确做法:</strong>4 个 adapter 实现 LLMClient interface, agent.ts
+      完全不感知 provider。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>provider 错误码不翻译直接抛。</p>
+    <p>
+      <strong>为什么错:</strong>Recovery 模块看不懂 provider 错误码,
+      跨模型立刻挂。
+    </p>
+    <p>
+      <strong>正确做法:</strong>adapter 把 provider 错误码翻译成 6 种
+      LLMErrorKind, 统一收敛。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>hardcode "claude-3-5-sonnet" 的 cache 行为, 切到
+      GPT-4o 后不工作。
+    </p>
+    <p>
+      <strong>为什么错:</strong>cache 行为是 provider 特性, 不是 agent
+      假设。不同 provider 表现不同, 切模型后假设失效。
+    </p>
+    <p>
+      <strong>正确做法:</strong>从 modelProfile.supportsCache / cacheBreakpoints
+      读, 不 hardcode。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>本地模型跑 tool call 失败, 切到 Claude
+      之后才发现是 tool name 不合法 ("fs.read" 有点)。
+    </p>
+    <p>
+      <strong>为什么错:</strong>tool name 在不同 provider 规则不同 (Anthropic
+      允许 ".", OpenAI 不允许), harness 不该 hardcode 假设。
+    </p>
+    <p>
+      <strong>正确做法:</strong>tool registry 暴露 getNormalizedName() 给
+      adapter, adapter 在注册时做规范化。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation · model-policy 专题</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>4 个 adapter 暴露统一 LLMClient:</strong>每个 adapter 实现
+      <code>chat(messages): Promise&lt;AssistantMessage&gt;</code>, 内部
+      provider 表示完全翻译成统一形态。
+    </p>
+    <p>
+      <strong>provider 错误码翻译成 LLMErrorKind:</strong>fake provider 抛 429
+      错误, adapter 抛 LLMErrorKind === "rate_limit"。
+    </p>
+    <p>
+      <strong>切模型 = 改环境变量, 不改代码:</strong>设 ANTHROPIC_API_KEY 跑通,
+      切到 OPENAI_API_KEY 同样跑通, agent.ts 不变。
+    </p>
+    <p>
+      <strong>tool name 规范化:</strong>tool name 含 "." 时, OpenAI adapter
+      内部替换为 "_" (OpenAI 限制), 但 trace 里仍然 显示原始 name。
+    </p>
+    <p>
+      <strong>modelProfile 决定 cache 行为:</strong>fake profile
+      supportsCache=false, harness 不调用 cache-debug tracker;
+      supportsCache=true, harness 调用并记录 hit/miss。
+    </p>
+  </div>
+</div>
+
+<h2 id="lookback">回望第 00–15 章: 哪些原则在本章兑现了</h2>
+<ul>
+  <li>
+    <strong>Composition Root 唯一感知 provider:</strong>其他模块只看到 LLMClient
+    interface。
+  </li>
+  <li>
+    <strong>不变量在 adapter 内部兑现:</strong>cache 边界、错误码、截断规则,
+    全部 adapter 收口。
+  </li>
+  <li><strong>配置即适配:</strong>切模型 = 改 env, harness 主体不变。</li>
+  <li>
+    <strong>事实与视图分离:</strong>modelProfile 是"事实" (provider 描述),
+    adapter 是"视图" (实际调用)。
+  </li>
+</ul>
+
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>多 provider 同时跑</dt>
+  <dd>
+    未来 harness 允许同一个 run() 内调多个 provider (例如用 GPT-4 选 tool, 用
+    Claude 总结), 4 个 adapter 要能并存。
+  </dd>
+  <dt>model profile 动态加载</dt>
+  <dd>
+    新 model 版本发布时, foundation-models.ts 要更新, 跑一次 eval 验证 cache /
+    tool / 错误码行为。
+  </dd>
+  <dt>local model 协议差异</dt>
+  <dd>
+    Ollama / vLLM / LM Studio 各自的 tool call 协议略有差异, adapter
+    抽象要能容下。
+  </dd>
+  <dt>cost-aware adapter selection</dt>
+  <dd>
+    不同 provider 价位不同, harness 应当能在"质量 vs 成本" 之间动态选 adapter
+    (例如用户配置"省钱模式")。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-model">本次如何 vibe code: model-policy 专题的三件套</h2>
+
+<h3 id="vibe-feed-model">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>LLMAdapter</code> /
+    <code>FoundationModelProfile</code> 两个 interface, 以及 4 个 adapter
+    (Anthropic / OpenAI / Google / 本地) 的命名规范。本轮不写实现,
+    重点钉"agent.ts 完全不感知 provider"。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出
+    <code>src/llm-adapter.ts</code> 的 stub, 4 个 adapter 是 noop
+    (直接返回硬编码 messages)。本轮 review 重点: agent.ts / main.ts 不出现
+    provider 字符串。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写 4 个 adapter + 错误码翻译 +
+    modelProfile 解析 + tool name 规范化。本轮 review 重点: 错误码统一翻译成
+    LLMErrorKind, tool name 规范化不在 agent.ts。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写
+    <code>test/adapter.test.ts</code>。本轮 review 重点: "切模型 = 改 env,
+    不改代码" 和 "tool name 规范化" 两条必须有 env 切换断言。
+  </li>
+</ol>
+
+<h3 id="vibe-review-model">Review: model-policy 专题专属 checklist</h3>
+<ol>
+  <li>
+    <strong>agent.ts / main.ts 不出现 provider 字符串。</strong>验证:
+    <code>grep -rn 'anthropic\|openai' src/agent.ts src/main.ts</code> 应当 0
+    行。
+  </li>
+  <li>
+    <strong>4 个 adapter 都实现 LLMClient。</strong>验证: 每个 adapter.ts 内有
+    <code>chat(messages): Promise&lt;AssistantMessage&gt;</code> 签名。
+  </li>
+  <li>
+    <strong>错误码翻译在 adapter 内部。</strong>验证: catch 块把 provider
+    错误码翻译成 LLMErrorKind, 不直接 throw provider error。
+  </li>
+  <li>
+    <strong>tool name 规范化在 adapter 内部。</strong>验证: tool registry
+    不做规范化, adapter 在调用 provider API 前做。
+  </li>
+  <li>
+    <strong>modelProfile 决定 cache 行为。</strong>验证:
+    <code>grep -n 'supportsCache' src/llm-adapter.ts</code> ≥ 1 行, 决定是否调用
+    cache-debug tracker。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-model">调试: model-policy 专题典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · agent.ts 出现 provider 字符串。</strong>症状:
+    <code>if (provider === "anthropic") ...</code> 写在 agent.ts。验证:
+    <code>grep -rn 'anthropic\|openai' src/agent.ts</code> 不为 0 行时,
+    跑"切模型 = 改 env" 测试应当挂。
+  </li>
+  <li>
+    <strong>伪装 B · provider 错误码直接抛。</strong>症状: adapter catch 块
+    <code>throw err</code>。验证: 写一个 fake provider 抛 429, 跑"provider
+    错误码翻译" 测试, 应当收到 LLMErrorKind === "rate_limit"。
+  </li>
+  <li>
+    <strong>伪装 C · cache 行为 hardcode。</strong>症状:
+    <code>if (provider === "anthropic") cacheHit = true</code>。验证: 改
+    modelProfile.supportsCache=false, 跑测试, cache-debug tracker 不应被调用。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-model">迭代: model-policy 专题 4 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(model): 钉 LLMAdapter / FoundationModelProfile 接口 + 4 个 adapter
+      命名</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code
+      >feat(model): createLlm(config, modelProfile) + 4 个 adapter stub</code
+    >
+    —— tsc 通过, stub 永远返回 hardcoded 响应。
+  </li>
+  <li>
+    <code
+      >feat(model): 4 个 adapter 真实实现 + 错误码翻译 + tool name 规范化 +
+      modelProfile 解析</code
+    >
+    —— 跑通 Validation 卡片前 4 条。
+  </li>
+  <li>
+    <code
+      >test(model): 切 env 跑通同一 scenario + modelProfile.supportsCache 决定
+      cache-debug 调用</code
+    >
+    —— 全绿。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · model-policy 专题</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>实现 LLM Adapter 层, 用 4 个 adapter 收口 provider
+      差异 (tool call 协议 / cache 边界 / 错误码 / 截断规则), harness
+      其他部分完全不感知 provider。
+    </p>
+    <p>
+      <strong>场景:</strong>用户设 ANTHROPIC_API_KEY 跑通, 切到 OPENAI_API_KEY
+      同样跑通, agent.ts 不改一行代码。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/llm-adapter.ts</code> (新) 暴露
+      <code>createLlm(config, modelProfile)</code>;
+      <code>src/llm-providers.ts</code> (新) 4 个 adapter (Anthropic / OpenAI /
+      Google / 本地); <code>src/foundation-models.ts</code> (新) modelProfile
+      解析; <code>src/index.ts</code> 接线 config + modelProfile 选 adapter。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>
+        agent.ts / main.ts / loop 不出现 provider 字符串 (anthropic / openai /
+        google)
+      </li>
+      <li>4 个 adapter 都实现 LLMClient interface</li>
+      <li>provider 错误码在 adapter 内部翻译成 LLMErrorKind (第 11 章)</li>
+      <li>tool name 规范化在 adapter 内部, 不在 tool registry</li>
+      <li>cache 行为从 modelProfile.supportsCache 读, 不 hardcode</li>
+    </ul>
+    <p><strong>验证 (用 fake adapter + env 切换, 逐条落到 vitest):</strong></p>
+    <ul>
+      <li>
+        4 个 adapter 暴露统一 chat(messages) 签名, 内部 provider 表示翻译成
+        AssistantMessage
+      </li>
+      <li>fake provider 抛 429, adapter 抛 LLMErrorKind === "rate_limit"</li>
+      <li>
+        设 ANTHROPIC_API_KEY 跑通, 切到 OPENAI_API_KEY 同样跑通, agent.ts 不变
+      </li>
+      <li>
+        tool name 含 "." 时, OpenAI adapter 内部替换为 "_", trace 显示原始 name
+      </li>
+      <li>modelProfile.supportsCache=false 时, cache-debug tracker 不被调用</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="practice">本章练习</h2>
+<ol>
+  <li>
+    故意在 agent.ts 写 if (provider === "anthropic"), 跑测试, 看"agent.ts 不出现
+    provider 字符串" 是否抓到 (切 env 后挂)。
+  </li>
+  <li>
+    在 adapter catch 块 throw err (不翻译), 跑测试, 看"provider 错误码翻译"
+    是否抓到 (LLMErrorKind 拿不到)。
+  </li>
+  <li>
+    hardcode "anthropic 有 cache", 不读 modelProfile.supportsCache, 跑测试,
+    看"modelProfile 决定 cache 行为" 是否抓到。
+  </li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本专题给 harness 加了 LLM Adapter 层, 用 4 个 adapter 收口 provider 在 tool
+  call 协议 / cache 边界 / 错误码 / 截断规则 上的差异。harness
+  其他部分完全不感知 provider, 切模型 = 改 环境变量。modelProfile
+  决定每个具体模型版本的行为, 不 hardcode provider 假设。这是 harness
+  跨模型可移植性的关键。
+</p>

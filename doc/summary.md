@@ -1,16 +1,31 @@
 # 项目状态总览
 
-这是 learning-claude-code-ts 项目的持久化状态文档。每次新增功能模块后更新此文件。
+这是 swoopcode 项目的持久化状态文档。每次新增功能模块后更新此文件。
 
 ## 项目简介
 
 教学用途的 TypeScript Coding Agent，递进式构建，每一步都能独立运行。
 
-GitHub: https://github.com/pingp76/learning-claude-code-ts
+GitHub: https://github.com/pingp76/swoopcode
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD-16：模型适配与 Agent Runtime Policy 抽象层**（Provider Profile + Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager + ContextRanker + RepoClassifier + TaskIntentClassifier）+ **PDD-17：Eval Harness 基础框架**（Eval Core、deterministic suite、real core tools、CLI driver）+ **PDD-18：Replay/Live/Judge/Full-tools Eval**（replay、live smoke、judge/report、live regression、full-tools live E2E）+ **PDD-19：MCP 与 Agent Team Eval Harness Prototype**（prototype suites 默认 skipped，避免误读为生产能力）+ **网页版教程雏形**（`tutorial/` 静态站点 + 第 00/01 章 + `web/temp/2/` 风格三栏阅读布局）+ **公开版 PDD 整理**（`doc/pdd-01-*.md` 到 `doc/pdd-19-*.md`，保留原始 PDD 深度，旧 refactor 工作记录已合并回对应 PDD）
+
+- **PDD-17 Eval Harness 基础能力**：Eval Core + Deterministic Suite + Real Core Tools + CLI Driver。
+- **PDD-18 Eval 回归能力**：Replay + Live Smoke + Judge/Report；Live Regression — Core Tools；Full-tools Live E2E。
+- **PDD-19 Eval Prototype 边界**：MCP fixture server + MCP runtime adapter + MCP trace/assertions；顺序 supervisor Team driver + Team trace/assertions；由于项目尚未实现生产级 MCP runtime / 真实 Agent Team runtime，相关 MCP/Team 测试当前全部 `describe.skip`。
+
+## 网页版教程站点雏形
+
+- **位置**：`tutorial/`
+- **目标**：把内部 PDD 逐步改写成面向中文新手的网页教程，让学生沿着 agent loop 理解并最终能写 prompt 重建一个类似 coding agent harness
+- **当前章节**：已实现第 00-15 章主线教程、专题 A“不同大模型不是只换模型名”、专题 B“如何测试一个不确定的 Coding Agent”和 Reference 查阅页
+- **教学叙事**：章节统一按“真实场景 → 朴素方案 → 失败原因 → loop 位置与图示 → 原理/推荐方案 → 实现落点 → Prompt Card/验证”展开；第 10 章已强化 prompt cache 原理、量化影响、请求栈图、provider 差异和稳定 prefix / 动态 tail 设计
+- **视觉与交互**：以 `web/temp/2/` dummy 页为基准，采用暖米白学术风、固定顶部 header、三栏独立滚动、左侧章节导航、右侧页内目录、左右侧栏可收起，章节末尾自动生成“上一章 / 下一章”翻页导航
+- **内容结构**：章节正文放在 `tutorial/chapters/*.html`，站点元数据放在 `tutorial/assets/content.js`，主题 token 和组件样式集中在 `tutorial/assets/styles.css`
+- **本地运行**：仓库根目录运行 `npm run tutorial:dev`，默认访问 `http://127.0.0.1:5173`
+- **验证入口**：`npm run tutorial:check` 做 JavaScript 语法检查；`npm run tutorial:format` 格式化教程站点文件
 
 ## 教学注释增强
 
@@ -28,14 +43,22 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 src/
 ├── index.ts            # 组装根（Composition Root）：组件初始化和接线
 ├── repl.ts             # REPL 交互层：readline 循环 + Agent/命令分发
-├── cli-commands.ts     # CLI 命令注册与分发（/skill、/mode 等斜杠命令）
-├── config.ts           # 从 .env 加载配置（含压缩配置 + provider 解析）
+├── cli-commands.ts     # CLI 命令注册与分发（/skill、/mode、/m、/t、/c 等斜杠命令）
+├── config.ts           # 从 .env 加载配置（含压缩配置 + provider 解析 + policy 解析链）
 ├── llm-providers.ts    # LLM Provider Profile 抽象层：registry + resolver
+├── foundation-models.ts # 基座模型能力画像：registry + resolveFoundationModelProfile()
+├── runtime-policy.ts   # Runtime Policy 解析器：profile → policy + 环境变量覆盖
+├── runtime-policy-store.ts # Session-local 运行时策略可变存储 + CLI override
+├── context-budget.ts   # 上下文预算分配器：按压缩模式分配子预算
+├── llm-adapter.ts      # LLM 协议适配器：OpenAI Chat Completions 请求构建 + 响应解析
+├── stable-context.ts   # 稳定上下文管理器：repo map + pinned files + context pack 构建 + ContextRanker 集成
+├── context-ranking.ts  # 通用内容重要性排序器：FileInventory + RepoClassifier + TaskIntentClassifier + 多维度评分
+├── context-ranking.test.ts # ContextRanker 测试（82 个测试用例，覆盖 7 种项目 fixture）
 ├── project-context.ts  # 项目上下文：集中解析 projectRoot、AGENTS.md、agentHome 与运行数据路径
 ├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
 ├── log-rotation.ts     # 日志轮转工具：单文件大小上限 + 固定历史份数
 ├── atomic-write.ts     # 原子写入工具：同目录临时文件 + rename 覆盖 + JSON 语法校验
-├── llm.ts              # LLM 客户端（OpenAI SDK + streaming 聚合）+ LLM 日志记录
+├── llm.ts              # LLM 客户端（OpenAI SDK + streaming 聚合 + adapter 驱动）
 ├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 <agentHome>/logs/llm.log，超限轮转保留
 ├── command-safety.ts   # shell 命令硬性安全黑名单：普通 bash 与 ExecutionPolicy 共享
 ├── execution-policy.ts # 非交互执行边界：readonly/ci/workspace_write profile + command/resource 校验
@@ -66,7 +89,13 @@ src/
 ├── recovery.ts         # LLM 错误分类与恢复决策：backoff/compact/continue/fail
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
 ├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
-├── message-block.test.ts # 消息块测试（29 个测试用例）
+├── foundation-models.test.ts # Profile 注册表、匹配、fallback 测试（14 个测试用例）
+├── runtime-policy.test.ts # Policy 解析、env 覆盖、非法值报错测试（19 个测试用例）
+├── runtime-policy-store.test.ts # Override 合并、reset、snapshot 测试（15 个测试用例）
+├── context-budget.test.ts # 预算分配公式、总和约束、override 裁剪测试（9 个测试用例）
+├── llm-adapter.test.ts # Adapter 请求构建、reasoning 回放、streaming 聚合测试（15 个测试用例）
+├── stable-context.test.ts # Repo map、pin/unpin、预算裁剪、hash 稳定性测试（13 个测试用例）
+├── message-block.test.ts # 消息块测试（32 个测试用例）
 ├── compressor.test.ts    # 压缩器测试（26 个测试用例）
 ├── execution-policy.test.ts # ExecutionPolicy 测试（12 个测试用例）
 ├── atomic-write.test.ts # 原子写入测试（3 个测试用例）
@@ -74,11 +103,11 @@ src/
 ├── output-store.test.ts # OutputStore 测试（7 个测试用例）
 ├── permission.test.ts   # 权限管理器测试（74 个测试用例）
 ├── hooks.test.ts        # Hook Runner 单元测试（11 个测试用例）
-├── agent.test.ts        # Agent Hook/错误恢复/Transcript 集成测试（22 个测试用例）
+├── agent.test.ts        # Agent Hook/错误恢复/Transcript/Reasoning 集成测试（25 个测试用例）
 ├── memory.test.ts       # Memory 管理器测试（40 个测试用例）
 ├── todo.test.ts        # TODO 管理器测试（34 个测试用例）
 ├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
-├── normalize.test.ts   # 消息标准化测试（17 个测试用例）
+├── normalize.test.ts   # 消息标准化测试（20 个测试用例）
 ├── system-prompt.test.ts # System Prompt 测试（20 个测试用例）
 ├── session-events.test.ts # Session Event Buffer 测试（5 个测试用例）
 ├── cache-debug.test.ts  # Cache Debug 测试（7 个测试用例）
@@ -88,7 +117,8 @@ src/
 ├── transcript.test.ts  # Transcript 原始事件流测试（6 个测试用例）
 ├── task-store.test.ts  # TaskStore 持久化、索引和清理测试
 ├── tasks.test.ts       # TaskManager 状态机和依赖测试
-├── cli-commands.test.ts # CLI 命令测试（含 /task）
+├── cli-commands.test.ts # CLI 命令测试（含 /task、/m、/t）（16 个测试用例）
+├── config.test.ts      # Config 加载与 policy 解析链测试（5 个测试用例）
 ├── index.test.ts       # 占位测试
 ├── history.test.ts     # history 模块测试（22 个测试用例）
 ├── logger.test.ts      # logger 模块测试
@@ -112,6 +142,60 @@ src/
     ├── schedules.test.ts # Schedule 工具测试（4 个测试用例）
     ├── registry.ts     # 工具注册表（顺序稳定 + 重复注册报错 + 过滤选项）
     └── registry.test.ts # 工具注册表测试（11 个测试用例）
+├── eval/
+│   ├── core/
+│   │   ├── case-schema.ts    # EvalCase、EvalStep、EvalAssertion、EvalRunResult 类型
+│   │   ├── driver.ts         # CodingAgentDriver 中立接口
+│   │   ├── workspace.ts      # 临时 workspace 与路径边界
+│   │   ├── trace.ts          # TraceRecorder、RuntimeEvent
+│   │   ├── assertions.ts     # portable + instrumented assertion 执行器
+│   │   ├── runner.ts         # runEvalCase/runEvalSuite 核心 runner
+│   │   └── trace-writer.ts   # JSON trace 输出
+│   ├── drivers/
+│   │   ├── learn-claude-code/
+│   │   │   ├── in-process-driver.ts       # 当前项目 createAgent() driver
+│   │   │   ├── core-tool-runtime.ts       # 真实核心工具注册表（bash/read/write/edit/editExact）
+│   │   │   ├── full-tool-runtime.ts       # 临时 agentHome 下组装完整工具系统
+│   │   │   ├── full-tool-runtime.test.ts  # full runtime 确定性测试
+│   │   │   ├── mcp-runtime.ts             # Eval MCP fixture adapter + ToolRegistry 合并
+│   │   │   ├── team-driver.ts             # 顺序 supervisor Agent Team eval driver
+│   │   │   ├── scripted-llm.ts            # ScriptedLLMClient
+│   │   │   ├── scripted-terminal.ts       # ScriptedTerminal（支持 permission 事件记录）
+│   │   │   └── tool-trace.ts              # ToolRegistry tracing wrapper
+│   │   └── cli/
+│   │       └── cli-driver.ts         # CLI 黑盒 driver（spawn + stdin/stdout）
+│   ├── cases/
+│   │   ├── fixtures/
+│   │   │   ├── replay-read.json      # Replay fixture: read file
+│   │   │   └── replay-write.json     # Replay fixture: write file
+│   │   ├── deterministic.test.ts     # Deterministic suite（≥5 个 core tool + CLI smoke case）
+│   │   └── replay-suite.test.ts      # Replay suite
+│   ├── live/
+│   │   ├── _driver-factory.ts              # Live suite 共享 driver + judge LLM 工厂
+│   │   ├── live-llm.ts                     # Live LLM wrapper
+│   │   ├── live-suite.test.ts              # Live smoke suite（需 `EVAL_LIVE=1`）
+│   │   ├── live-regression-suite.test.ts   # Live regression suite（core tools，需 `EVAL_LIVE_REGRESSION=1`）
+│   │   ├── live-full-suite.test.ts         # Live full-system regression suite（需 `EVAL_LIVE_FULL=1`）
+│   │   ├── live-mcp-suite.test.ts          # Live MCP suite（需 `EVAL_LIVE_MCP=1`）
+│   │   └── live-team-suite.test.ts         # Live Team / Team+MCP suite（需 `EVAL_LIVE_TEAM=1`）
+│   ├── mcp/
+│   │   ├── fixture-server.ts               # MCP JSON-RPC fixture server
+│   │   ├── fixture-server.test.ts          # MCP fixture protocol tests
+│   │   ├── mcp-trace.ts                    # MCP runtime event helper
+│   │   └── mcp-suite.test.ts               # MCP deterministic harness tests
+│   ├── team/
+│   │   ├── team-schema.ts                  # Team judge input type entry
+│   │   ├── team-trace.ts                   # Team event grouping + judge summary builder
+│   │   ├── team-assertions.ts              # Team event helper utilities
+│   │   ├── team-assertions.test.ts         # Team assertion helper tests
+│   │   └── team-suite.test.ts              # Team deterministic harness tests
+│   ├── judge/
+│   │   ├── judge.ts                  # LLM judge 实现
+│   │   └── judge-suite.test.ts       # Judge 集成测试
+│   ├── replay/
+│   │   └── replay-llm.ts             # Replay LLM client
+│   ├── runner.test.ts        # core + in-process driver 集成测试
+│   └── README.md             # Eval 系统使用文档
 skills/
 ├── code-review/
 │   └── SKILL.md        # 代码审查 skill（示例）
@@ -124,7 +208,7 @@ skills/
 ### ProjectContext (`project-context.ts`)
 
 - **项目根目录抽象**：启动时集中解析 `projectRoot`，默认仍为 `process.cwd()`，后续可通过 `AGENT_PROJECT_ROOT` 扩展
-- **Agent 全局运行根目录**：启动时集中解析 `agentHome`，默认 `~/.learn-claude-code-ts`，可通过 `AGENT_HOME` 扩展
+- **Agent 全局运行根目录**：启动时集中解析 `agentHome`，默认 `~/.swoopcode`，可通过 `AGENT_HOME` 扩展
 - **项目级指令路径**：统一派生 `agentsFile = <projectRoot>/AGENTS.md`，存在时进入稳定 system prompt 头部
 - **路径集中管理**：`skillsDir`、`memoryDir`、`logsDir`、`taskOutputsDir`、`tasksDir` 全部从 `agentHome` 派生，不写入被操作项目目录
 - **组装根负责注入**：`index.ts` 创建一次 ProjectContext，再传给权限、工具注册表、压缩器、日志器、Memory/Skill 管理器
@@ -237,6 +321,52 @@ skills/
 - **输出引用**：Schedule occurrence 保存 `outputId` 与旧 `outputRef`；工具展示和 notification 优先提示 `run_output_read(output_id)`，旧 occurrence 只有 `outputRef` 时仍可展示但不会自动变成可读 handle
 - **REPL 命令**：`/schedule list [--all] [--all-projects]`、`/schedule show <id>`、`/schedule cancel <id>`、`/schedule delete <id>`、`/schedule occurrences <id>`
 
+### Eval Core 与 In-process Driver (`src/eval/`)
+
+- **Eval Core 设计原则**：中立 runner + driver 边界抽象，Eval Core 不直接依赖当前项目内部模块（agent.ts、llm.ts、ToolRegistry 等），只认识 `CodingAgentDriver` 接口
+- **CodingAgentDriver 接口**：`startCase` → `send` → `readEvents` → `close` 生命周期；同一 case 内多 step 复用同一 driver 实例
+- **EvalCase / EvalStep / EvalAssertion 类型**：TypeScript 对象描述 case，不引入 YAML/JSON schema 解析依赖；断言分 portable（finalOutputContains、fileExists、fileContains 等）和 instrumented（toolCalled、transcriptEventTypes 等）两类
+- **临时 workspace**：`createEvalWorkspace()` 在 OS tmp 目录创建独立目录，支持 `initialFiles`、路径边界检查（拒绝 `..` 和绝对路径）、自动清理（`keepOnFailure` 可选保留）
+- **TraceRecorder / writeEvalTrace**：结构化事件收集 + JSON 输出；支持 `EVAL_TRACE_DIR` 环境变量覆盖输出目录
+- **runEvalCase() 生命周期**：validate → create workspace → create driver → step loop → collect events → run assertions → write trace → cleanup
+- **当前项目 in-process driver**：内部组装 `createAgent()`，注入 ScriptedLLMClient、ScriptedTerminal、Fake Tool Registry、静音 Logger、新建 History/Compressor/PermissionManager/TranscriptStore；支持 scripted/replay/live 三种 LLM kind
+- **Full-tools in-process driver**：`tools.kind="full"` 在临时 `agentHome` 下复用真实 TODO/Task/Memory/Skill/SubAgent/Async/Schedule/Output provider；Eval Core 不直接 import 当前项目业务模块，项目耦合集中在 `drivers/learn-claude-code/`
+- **ScriptedLLMClient**：按顺序消耗预设 response，每次 `chat()` 自动序列化 tool args 并发射 `llm_call`/`llm_response` 事件；response 耗尽时抛错
+- **ReplayLLMClient**：读取 JSON fixture（`version: 1`），校验 `caseId` 匹配后，转换为 `ScriptedLLMResponse[]` 复用 scripted 路径；fixture 含 `provider/model/recordedAt/responses`
+- **LiveEvalLLMClient**：包装真实 `createLLMClient()`，发射 `llm_call`/`llm_response` 事件，支持 `maxCalls` 限制防止无限循环
+- **ScriptedTerminal**：自动消耗 `permissionAnswers` 和 `questions` 队列，支持 `defaultPermissionAnswer` 默认值
+- **Fake Tool Registry**：第一批只支持 fake tools，不接入真实 bash/files；工具定义和 executor 由 case 注入，执行时发射标准化 tool_call/tool_result 事件（含 stepId）
+- **断言执行器**：`runAssertions()` 遍历断言列表，返回结构化 `EvalAssertionResult`（passed + message + evidence）；instrumented 断言基于 `runtimeEvents` 判断，已支持 `fileNotExists`、`toolCalledOneOf`、`toolResultContains`、`stepToolCalled`、`stepToolNotCalled`
+- **Judge 评估**：`runJudge()` 构建含 rubric + trace summary 的 prompt，调用独立 LLM 做开放式质量评价；输出 `EvalJudgeResult`（passed/score/summary/strengths/problems/evidence/needsHumanReview）；hard assertions 始终优先，judge 失败也导致 case `status = "failed"`
+- **Judge JSON 解析鲁棒性**：三层降级——直接 `JSON.parse()` → 正则提取 markdown code block → 括号深度计数器提取嵌套 JSON → 返回 `judge_failed` fallback（score=0, passed=false, 不影响 hard result）；`VALID_EVIDENCE_KINDS` Set 过滤非法 evidence kind
+- **Suite Report**：`runEvalSuite()` 顺序运行多个 case，聚合 `EvalSuiteReport`（version/total/passed/failed/skipped/mode/cases[]）；`writeJsonReport()` 输出机器可读 JSON，`writeMarkdownReport()` 输出人读 Markdown（分 Passed/Failed 章节）；passed case 含 judge 失败时附加 ` (judge failed)`
+- **Live Regression Suite**：6 个 core-tools-only case 覆盖真实 LLM 下的读/写/编辑/bash/权限/多轮能力；每个 case 限制 `maxCalls`/`maxRounds`，Vitest timeout 30-60s；启用开关 `EVAL_LIVE_REGRESSION=1`；`EVAL_LIVE=1` 只启用 smoke suite；`EVAL_JUDGE=1` 启用 LLM judge 评价，`JUDGE_MODEL` 环境变量可覆盖 judge 模型（默认和 Agent 同模型）
+- **Live Full Suite**：4 个 release case 覆盖 TODO、confirmed Memory、seed Skill、readonly SubAgent；3 个 nightly case 预留 Task/Async/Schedule，默认 `describe.skip`；启用开关 `EVAL_LIVE_FULL=1`，所有 case 都使用临时 workspace + 临时 `agentHome`
+
+### PDD-18 Full-tools Live E2E (`src/eval/drivers/learn-claude-code/full-tool-runtime.ts` + `src/eval/live/live-full-suite.test.ts`)
+
+- **临时 agentHome 隔离**：full-tools eval runtime 使用 `createProjectContext({ projectRoot: workspaceRoot, agentHome })` 组装真实工具 provider，skills、memory、logs、task outputs、tasks、schedules 都写入 case 专属临时 `agentHome`，不读取用户真实 `~/.swoopcode`
+- **完整工具组装**：`tools.kind="full"` 复用当前项目真实 TODO/Task/Memory/Skill/SubAgent/Async/Schedule/Output provider；Eval Core 仍保持中立，不直接 import 当前项目业务模块
+- **Seed 数据**：`seedSkills` 在创建 SkillManager 前写入临时 skills 目录；`seedMemories` 通过 MemoryManager 写入临时 memory 目录；release skill case 使用 `SKILL_USED_22` 作为技能行为标记，便于失败 trace 快速识别
+- **Async cleanup**：full runtime cleanup 会先 `scheduleManager.stop()`，再调用 `asyncRunManager.shutdown()` 将仍在 running 的 async run 收敛为 `abandoned`，最后按 `keepAgentHome` 决定是否删除临时 `agentHome`
+- **新增断言语义**：`fileNotExists` 验证拒绝写入或越界写入不会产生文件；`toolCalledOneOf` 允许模型通过多个等价查询工具达成目标；`toolResultContains` 校验工具结果本身含目标内容；`stepToolCalled` / `stepToolNotCalled` 基于 tool event 的 `stepId` 校验多轮 case 中单步工具行为
+- **RuntimePathEvent**：driver 在 trace 中发射 `runtime_path` 事件，记录 `workspaceRoot` 与 `agentHome`，失败且 `keepOnFailure` 时可直接定位临时目录
+- **Live full release cases**：`live-full-todo-guided-file-change`、`live-full-memory-confirmed-create-and-read`、`live-full-skill-guided-output`、`live-full-subagent-readonly-analysis`
+- **Live full nightly cases**：Task Group durable plan、Async Run output handle、Schedule create/read/cancel 三个 case 已预留为 `describe.skip`，每个 case 配置 120s timeout，便于后续夜间或人工触发
+- **Judge 成本**：Release 组 4 个 case 均内置 judge rubric；`EVAL_LIVE_FULL=1 EVAL_JUDGE=1` 会额外产生 4 次 judge LLM 调用
+
+### PDD-19 MCP 与 Agent Team Eval Harness Prototype (`src/eval/mcp/` + `src/eval/team/` + live suites)
+
+- **MCP fixture server**：新增 `src/eval/mcp/fixture-server.ts`，实现 MCP 2025-06-18 最小 JSON-RPC 子集：`initialize`、`notifications/initialized`、`tools/list`、`tools/call`、`resources/list`、`resources/read`、JSON-RPC error；支持 fixture tool/resource、tool-call delay timeout、initialize failure、server crash 注入
+- **MCP runtime adapter**：`mcp-runtime.ts` 在 learn-claude-code driver 层把 fixture MCP tool 暴露为 `run_mcp_<server>_<tool>`，把 resource 暴露为 `run_mcp_resource_read`；Eval Core 不依赖当前项目 ToolRegistry，MCP adapter 通过 `combineToolRegistries()` 与真实工具链合并；in-process driver 同时支持 spec 风格的顶层 `driver.mcpServers` 和兼容路径 `tools.full.mcpServers`
+- **MCP trace/assertions**：新增 `mcp_server_start`、`mcp_initialize`、`mcp_tools_list`、`mcp_tool_call`、`mcp_tool_result`、`mcp_resource_read`、`mcp_error`、`mcp_server_stop` 事件；新增 `mcpServerStarted`、`mcpToolListed`、`mcpToolCalled`、`mcpToolResultContains`、`mcpResourceRead`、`mcpErrorCode` 断言
+- **MCP cases 当前状态**：fixture protocol、deterministic MCP suite、live MCP suite 的 case 已保留在代码中，但全部 `describe.skip`；原因是项目还没有生产级 MCP runtime / 第三方 MCP server 接入，当前 case 只能证明 eval fixture harness，不应被 CI/report 误读为真实 MCP 功能
+- **Team driver**：新增 `learn-claude-code-team` driver，第一版实现顺序 supervisor 拓扑；每个成员都是真实 Agent 实例，拥有独立 history/compressor、共享 LLM client、共享临时 workspace，并按 member tools 组装受限 registry
+- **Team 权限边界**：planner/reviewer/researcher 默认只拿到显式声明的 read/bash/todo/mcp 等能力；implementer 可通过 `tools: ["core"]` 获得写工具，但仍受 workspace 路径边界和 `PermissionManager` 模式约束；permission denial 会通过现有 ScriptedTerminal 事件进入 trace
+- **Team trace/assertions**：新增 `team_start`、`agent_spawned`、`agent_message`、`agent_tool_call`、`handoff`、`artifact_produced`、`agent_completed`、`agent_failed`、`team_completed` 事件；`run_write`/`run_edit`/`run_edit_exact` 成功后发射 `artifact_produced`；新增 `teamAgentSpawned`、`teamRoleUsed`、`teamHandoffOccurred`、`teamAgentToolCalled`、`teamAgentToolNotCalled`、`teamAgentFailed`、`teamArtifactContains`、`teamAllAgentsCompleted`、`teamNoUnauthorizedWrites` 断言
+- **Team cases 当前状态**：deterministic Team suite、Team assertion helper、live Team suite 和 Team+MCP mixed case 已保留在代码中，但全部 `describe.skip`；原因是项目还没有生产级 Agent Team runtime，当前 case 只能证明 eval harness 原型
+- **脚本开关**：新增 `test:eval:live:mcp`、`test:eval:live:team`、`test:eval:live:team:mcp`；这些脚本当前也只会看到 skipped suite，待真实 MCP / Team runtime 落地后再恢复 opt-in 运行
+
 ### Agent 核心循环 (`agent.ts`)
 
 - 接收用户 query，存入 history
@@ -251,8 +381,12 @@ skills/
 - **P1 即时压缩**：run_bash 工具的大输出自动存文件，只返回 preview
 - **P0 衰减压缩**：每次 LLM loop 前按全局 `loopIndex` 自动截断旧的工具结果
 - **P2 全量压缩**：上下文超过阈值时，将历史压缩为摘要
+- **Stable Context 插入**：`prepareMessages()` 在 system prompt 之后插入 `StableContextManager.buildMessages()` 的结果
+- **文件活动追踪**：`trackFileActivity()` 在 `handleToolCalls` 中记录 `run_read`/`run_write`/`run_edit`/`run_edit_exact` 触达的文件路径，作为 evidence 信号传给 ContextRanker；写/编辑工具成功后调用 `stableContextManager.notifyFileChanged()` 使 pinned 文件的 stable snapshot 失效
 - **Cache Debug 追踪**：每轮调用 LLM 前计算 system prompt / tools / prefix hash，监控前缀稳定性
 - **Reminder 注入**：`systemPromptProvider.buildTurnReminders()` + `sessionEventBuffer.drain()` 以 user message 形式注入，不修改 system prompt
+- **Assistant Message 优先保存**：写入 history 时优先使用 `response.assistantMessage`（含 reasoning_content），fallback 到手工构造
+- **Reasoning 回放**：adapter 构造的 assistant message 保留 reasoning 字段，下一轮请求自动带回
 - JSON 解析失败的容错处理（将错误告知 LLM 让其自行修正）
 - **maxRounds 支持**：可选的最大循环轮数（子智能体使用），超过时强制截断并返回摘要
 - **todoManager 可选**：子智能体不传 todoManager，父智能体行为不变
@@ -297,6 +431,78 @@ skills/
 - **cleanup()**：未注入 OutputStore 时清空临时 `.task_outputs/` 目录；注入 OutputStore 后不删除已登记输出
 - **输出目录可注入**：大工具输出目录由 `ProjectContext.taskOutputsDir` 注入，默认位于 `agentHome/.task_outputs/`
 
+### Foundation Model Profile 基座模型画像 (`foundation-models.ts`)
+
+- **能力驱动而非模型名驱动**：`agent.ts` 不出现 `kimi`/`deepseek` 等具体模型分支，业务层只看 `RuntimePolicy` 中的策略字段
+- **Profile Registry**：含 `generic-openai-compatible`、`kimi-k2.6`、`kimi-code`、`deepseek-v4`、`minimax-m2.7`、`minimax-m3`、`mimo-v2.5-pro`、`qwen3.7-max`、`glm-5.1` 等画像
+- **匹配优先级**：`LLM_MODEL_PROFILE` 显式指定 > exact model id > prefix > provider default > generic fallback
+- **硬协议字段 vs 优化提示分离**：maxTokensField、thinking requestShape、reasoning responseFields 等硬字段必须保守；context budget、compression mode 等优化提示允许合理默认
+- **Profile 分级**：`verified` / `experimental` / `needs_review`，stale/high-risk profile 启动时产生 warning 但不阻断
+- **文档元数据**：每个 profile 包含 `sourceUrls`、`verifiedAt`、`updateRisk`、`status`，支持审计和后续核对
+
+### Runtime Policy 解析器 (`runtime-policy.ts`)
+
+- **三层抽象**：`FoundationModelProfile`（事实） → `RuntimePolicy`（决策） → `LLMRequestAdapter`（协议适配）
+- **策略解析**：从 profile 派生 context/thinking/request/reasoning/tools/cache/telemetry 策略
+- **环境变量覆盖**：支持 `LLM_CONTEXT_BUDGET`、`LLM_THINKING`、`LLM_REASONING_EFFORT`、`LLM_MAX_OUTPUT_TOKENS`、`LLM_PROTOCOL` 覆盖
+- **覆盖校验**：budget 不超窗、thinking 被模型支持、effort 合法、protocol 已实现
+- **压缩默认值派生**：`aggressive` / `balanced` / `long_context` 三种模式自动派生阈值
+- **Context Budget 分配**：调用 `resolveContextBudgets()` 自动分配 stable/working/evidence/conversation/output/headroom 子预算
+
+### Runtime Policy Store (`runtime-policy-store.ts`)
+
+- **Session-local 可变状态**：合并 base policy + CLI override，为 SubAgent/Async Run 提供 snapshot
+- **Mid-session 可调字段**：thinkingMode、reasoningEffort、contextBudgetTokens、maxOutputTokens、compressionMode
+- **禁止运行中修改的字段**：protocol、tools、cache、reasoning responseFields 等协议正确性字段
+- **Snapshot 规则**：已启动的 async run 使用创建时的 policy snapshot，不受后续 CLI 变更影响
+
+### LLM 协议适配器 (`llm-adapter.ts`)
+
+- **接口抽象**：`LLMRequestAdapter` 统一处理消息准备、请求构建、响应解析、streaming 聚合
+- **OpenAI Chat Completions Adapter**：`createOpenAIChatCompletionsAdapter(policy)` 实现第一版完整适配
+- **消息准备**：`prepareMessages()` 补充 reasoning_content 占位（Kimi 等模型需要）
+- **请求构建**：`buildRequest()` 处理 max_tokens vs max_completion_tokens 字段差异、extraBody 注入
+- **响应解析**：`parseNonStreamingResponse()` 提取 assistantMessage / reasoning / usage
+- **Streaming 聚合**：`parseStreamingChunk()` / `finishStreaming()` 聚合 content + tool_calls + reasoning delta
+- **Anthropic Adapter 占位**：未实现时返回 unsupported guard，不阻断启动
+
+### 稳定上下文管理器 (`stable-context.ts`)
+
+- **Stable Snapshot 缓存**：stable pack 在首次 `buildMessages()` 时构建一次并缓存渲染后的字符串；后续调用直接复用缓存，确保 prompt cache 前缀字节级稳定
+- **显式失效机制**：`pinPath()`、`unpinPath()`、`rebuildRepoMap()`、`invalidateStableSnapshot()` 触发重建；`notifyFileChanged()` 在文件工具写/编辑成功后检查是否命中 pinned path，命中则 invalidate；`currentQuery`、`recentFiles`、`failingFiles`、`mtime`、`git diff` 永远不进入 stable
+- **预算锁定**：stable 预算在 snapshot 创建时锁定；如果用户调小预算导致放不下，触发重建而非静默裁剪
+- **Working Set Pack**：每轮重新构建，使用 ContextRanker + 动态信号（query/evidence）选择文件
+- **Evidence Pack**：动态证据（diff、test failure、tool output），靠近 current query，不污染稳定前缀
+- **Repo Map**：目录结构 + 关键配置文件列表，排除 `node_modules`、`.git`、二进制和敏感文件
+- **Pin 文件管理**：`/c 加 <path>` / `/c 删 <path>`，按路径排序保证确定性顺序；pin/unpin 自动失效 stable snapshot
+- **预算裁剪**：working set 先预估 token 再读取，超预算时截断而非整体丢弃；stable pack 不与 working set 重复装载
+- **Hash 稳定性**：文件未变化时 content hash 不变，cache key 稳定
+- **安全边界**：只读取 projectRoot 内文件，不暴露 agentHome 内部路径
+- **通用排序增强**：集成 ContextRanker，working set 使用 ranker 选择而非硬编码；stable pack 不使用动态信号；manifest 输出 rank reasons
+- **CLI 增强**：`/c 刷` 显式失效 stable snapshot；`/c 排` 显示 top ranked files；`/c why <path>` / `/c 因 <path>` 显示文件评分和原因
+
+### 通用内容重要性排序器 (`context-ranking.ts`)
+
+- **四层分离设计**：FileInventory（文件事实）→ RepoClassifier（生态分类）→ TaskIntentClassifier（任务意图）→ ContextRanker（多维度评分）
+- **FileInventory**：递归扫描项目目录，收集路径/大小/mtime/扩展名/角色/生态；排除 node_modules/.git/dist/build/coverage/binary/secret/.env/doc/todo.md/symlink
+- **文件角色识别**：通用角色（project_instruction/readme/project_summary/design_doc/manifest/build_config/entrypoint/source/test/schema/infra/ci_config/generated/secret），不依赖特定生态
+- **RepoClassifier**：manifest + 文件分布 + 目录结构组合判断；支持 typescript/javascript/python/rust/go/java/kotlin/cpp/infra/docs/mixed/unknown；mixed repo 识别 package roots
+- **TaskIntentClassifier**：关键词匹配 + evidence 信号推断；支持 orientation/implementation/debug/review/testing/documentation/refactor/unknown；提取 mentioned paths/terms/design doc IDs
+- **多维度评分**：8 个独立评分函数，每个分数都有 ScoreReason 解释
+  - roleScore (0..500)：通用角色基线
+  - ecosystemScore (0..350)：生态 profile 加分（只在 repo classifier 匹配后生效）
+  - taskRelevanceScore (0..700)：query 命中、路径/术语/设计文档 ID 匹配
+  - evidenceScore (0..900)：stack trace/failing test/git modified/recent read/open file
+  - graphScore (0..400)：import graph、test/source 配对、中心 config
+  - recencyScore (0..250)：mtime 衰减（不影响 stable pack）
+  - userSignalScore (0..1000)：用户显式 pin/open/query 提到
+  - noisePenalty (0..-1200)：generated/minified/binary/secret/large file/forbidden path
+- **轻量 import graph**：TS/JS/Python/Rust 简单字符串匹配；处理 TypeScript ESM `.js` → `.ts` 扩展名映射；test/source 配对
+- **Deterministic 排序**：score desc → normalized path asc
+- **安全边界**：`.env`/密钥/二进制永不自动读；doc/todo.md 永不自动读；symlink 跳过；projectRoot 外路径拒绝
+- **与 StableContextManager 集成**：`createStableContextManager` 接受可选 `ContextRanker` 参数；`buildMessages` 升级为接收 `BuildMessagesInput` 对象（兼容旧 string API）；新增 `getRankedFiles()`/`getRepoClassification()`/`explainFile()` 方法
+- **CLI 增强**：`/c 排` 显示 top ranked files；`/c why <path>` / `/c 因 <path>` 显示文件评分和原因
+
 ### LLM Provider Profile 抽象层 (`llm-providers.ts`)
 
 - **集中 profile 表**：声明 4 个 provider（`openai_compatible`、`minimax_cn`、`kimi_platform_cn`、`kimi_code_cn`）的默认 endpoint、默认模型、key 环境变量和能力标记
@@ -321,8 +527,10 @@ skills/
 - **不做任何截断**：消息内容、工具参数、tool_call arguments 全部完整保留
 - **新增 Cache Debug 记录**：systemPromptHash、toolsHash、stablePrefixHash、变化标记
 - **格式化为易读结构**：角色标签对齐、JSON 美化、缩进
-- **文件策略**：固定写入 `<agentHome>/logs/llm.log`，每次启动追加 BOOT 标记；默认单文件超过 5MB 时轮转为 `llm.log.1`、`llm.log.2` 等，默认保留 5 份；默认路径是 `~/.learn-claude-code-ts/logs/llm.log`，不是项目根目录的 `logs/llm.log`
+- **文件策略**：固定写入 `<agentHome>/logs/llm.log`，每次启动追加 BOOT 标记；默认单文件超过 5MB 时轮转为 `llm.log.1`、`llm.log.2` 等，默认保留 5 份；默认路径是 `~/.swoopcode/logs/llm.log`，不是项目根目录的 `logs/llm.log`
 - **请求-响应成对**：每组用空行 + 分隔线隔开
+- **Usage 记录**：响应日志中记录 prompt/completion/total/reasoning/cache hit/cache miss 等字段
+- **Reasoning 截断**：reasoning_content 日志默认只显示前 200 字符
 
 ### 消息标准化 (`normalize.ts`)
 
@@ -331,6 +539,8 @@ skills/
 - **补全/移动 tool_result**：每个 assistant 的 tool_call 都必须有对应 tool 消息；缺失则在该 assistant 后插入占位消息，位置错误的 tool_result 会被移动回对应 tool block
 - **丢弃孤立 tool_result**：没有任何 assistant tool_call 引用的 role=tool 消息不会进入最终 LLM 输入
 - **合并连续同角色消息**：将 user+user 或普通 assistant+assistant 合并为一条；带 `tool_calls` 的 assistant 不参与合并
+- **保留 provider 字段**：`reasoning_content`、`reasoning_details` 等 provider-specific 顶层字段不会被误删
+- **内部字段仍清理**：`_turnIndex/_loopRound/_loopIndex/_messageSequence/_round` 在 `flattenToMessages()` 中清除，不发给 LLM
 
 ### 工具系统 (`tools/`)
 
@@ -519,48 +729,76 @@ skills/
 | `COMPRESS_MAX_CONTEXT`     | 全量压缩 token 阈值                 | `80000`                       |
 | `COMPACT_KEEP_RECENT`      | 全量压缩保留消息块数                | `4`                           |
 | `AGENT_PROJECT_ROOT`       | 被操作项目根目录                    | 当前启动目录                  |
-| `AGENT_HOME`               | Agent 全局运行根目录                | `~/.learn-claude-code-ts`     |
+| `AGENT_HOME`               | Agent 全局运行根目录                | `~/.swoopcode`                |
 | `MEMORY_DIR`               | Memory 文件目录名（相对 agentHome） | `memory`                      |
+| `LLM_MODEL_PROFILE`        | 显式指定模型 profile                | `kimi-k2.6`                   |
+| `LLM_CONTEXT_BUDGET`       | 上下文预算覆盖（token 数）          | `180000`                      |
+| `LLM_THINKING`             | Thinking 模式覆盖                   | `enabled/disabled/adaptive`   |
+| `LLM_REASONING_EFFORT`     | Reasoning effort 覆盖               | `high/max/default`            |
+| `LLM_MAX_OUTPUT_TOKENS`    | 最大输出 token 覆盖                 | `32768`                       |
+| `LLM_PROTOCOL`             | 协议选择覆盖                        | `openai-chat-completions`     |
 
 ## 测试覆盖
 
-| 测试文件                       | 测试数 | 覆盖内容                                                                                                               |
-| ------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `src/tools/bash.test.ts`       | 24     | 危险命令拦截、正常执行、错误处理、非交互命令策略                                                                       |
-| `src/tools/files.test.ts`      | 23     | 路径安全检查、读写文件、编辑替换、精确编辑                                                                             |
-| `src/normalize.test.ts`        | 17     | 纯函数转换、元数据过滤、tool_result 邻接补全/移动、孤立 tool_result 丢弃、assistant tool_call 合并边界                 |
-| `src/history.test.ts`          | 22     | 增删、返回副本、清空、add 带 timing meta、messageSequence、getEntries、getSystemPrompt                                |
-| `src/logger.test.ts`           | 2      | 日志级别过滤、agent.log 轮转                                                                                          |
-| `src/llm-logger.test.ts`       | 1      | llm.log 轮转且保留 BOOT 历史                                                                                           |
-| `src/atomic-write.test.ts`     | 3      | 文本/JSON 原子写入、JSON 序列化失败不破坏旧文件                                                                        |
-| `src/todo.test.ts`             | 34     | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程                                                         |
-| `src/tools/subagent.test.ts`   | 17     | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表、async run 提示                                    |
-| `src/skills.test.ts`           | 25     | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量                                |
-| `src/message-block.test.ts`    | 29     | 消息块分组、normalized tool block、还原、内部 timing 字段传递与清除、round-trip 一致性、token 估算                    |
-| `src/compressor.test.ts`       | 26     | 衰减压缩、loopIndex 年龄判断、即时压缩（含非压缩工具通过）、OutputStore 输出句柄、全量压缩、状态管理、cleanup        |
-| `src/permission.test.ts`       | 74     | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory/async-run 权限   |
-| `src/hooks.test.ts`            | 11     | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner                                                    |
-| `src/agent.test.ts`            | 22     | SessionStart 注入/单次触发、时间语义、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call LLM 输入顺序、错误恢复、Transcript |
-| `src/memory.test.ts`           | 40     | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar        |
-| `src/tools/memory.test.ts`     | 2      | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复                                                       |
-| `src/tools/registry.test.ts`   | 11     | 重复注册报错、工具定义顺序稳定性、完整 registry 创建、过滤选项、OutputStore 注册                                      |
-| `src/async-runs.test.ts`       | 32     | start 校验、finishRun 生命周期、timeout、深拷贝、冲突检测、notification drain、readOutput、OutputStore 输出登记       |
-| `src/tools/async-runs.test.ts` | 16     | 4 个工具定义、参数校验、JSON 输出格式、错误传播、output_id 展示                                                       |
-| `src/execution-policy.test.ts` | 12     | readonly/ci/workspace_write profile、命令白名单、资源边界                                                             |
-| `src/output-store.test.ts`     | 7      | output_id 生成、index 校验、分片读取、路径边界                                                                         |
-| `src/tools/output.test.ts`     | 4      | run_output_read 参数校验、分片读取、错误传播                                                                           |
-| `src/schedule-store.test.ts`   | 33     | Schedule 文件/occurrence 校验、当前项目默认过滤、跨项目显式列表、索引重建、occurrence 排序和 limit                    |
-| `src/schedules.test.ts`        | 28     | ScheduleManager 创建/触发/取消/删除、当前项目触发边界、orphaned 重启收敛、orphaned 后 overlap 不阻塞、async finish 回写、nextRunAt 计算           |
-| `src/tools/schedules.test.ts`  | 4      | 6 个 Schedule 工具定义、未实现字段不暴露、current_project_only 透传、创建时固定当前实现策略默认值                     |
-| `src/system-prompt.test.ts`    | 20     | buildSystemPrompt 组合、AGENTS.md 项目指令头、snapshot 稳定性、refreshSnapshot、ignore memory reminder                 |
-| `src/session-events.test.ts`   | 5      | drain 清空、peek 不清空、顺序保持                                                                                      |
-| `src/transcript.test.ts`       | 6      | 消息分类、事件 sequence、historySequence、timing 元信息、搜索                                                          |
-| `src/cache-debug.test.ts`      | 7      | inspect 变化检测、system prompt 不变性、formatCacheDebugLog                                                            |
-| `src/llm-providers.test.ts`    | 26     | provider 解析、默认值、覆盖优先级、错误提示、能力标记                                                                  |
-| `src/config.test.ts`           | 5      | loadConfig 解析 provider 字段、compression/logLevel 默认值、错误信息不泄漏 key                                         |
-| `src/llm.test.ts`              | 10     | non-streaming 路径、streaming content/tool_calls 聚合、llmLogger 调用                                                  |
-| `src/cli-commands.test.ts`     | 5      | /task 命令分发、/schedule list 当前项目默认和 --all-projects 跨项目摘要参数                                            |
-| `src/index.test.ts`            | 1      | 占位                                                                                                                   |
+| 测试文件                                                       | 测试数                        | 覆盖内容                                                                                                                                                                                                                   |
+| -------------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/tools/bash.test.ts`                                       | 24                            | 危险命令拦截、正常执行、错误处理、非交互命令策略                                                                                                                                                                           |
+| `src/tools/files.test.ts`                                      | 23                            | 路径安全检查、读写文件、编辑替换、精确编辑                                                                                                                                                                                 |
+| `src/normalize.test.ts`                                        | 17                            | 纯函数转换、元数据过滤、tool_result 邻接补全/移动、孤立 tool_result 丢弃、assistant tool_call 合并边界                                                                                                                     |
+| `src/history.test.ts`                                          | 22                            | 增删、返回副本、清空、add 带 timing meta、messageSequence、getEntries、getSystemPrompt                                                                                                                                     |
+| `src/logger.test.ts`                                           | 2                             | 日志级别过滤、agent.log 轮转                                                                                                                                                                                               |
+| `src/llm-logger.test.ts`                                       | 1                             | llm.log 轮转且保留 BOOT 历史                                                                                                                                                                                               |
+| `src/atomic-write.test.ts`                                     | 3                             | 文本/JSON 原子写入、JSON 序列化失败不破坏旧文件                                                                                                                                                                            |
+| `src/todo.test.ts`                                             | 34                            | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程                                                                                                                                                             |
+| `src/tools/subagent.test.ts`                                   | 17                            | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表、async run 提示                                                                                                                                        |
+| `src/skills.test.ts`                                           | 25                            | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量                                                                                                                                    |
+| `src/message-block.test.ts`                                    | 29                            | 消息块分组、normalized tool block、还原、内部 timing 字段传递与清除、round-trip 一致性、token 估算                                                                                                                         |
+| `src/compressor.test.ts`                                       | 26                            | 衰减压缩、loopIndex 年龄判断、即时压缩（含非压缩工具通过）、OutputStore 输出句柄、全量压缩、状态管理、cleanup                                                                                                              |
+| `src/permission.test.ts`                                       | 74                            | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承、memory/async-run 权限                                                                                                       |
+| `src/hooks.test.ts`                                            | 11                            | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner                                                                                                                                                        |
+| `src/agent.test.ts`                                            | 22                            | SessionStart 注入/单次触发、时间语义、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call LLM 输入顺序、错误恢复、Transcript                                                                                              |
+| `src/memory.test.ts`                                           | 40                            | name 校验、type 校验、frontmatter 解析/序列化、scan/list/read/delete、索引重建、buildPromptSection、findSimilar                                                                                                            |
+| `src/tools/memory.test.ts`                                     | 2                             | run_memory_create 默认阻止疑似重复、allow_duplicate 显式允许重复                                                                                                                                                           |
+| `src/tools/registry.test.ts`                                   | 11                            | 重复注册报错、工具定义顺序稳定性、完整 registry 创建、过滤选项、OutputStore 注册                                                                                                                                           |
+| `src/async-runs.test.ts`                                       | 32                            | start 校验、finishRun 生命周期、timeout、深拷贝、冲突检测、notification drain、readOutput、OutputStore 输出登记                                                                                                            |
+| `src/tools/async-runs.test.ts`                                 | 16                            | 4 个工具定义、参数校验、JSON 输出格式、错误传播、output_id 展示                                                                                                                                                            |
+| `src/eval/runner.test.ts`                                      | 9                             | fake driver 无工具 case、in-process driver 无工具 case、fake tool call case、多 query history 复用、断言失败、workspace initial files、case id 校验、judge 集成（result + trace）、full-tools keepOnFailure 保留 agentHome |
+| `src/eval/cases/replay-suite.test.ts`                          | 2                             | replay fixture 读取、caseId 校验、ScriptedLLM 路径复用                                                                                                                                                                     |
+| `src/eval/replay/replay-llm.test.ts`                           | 4                             | fixture version mismatch、caseId mismatch、文件不存在、JSON 解析失败                                                                                                                                                       |
+| `src/eval/judge/judge-suite.test.ts`                           | 6                             | judge 正常评分通过、JSON 解析失败 fallback、hard assertions 失败时 judge 仍运行、rubric 传入、score 边界                                                                                                                   |
+| `src/eval/drivers/learn-claude-code/full-tool-runtime.test.ts` | 6                             | full runtime 临时 agentHome 目录、enabledTools 过滤、完整工具注册、seed skill、seed memory、cleanup 放弃 running async run                                                                                                 |
+| `src/eval/mcp/fixture-server.test.ts`                          | 3 skipped                     | MCP fixture protocol harness 草案（当前 skip，避免误读为真实 MCP runtime 已完成）                                                                                                                                          |
+| `src/eval/mcp/mcp-suite.test.ts`                               | 5 skipped                     | fixture tool call、resource read、error recovery、tool timeout、server crash 草案（当前 skip，避免误读为真实 MCP 功能）                                                                                                    |
+| `src/eval/team/team-assertions.test.ts`                        | 1 skipped                     | Team 事件筛选与按 agent 分组工具调用 helper 草案（当前 skip，避免误读为真实 Team runtime 已完成）                                                                                                                          |
+| `src/eval/team/team-suite.test.ts`                             | 5 skipped                     | review-and-fix、readonly analysis、member failure、permission inheritance、Team MCP delegation 草案（当前 skip，避免误读为真实 Team 功能）                                                                                 |
+| `src/eval/live/live-suite.test.ts`                             | 2                             | live LLM wrapper 事件发射、maxCalls 限制（默认 skip，需 `EVAL_LIVE=1`）                                                                                                                                                    |
+| `src/eval/live/live-regression-suite.test.ts`                  | 6                             | 读结构化文件、写入 sentinel 报告、编辑保留内容、只读 bash、权限拒绝、多轮上下文共享（默认 skip，需 `EVAL_LIVE_REGRESSION=1`）；5 个 case 内置 judge rubric，`EVAL_JUDGE=1` 启用                                            |
+| `src/eval/live/live-full-suite.test.ts`                        | 4 release + 3 nightly skipped | TODO 文件修改、confirmed Memory 创建/读回、seed Skill 输出、SubAgent 只读分析（默认 skip，需 `EVAL_LIVE_FULL=1`）；Nightly 预留 Task/Async/Schedule                                                                        |
+| `src/eval/live/live-mcp-suite.test.ts`                         | 3 skipped                     | 真实 LLM + MCP fixture harness 草案（当前无条件 skip，待真实 MCP runtime 后恢复）                                                                                                                                          |
+| `src/eval/live/live-team-suite.test.ts`                        | 2 skipped                     | 真实 LLM + Team harness / Team+MCP mixed 草案（当前无条件 skip，待真实 Team runtime 后恢复）                                                                                                                               |
+| `src/execution-policy.test.ts`                                 | 12                            | readonly/ci/workspace_write profile、命令白名单、资源边界                                                                                                                                                                  |
+| `src/output-store.test.ts`                                     | 7                             | output_id 生成、index 校验、分片读取、路径边界                                                                                                                                                                             |
+| `src/tools/output.test.ts`                                     | 4                             | run_output_read 参数校验、分片读取、错误传播                                                                                                                                                                               |
+| `src/schedule-store.test.ts`                                   | 33                            | Schedule 文件/occurrence 校验、当前项目默认过滤、跨项目显式列表、索引重建、occurrence 排序和 limit                                                                                                                         |
+| `src/schedules.test.ts`                                        | 28                            | ScheduleManager 创建/触发/取消/删除、当前项目触发边界、orphaned 重启收敛、orphaned 后 overlap 不阻塞、async finish 回写、nextRunAt 计算                                                                                    |
+| `src/tools/schedules.test.ts`                                  | 4                             | 6 个 Schedule 工具定义、未实现字段不暴露、current_project_only 透传、创建时固定当前实现策略默认值                                                                                                                          |
+| `src/system-prompt.test.ts`                                    | 20                            | buildSystemPrompt 组合、AGENTS.md 项目指令头、snapshot 稳定性、refreshSnapshot、ignore memory reminder                                                                                                                     |
+| `src/session-events.test.ts`                                   | 5                             | drain 清空、peek 不清空、顺序保持                                                                                                                                                                                          |
+| `src/transcript.test.ts`                                       | 6                             | 消息分类、事件 sequence、historySequence、timing 元信息、搜索                                                                                                                                                              |
+| `src/cache-debug.test.ts`                                      | 7                             | inspect 变化检测、system prompt 不变性、formatCacheDebugLog                                                                                                                                                                |
+| `src/llm-providers.test.ts`                                    | 26                            | provider 解析、默认值、覆盖优先级、错误提示、能力标记                                                                                                                                                                      |
+| `src/config.test.ts`                                           | 5                             | loadConfig 解析 provider 字段、compression/logLevel 默认值、错误信息不泄漏 key                                                                                                                                             |
+| `src/llm.test.ts`                                              | 10                            | non-streaming 路径、streaming content/tool_calls 聚合、llmLogger 调用                                                                                                                                                      |
+| `src/foundation-models.test.ts`                                | 14                            | Profile 注册表、exact/prefix/fallback 匹配、provider 兼容校验、显式 profile、stale warning                                                                                                                                 |
+| `src/runtime-policy.test.ts`                                   | 19                            | Policy 默认值、env 覆盖、非法覆盖报错、协议 fallback、compression 派生                                                                                                                                                     |
+| `src/context-budget.test.ts`                                   | 9                             | 三种模式预算分配、总和约束、override 处理、裁剪优先级、极小预算边界                                                                                                                                                        |
+| `src/runtime-policy-store.test.ts`                             | 15                            | Override 合并、reset、snapshot、非法更新报错                                                                                                                                                                               |
+| `src/llm-adapter.test.ts`                                      | 15                            | 请求构建、reasoning 占位、streaming 聚合、max token 字段、usage 解析                                                                                                                                                       |
+| `src/stable-context.test.ts`                                   | 36                            | Repo map、pin/unpin、buildMessages、预算裁剪、hash 稳定性、安全边界、ContextRanker 集成、stable pack 隔离、stable snapshot 缓存、notifyFileChanged                                                                         |
+| `src/context-ranking.test.ts`                                  | 82                            | 文件角色识别、生态识别、Repo 分类（TS/Python/Rust/Go/docs/infra/mixed）、任务意图、多维度评分、排序、文件扫描、import graph、完整 fixture                                                                                  |
+| `src/cli-commands.test.ts`                                     | 22                            | /task /schedule /m /t /c 命令分发、中文参数、非法值报错、/c 排 /c why 排序命令                                                                                                                                             |
+| `src/config.test.ts`                                           | 5                             | loadConfig 解析 provider 字段、policy 解析链、compression/logLevel 默认值                                                                                                                                                  |
+| `src/index.test.ts`                                            | 1                             | 占位                                                                                                                                                                                                                       |
 
 ## 设计模式
 
@@ -579,6 +817,7 @@ skills/
 - **动态状态变化走消息**：mode 切换、memory reload、skill re-scan 等变化通过 `sessionEventBuffer` 以 user message 形式注入，不修改 system prompt
 - **工具定义稳定性**：`ToolRegistry` 通过 `orderedEntries` 保证顺序稳定，重复注册报错，不因 mode 动态删减工具
 - **Cache-safe fork**：子智能体复用父级 stable system prompt，工具定义保持稳定，执行层限制能力而非删除工具定义
+- **Stable Snapshot 缓存**：`StableContextManager` 将 stable pack 渲染后的字符串缓存为会话级快照，只在 pin/unpin/rebuild/invalidate 时失效重建；`currentQuery`、`recentFiles`、`mtime`、`git diff` 等动态信号永远不进入 stable，确保 prompt cache 前缀字节级稳定
 
 ## 重构经验
 
@@ -656,8 +895,12 @@ skills/
 
 （按需在后续 lesson 中实现，完成后更新此列表）
 
-- 流式输出（streaming response）
 - 更丰富的工具集（grep、glob、web fetch 等）
 - Skill 脚本执行支持（dependencies 字段、base path 引用脚本）
 - 用户级 skill 目录（`~/.claude/skills/`）
 - 对话创建 skill（LLM 自动在 skills/ 下创建目录和 SKILL.md）
+- Anthropic Messages Adapter（MiniMax M3 / Qwen3.7 等模型的 Anthropic-compatible 入口）
+- Task Shape Classifier（按请求类型自动调整 thinking 与 context budget）
+- 多模型路由（主模型、cheap subagent、verifier 分开配置）
+- 多模态 Tool Result（text/image/video blocks）
+- 成本感知调度（根据 usage 做预算提示）
