@@ -198,7 +198,7 @@ mark {
 
 .site-header__inner {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   width: 100%;
   max-width: var(--layout-max);
@@ -209,9 +209,21 @@ mark {
 
 .site-title {
   display: inline-flex;
-  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
   color: var(--color-text);
   border-bottom: 0;
+}
+
+.site-title__logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+}
+
+.site-title__text {
+  display: inline-flex;
+  flex-direction: column;
 }
 
 .site-title__main {

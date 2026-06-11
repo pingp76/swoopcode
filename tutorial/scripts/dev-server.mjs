@@ -56,6 +56,12 @@ function resolveRequestPath(requestUrl) {
     return absoluteSourcePath;
   }
 
+  if (pathname === "/logo.png") {
+    // 教程站点仍以 tutorial/ 为静态根目录；logo 是项目级品牌资产，
+    // 因此只额外暴露这个单文件路由，而不是放开整个仓库根目录。
+    return resolve(repoRootDir, "logo.png");
+  }
+
   // 静态服务器最重要的安全边界：请求路径必须被限制在 tutorial 根目录内。
   // normalize 会收敛 ../ 片段，resolve 后再做 startsWith 检查，避免路径逃逸。
   const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);

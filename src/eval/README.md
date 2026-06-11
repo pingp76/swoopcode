@@ -492,7 +492,7 @@ npm run test:eval
 npx vitest run src/eval/cases/replay-suite.test.ts
 
 # Live smoke（需要 EVAL_LIVE=1 和 API key）
-npm run test:eval:live
+EVAL_LIVE=1 npm run test:eval:live
 
 # Live regression（需要 EVAL_LIVE_REGRESSION=1）
 EVAL_LIVE_REGRESSION=1 npm run test:eval:live:regression

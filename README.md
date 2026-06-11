@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./logo.png" alt="Swoop Code logo" width="160" />
+</p>
+
 # Swoop Code
 
 ## 致谢
@@ -104,6 +108,31 @@ npm run format:check   # 检查格式
 npx vitest run src/path/to/file.test.ts
 ```
 
+## 文档与教程
+
+如果你是第一次阅读 Swoop Code，建议先从 [网页教程](./tutorial/README.md) 开始。教程按 agent loop 的演进顺序组织，从最小主循环、工具调用、TODO、SubAgent、Skill、上下文压缩、权限、Hook、Memory，一直讲到异步运行、定时任务、模型适配和 Eval。它更适合学生顺着“为什么需要这个模块”一路读下去。
+
+如果你已经理解基本概念，想看更完整的工程设计，请读 [设计文档索引](./doc/README.md) 和 [项目状态总览](./doc/summary.md)。PDD 保留了更多设计取舍、接口草案和验收边界，适合用来复现实现或参与贡献。Eval 相关细节则集中在 [Eval 系统说明](./src/eval/README.md)。
+
+- [网页教程](./tutorial/README.md)：面向中文新手的 coding agent 教程，推荐作为第一入口。
+- [设计文档索引](./doc/README.md)：公开版 PDD 文档入口，适合深入理解每个模块的设计。
+- [项目状态总览](./doc/summary.md)：当前已实现模块和架构状态。
+- [Eval 系统说明](./src/eval/README.md)：评测 harness 的使用说明。
+- [贡献指南](./CONTRIBUTING.md)：参与开发、文档和 eval 贡献前建议先读。
+- [安全策略](./SECURITY.md)：安全问题报告方式和敏感数据处理建议。
+
+启动网页教程：
+
+```bash
+npm run tutorial:dev
+```
+
+默认访问：
+
+```text
+http://127.0.0.1:5173
+```
+
 ## 端到端集成测试
 
 `swoopcode` 不只依赖普通单元测试，也内置了面向 coding agent 的 Eval Harness，用来验证一次完整任务从用户输入、LLM 决策、工具调用、权限处理、文件副作用到最终回复的端到端行为。
@@ -133,7 +162,7 @@ npx vitest run src/eval/cases/replay-suite.test.ts
 Live 测试默认不会运行，需要显式设置环境变量，并且需要 `.env` 中已有可用的 LLM 配置。
 
 ```bash
-# Live smoke：少量真实模型冒烟 case
+# 可选 Live smoke：少量真实模型冒烟 case，开关仍然有效，但不是主要回归入口
 EVAL_LIVE=1 npm run test:eval:live
 
 # Live regression：覆盖 read/write/edit/bash/permission/multi-turn 等 core tools
@@ -171,27 +200,6 @@ EVAL_LIVE_TEAM=1 EVAL_LIVE_MCP=1 npm run test:eval:live:team:mcp
 ```
 
 更完整的 case 说明、trace 输出和 driver 设计请阅读 [src/eval/README.md](./src/eval/README.md)。
-
-## 文档与教程
-
-- [项目状态总览](./doc/summary.md)：当前已实现模块和架构状态。
-- [设计文档索引](./doc/README.md)：公开版 PDD 文档入口。
-- [网页教程](./tutorial/README.md)：面向中文新手的 coding agent 教程。
-- [Eval 系统说明](./src/eval/README.md)：评测 harness 的使用说明。
-- [贡献指南](./CONTRIBUTING.md)：参与开发、文档和 eval 贡献前建议先读。
-- [安全策略](./SECURITY.md)：安全问题报告方式和敏感数据处理建议。
-
-启动网页教程：
-
-```bash
-npm run tutorial:dev
-```
-
-默认访问：
-
-```text
-http://127.0.0.1:5173
-```
 
 ## 目录结构
 
