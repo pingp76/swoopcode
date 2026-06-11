@@ -1,0 +1,385 @@
+<p class="article__eyebrow">第 04 章 · 委托与隔离</p>
+<h1 class="article__title">让 Agent 学会分身：SubAgent</h1>
+<p class="article__lede">
+  SubAgent 让主 agent 可以把局部问题交给一个隔离上下文的小
+  agent。它看起来像多智能体，其实第一版只需要把“委托”做成一个受控工具。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="known-and-unknown">你已经知道什么，还不知道什么</h2>
+<p>
+  你已经有工具、TODO 和主 loop。现在要解决的问题不是“怎么让 agent
+  更聪明”，而是“怎么让它在不污染主上下文的情况下做局部探索”。
+</p>
+<p>
+  SubAgent 的关键直觉是：它本质上是一个工具。主 agent 调用
+  <code>run_subagent</code>，传入任务；harness 创建 child agent，给它独立
+  History 和受限工具集，最后把结果作为 tool result 返回父 agent。
+</p>
+
+<h2 id="study-path">本章怎么学</h2>
+<p>先从本章场景和朴素方案进入问题，不急着记函数名。</p>
+<p>
+  再用 loop 位置和架构图建立心智模型：新增模块到底改变了哪条数据流或状态流。
+</p>
+<p>
+  最后再看接口、源码地图和验证方法，把概念压缩成能交给 coding agent 的 Prompt
+  Card。
+</p>
+
+<h2 id="scene">本章场景</h2>
+<p>
+  用户要求：“帮我 review 这次重构的风险。”主 agent
+  可能需要读取多处文件、比较设计文档、整理发现。如果这些探索细节全部进入主
+  History，主上下文会迅速膨胀。
+</p>
+<p>
+  更好的做法是让主 agent 委托一个 review 子智能体：child
+  独立搜集证据，最后只把结论和引用返回给父 agent。
+</p>
+
+<h2 id="naive">先试一个朴素方案</h2>
+<p>
+  朴素做法是在主 loop 里递归调用 <code>createAgent()</code>，并把父 agent
+  的所有依赖原样传进去。甚至允许 child 再调用 run_subagent。
+</p>
+<p>
+  这会很快失控：上下文递归、权限扩大、工具循环、父子 History 混在一起。SubAgent
+  必须从第一天就被看作“受控工具”，而不是随便复制一个完整 agent。
+</p>
+<pre class="code-block"><code>async function runSubagent(task) {
+  const child = createAgent(parentDependencies);
+  return child.run(task);
+}</code></pre>
+
+<h2 id="why-naive-fails">朴素方案为什么不够</h2>
+<dl class="defs">
+  <dt>递归调用失控</dt>
+  <dd>
+    如果 child 也能调用
+    run_subagent，很容易形成树状爆炸，成本、时间和上下文都不可控。
+  </dd>
+
+  <dt>权限被无意扩大</dt>
+  <dd>
+    父 agent 在 default 模式下可写文件，不代表 child 做分析时也应该拥有写权限。
+  </dd>
+
+  <dt>父子上下文污染</dt>
+  <dd>
+    child 的探索过程如果直接写入父
+    History，会让主对话变长，也会混淆谁观察了什么。
+  </dd>
+</dl>
+
+<h2 id="loop">回到 Agent Loop</h2>
+<p>
+  SubAgent 插在工具执行层：对父 agent 来说，<code>run_subagent</code>
+  只是一个普通工具调用；对 harness 来说，它会启动一段新的 agent loop。
+</p>
+<p>
+  这个 child loop 可以复用稳定 system prompt snapshot，但必须拥有独立
+  History、独立 maxRounds 和经过过滤的 registry。最终返回父 agent
+  的只是一段总结性 tool result。
+</p>
+
+<h2 id="architecture">架构图解</h2>
+<figure class="figure">
+  <div class="flow-map" role="img" aria-label="父 Agent 调用 SubAgent 的关系">
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Parent Agent</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node flow-node--accent">SubAgent Tool</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Child Agent</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Stable Snapshot</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Child History</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Filtered Registry</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Child Result</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">tool_result</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Parent History</span>
+    </div>
+  </div>
+  <figcaption>
+    图 04-1 · SubAgent 是父 loop 里的工具，但它内部拥有独立 loop。
+  </figcaption>
+</figure>
+
+<h2 id="from-principle-to-code">从原理落到代码</h2>
+<p>
+  到这里已经有了场景、失败原因和架构图。下面才进入实现层：只抓住接口形状、状态边界和源码入口。
+</p>
+<p>
+  读源码时先找入口函数，再找它读写的状态，最后看测试如何证明这些状态变化是真的发生了。
+</p>
+
+<h2 id="walkthrough">一次真实运行 walkthrough</h2>
+<ol>
+  <li>
+    父 agent 判断当前任务适合委托，返回 <code>run_subagent</code> tool call。
+  </li>
+  <li>ToolRegistry 找到 subagent 工具，权限层确认是否允许启动 child。</li>
+  <li>SubAgent 工具创建 child History，不复用父 History 的可变内容。</li>
+  <li>组装 child registry，过滤掉 run_subagent 等可能导致递归的工具。</li>
+  <li>child agent 在自己的 maxRounds 内完成读取、分析或总结。</li>
+  <li>child 的最终回答被包装成父 agent 的 tool result。</li>
+  <li>父 agent 看到这个结果后，继续生成给用户的最终回复或下一步动作。</li>
+</ol>
+
+<h2 id="interfaces">关键接口和伪码</h2>
+<p>
+  SubAgent 的接口要非常克制。父 agent 只传任务文本和少量配置；child
+  不能拿到父内部所有状态的可变引用。
+</p>
+<pre class="code-block"><code>interface SubagentRequest {
+  task: string;
+  maxRounds?: number;
+  readonly?: boolean;
+}
+
+async function runSubagent(request: SubagentRequest): Promise&lt;ToolResult&gt; {
+  const childHistory = createHistory();
+  const childRegistry = createReadonlyRegistry();
+  const child = createAgent({
+    history: childHistory,
+    tools: childRegistry,
+    stablePrompt: parentStablePromptSnapshot,
+    maxRounds: request.maxRounds ?? 6,
+  });
+
+  const answer = await child.run(request.task);
+  return { output: answer };
+}</code></pre>
+
+<h2 id="source-map">源码地图</h2>
+<p>
+  先看 subagent 工具如何创建 child，再看 registry 过滤。不要把它和后续 Async Run
+  混淆：SubAgent 是同步工具调用，Async Run 是后台运行实例。
+</p>
+<div class="source-links" aria-label="04 章源码阅读路线">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/tools/subagent.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/tools/subagent.ts</code> · SubAgent 工具入口
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/tools/subagent.test.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/tools/subagent.test.ts</code> · 过滤与 maxRounds 测试
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/agent.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/agent.ts</code> · 父 agent 如何接收 subagent tool_result
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/system-prompt.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/system-prompt.ts</code> · 稳定 prompt snapshot 的复用边界
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/session.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/session.ts</code> · parentSessionId / child session 关系
+  </a>
+</div>
+
+<h2 id="design">设计直觉</h2>
+<p>
+  SubAgent 的目标不是炫技，而是控制上下文污染。主 agent 需要结果，不一定需要
+  child 的每一步思考和观察。
+</p>
+<p>
+  把 SubAgent 做成工具，可以复用工具调用、权限、History
+  配对和测试框架，同时把递归与权限收窄放在同一个边界上处理。
+</p>
+
+<h2 id="split">架构拆分</h2>
+<dl class="defs">
+  <dt>Parent Agent</dt>
+  <dd>决定是否委托，并把 child 结果纳入自己的下一轮推理。</dd>
+
+  <dt>SubAgent Tool</dt>
+  <dd>负责创建 child agent、过滤工具、运行并包装结果。</dd>
+
+  <dt>Child Agent</dt>
+  <dd>拥有独立 History 和 maxRounds，只执行被委托的局部任务。</dd>
+</dl>
+
+<h2 id="state-boundary">状态与边界</h2>
+<dl class="defs">
+  <dt>共享</dt>
+  <dd>
+    稳定 prompt snapshot、只读项目上下文、必要的 logger 或 session 元信息。
+  </dd>
+
+  <dt>隔离</dt>
+  <dd>History、TODO、临时工具观察、child 轮次预算。</dd>
+
+  <dt>收窄</dt>
+  <dd>工具 registry、权限 profile、可写能力和递归调用能力。</dd>
+</dl>
+
+<h2 id="prompt">Prompt Card</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card</span>
+    <button class="card__copy" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标：</strong>实现 run_subagent 工具，让父 agent
+      可以委托一个隔离上下文的 child agent 完成局部分析。
+    </p>
+    <p>
+      <strong>场景：</strong>主 agent 遇到 review、搜索、解释等局部任务时，调用
+      child agent，最终只把总结结果写回父 History。
+    </p>
+    <p>
+      <strong>模块：</strong>实现 tools/subagent.ts，扩展 registry
+      过滤能力，补充 session parent/child 元信息和测试。
+    </p>
+    <p>
+      <strong>接线：</strong>在 composition root 注入 createReadonlyRegistryFn
+      和稳定 prompt snapshot，不在工具内部重新创建全套共享依赖。
+    </p>
+    <p>
+      <strong>边界：</strong>child 不得默认继承父 TODO，不得递归调用
+      subagent，不得扩大权限。
+    </p>
+    <p>
+      <strong>例外和 corner case：</strong>child 超过 maxRounds、child
+      工具失败、父工具被过滤、空任务输入。
+    </p>
+    <p>
+      <strong>验证：</strong>测试 child 能返回结果、过滤工具不可用、maxRounds
+      生效、父 History 只看到 tool_result 摘要。
+    </p>
+    <p>
+      <strong>源码入口：</strong
+      >src/tools/subagent.ts、src/tools/registry.ts、src/session.ts、src/agent.ts。
+    </p>
+    <p>
+      <strong>文档同步：</strong>说明 SubAgent
+      是工具，不是生产级多智能体调度系统。
+    </p>
+  </div>
+</div>
+
+<h2 id="trap">容易踩坑</h2>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">Design Trap</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误：</strong>让 child agent 完整继承父 agent 的工具和权限。
+    </p>
+    <p>
+      <strong>为什么错：</strong
+      >委托分析不应该自动获得写权限和递归能力，否则会放大风险。
+    </p>
+    <p>
+      <strong>正确做法：</strong>通过 registry filter 和权限 profile 显式收窄
+      child 能力。
+    </p>
+    <p>
+      <strong>怎么验证：</strong>child
+      尝试调用被过滤工具时，应得到可恢复错误而不是执行成功。
+    </p>
+  </div>
+</div>
+<ul>
+  <li>把 child 探索消息全部塞进父 History，会让上下文迅速膨胀。</li>
+  <li>child 没有 maxRounds，会导致父工具调用长时间阻塞。</li>
+  <li>
+    在 subagent 工具内部重新创建 Memory/Skill/OutputStore
+    等共享依赖，会让状态不一致。
+  </li>
+</ul>
+
+<h2 id="validate">如何验证</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>手工 query：</strong>让 agent
+      委托一个子智能体解释文件，再观察父回复是否只包含总结而不是完整 child
+      日志。
+    </p>
+    <p>
+      <strong>确定性测试：</strong>fake child 返回固定结果，断言父 History 收到
+      tool_result。
+    </p>
+    <p>
+      <strong>集成观察：</strong>测试 registry filter 后 child 无法调用
+      run_subagent。
+    </p>
+    <p>
+      <strong>失败信号：</strong>child 能递归启动 child，或 child
+      写文件权限大于父期望。
+    </p>
+  </div>
+</div>
+<ul>
+  <li><code>src/tools/subagent.test.ts</code> 覆盖 child 运行和工具过滤。</li>
+  <li>
+    检查 parentSessionId 是否能表达父子关系，但不把 child History 混入父
+    History。
+  </li>
+  <li>用 maxRounds 很小的 child 任务验证超限时返回明确错误。</li>
+</ul>
+
+<h2 id="debug">如果实现失败，先查哪里</h2>
+<ul>
+  <li>先看 subagent 工具拿到的 registry 是否已经过滤。</li>
+  <li>检查 child History 是否新建，而不是引用父 History。</li>
+  <li>检查 stable prompt snapshot 是否复用稳定前缀，而不是运行中重新生成。</li>
+  <li>检查 child 错误是否包装成 ToolResult 返回父 loop。</li>
+</ul>
+
+<h2 id="practice">本章练习</h2>
+<p>
+  写一个 prompt，让 coding agent 只实现只读 SubAgent：child 只能 run_read，不能
+  run_write，也不能再次 run_subagent。
+</p>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章让 agent 学会委托，但委托仍然依赖当前已有知识。下一章我们要让 agent
+  按需加载领域说明，避免把所有技巧都塞进 system prompt。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  下一章进入 Skill：它不是动作工具，而是可按需读取的能力说明，让 agent
+  在需要时临时获得领域工作方式。
+</p>

@@ -1,0 +1,363 @@
+<p class="article__eyebrow">第 15 章 · 长期运行的卫生系统</p>
+<h1 class="article__title">长期运行不会把系统跑坏：Runtime Hardening</h1>
+<p class="article__lede">
+  教学项目也会长时间运行。日志、输出、occurrence、task archive 和 eval trace
+  如果无限增长，最后会把 agentHome 变成垃圾场。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="known-and-unknown">你已经知道什么，还不知道什么</h2>
+<p>
+  你已经有 Memory、Task、Async Run、Schedule、OutputStore
+  和日志。它们都可能落盘，也都可能长期增长。
+</p>
+<p>
+  读这一章时请把注意力放在 agent loop
+  的接入点：持久化边界和运行时维护层，确保长期运行后数据仍可读、可清理、可解释。代码片段只服务于理解架构边界，不要求你逐行背实现。
+</p>
+
+<h2 id="study-path">本章怎么学</h2>
+<p>
+  先把自己放进一个真实 query：没有 Runtime Hardening 时，当前 agent
+  会在哪里卡住。
+</p>
+<p>
+  再故意设计一个朴素方案，观察它如何破坏
+  loop、状态或安全边界。这个失败比“正确答案”更重要，因为它能帮你写出更好的重建
+  prompt。
+</p>
+<p>
+  最后才看实现：先看图和数据流，再看少量接口、源码入口和验证方法。读完后，你应该能用自己的话描述
+  Runtime Hardening 的职责，而不是只记住文件名。
+</p>
+
+<h2 id="scene">本章场景</h2>
+<p>
+  用户连续几周使用 agent：每天 schedule 跑报告，后台任务输出测试日志，LLM
+  通信日志持续追加。某天启动变慢，磁盘空间变小，某个 JSON 还因为中断写坏了。
+</p>
+<p>
+  Runtime Hardening
+  不是炫技优化，而是避免系统在真实使用中慢慢腐烂：原子写、日志轮转、output
+  handle、清理 dry-run、时间语义统一。
+</p>
+
+<h2 id="naive">先试一个朴素方案</h2>
+<p>
+  朴素方案是“先不管，等文件太多再 rm -rf
+  logs”。这会让重要审计记录、用户长期记忆和可删除缓存混在一起。
+</p>
+<p>
+  这个朴素方案的问题在于：它把 Runtime Hardening 当成普通实现细节，而不是 agent
+  harness 的一条稳定边界。
+</p>
+<pre class="code-block"><code>// 危险：不知道哪些数据可删，哪些是长期事实。
+rm -rf ~/.learn-claude-code-ts/*</code></pre>
+
+<h2 id="why-naive-fails">朴素方案为什么不够</h2>
+<dl class="defs">
+  <dt>半截 JSON</dt>
+  <dd>写入中断会留下损坏文件，下次启动解析失败。</dd>
+
+  <dt>无限增长</dt>
+  <dd>日志、outputs、occurrences、eval traces 都会累积。</dd>
+
+  <dt>误删长期事实</dt>
+  <dd>清理策略如果不分类，可能删掉用户 Memory 或长期 Task。</dd>
+</dl>
+
+<h2 id="loop">回到 Agent Loop</h2>
+<p>
+  Runtime Hardening 接入 loop
+  的位置是：持久化边界和运行时维护层，确保长期运行后数据仍可读、可清理、可解释。理解这个位置，比记住具体函数名更重要。
+</p>
+<p>
+  Hardening 不只在 agent loop
+  内，它覆盖所有读写边界：写文件时原子替换，写日志时轮转，暴露大输出时用
+  output_id，清理时先 dry-run。
+</p>
+
+<h2 id="architecture">架构图解</h2>
+<figure class="figure">
+  <div class="flow-map" role="img" aria-label="Runtime Hardening 数据边界">
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Atomic Write</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">valid JSON</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">recoverable startup</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Log Rotation</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">bounded logs</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">agentHome hygiene</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Cleanup Dry-run</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">typed retention</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">safe delete</span>
+    </div>
+  </div>
+  <figcaption>图 15-1 · 长期运行的关键是分类治理，不是一刀切删除。</figcaption>
+</figure>
+
+<h2 id="from-principle-to-code">从原理落到代码</h2>
+<p>
+  到这里我们已经知道 Runtime Hardening 为什么存在、插在 loop
+  的哪里，以及朴素方案会怎样失败。下面才进入实现层：只抓住能固定架构的接口、状态边界和接线路径。
+</p>
+<p>
+  读源码时不要从文件顶部一路啃到底。更有效的顺序是：先找入口函数，再找它读写的状态，最后看测试如何证明这些状态变化是真的发生了。
+</p>
+
+<h2 id="walkthrough">一次真实运行 walkthrough</h2>
+<ol>
+  <li>TaskStore 写 group.json 时先写同目录临时文件。</li>
+  <li>写完后校验 JSON，再 rename 覆盖正式文件。</li>
+  <li>LLM logger 追加日志前检查大小，超过阈值执行轮转。</li>
+  <li>大工具输出先登记到 OutputStore，LLM 只拿到 output_id。</li>
+  <li>清理命令先 dry-run，列出将删除的日志、旧 output、旧 occurrence。</li>
+  <li>用户确认后按类别执行清理，Memory 和 active Task 默认不删。</li>
+  <li>
+    时间字段使用 turnIndex/loopRound/messageSequence 等明确语义，避免 round
+    混用。
+  </li>
+</ol>
+
+<h2 id="interfaces">关键接口和伪码</h2>
+<p>
+  下面的接口和伪码只保留本章最关键的形状。真正写代码时，可以让 coding agent
+  参考源码地图中的文件补齐细节。
+</p>
+<pre class="code-block"><code>interface CleanupPlan {
+  dryRun: boolean;
+  categories: Array&lt;&quot;logs&quot; | &quot;outputs&quot; | &quot;occurrences&quot; | &quot;eval_traces&quot;&gt;;
+  olderThanDays: number;
+}
+
+async function atomicWriteJson(path: string, value: unknown) {
+  const temp = path + &quot;.tmp&quot;;
+  await writeFile(temp, JSON.stringify(value, null, 2));
+  JSON.parse(await readFile(temp, &quot;utf8&quot;));
+  await rename(temp, path);
+}</code></pre>
+
+<h2 id="source-map">源码地图</h2>
+<p>
+  源码阅读建议从第一个文件开始，按数据流往后看。当前项目源码已经包含后续章节能力，所以读本章时只聚焦这里列出的入口。
+</p>
+<div class="source-links" aria-label="15 章源码阅读路线">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/atomic-write.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/atomic-write.ts</code> · 原子写入
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/log-rotation.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/log-rotation.ts</code> · 日志轮转
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/output-store.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/output-store.ts</code> · 大输出句柄
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/timeline.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/timeline.ts</code> · 时间语义类型
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/llm-logger.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/llm-logger.ts</code> · LLM 日志记录和轮转
+  </a>
+</div>
+<div class="note">
+  <p class="note__title">读源码时的提醒</p>
+  <p>
+    GitHub 链接指向当前主干实现，可能已经包含后续章节能力。学习本章时，请只沿着
+    Runtime Hardening 相关的数据流阅读，暂时忽略旁边更复杂的分支。
+  </p>
+</div>
+
+<h2 id="design">设计直觉</h2>
+<p>
+  鲁棒性设计的核心不是“多加
+  try/catch”，而是让每类数据都有生命周期：什么是事实，什么是派生索引，什么是缓存，什么可以清理。
+</p>
+<p>
+  清理机制必须保守，尤其不能默认删除 Memory、active Task 和仍有关联的 outputs。
+</p>
+
+<h2 id="split">架构拆分</h2>
+<dl class="defs">
+  <dt>写入安全</dt>
+  <dd>原子写、读写对称校验、id 一致性检查。</dd>
+
+  <dt>增长控制</dt>
+  <dd>日志轮转、output TTL、occurrence 保留策略。</dd>
+
+  <dt>可解释清理</dt>
+  <dd>dry-run 先告诉用户将删除什么，再执行。</dd>
+</dl>
+
+<h2 id="state-boundary">状态与边界</h2>
+<dl class="defs">
+  <dt>长期事实</dt>
+  <dd>Memory、TaskGroup、Schedule 规则，默认不自动删除。</dd>
+
+  <dt>审计与缓存</dt>
+  <dd>logs、outputs、old occurrences、eval traces，可按策略清理。</dd>
+
+  <dt>时间语义</dt>
+  <dd>
+    turnIndex、loopRound、loopIndex、messageSequence、transcript sequence
+    各有含义。
+  </dd>
+</dl>
+
+<h2 id="prompt">Prompt Card</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card</span>
+    <button class="card__copy" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标：</strong>为 agentHome 持久化数据补 Runtime
+      Hardening：原子写、日志轮转、output handle 和清理 dry-run。
+    </p>
+    <p>
+      <strong>场景：</strong>agent
+      长期运行后，数据增长仍可控，坏文件不会破坏启动，清理不会误删长期事实。
+    </p>
+    <p>
+      <strong>模块：</strong
+      >atomic-write.ts、log-rotation.ts、output-store.ts、timeline.ts、相关
+      store 和 tests。
+    </p>
+    <p>
+      <strong>接线：</strong>持久化 store 使用 atomic write；logger 使用
+      rotation；清理命令按类别扫描。
+    </p>
+    <p>
+      <strong>边界：</strong>不要默认删除 Memory/active Task；不要把裸路径暴露给
+      LLM；清理先 dry-run。
+    </p>
+    <p>
+      <strong>例外和 corner case：</strong>写入中断、坏
+      JSON、日志超限、output_id 越权读取、旧 occurrence 清理。
+    </p>
+    <p>
+      <strong>验证：</strong>测试原子写、日志轮转、output_id
+      读取边界和清理计划。
+    </p>
+    <p>
+      <strong>源码入口：</strong
+      >src/atomic-write.ts、src/log-rotation.ts、src/output-store.ts、src/timeline.ts。
+    </p>
+    <p>
+      <strong>文档同步：</strong>说明鲁棒性是长期运行卫生系统，不是生产化大改。
+    </p>
+  </div>
+</div>
+
+<h2 id="trap">容易踩坑</h2>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">Design Trap</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误：</strong>清理时一刀切删除 agentHome。</p>
+    <p>
+      <strong>为什么错：</strong>agentHome
+      同时包含长期事实、审计日志和缓存，生命周期完全不同。
+    </p>
+    <p>
+      <strong>正确做法：</strong>按类别和 TTL 生成 dry-run
+      计划，默认保护长期事实。
+    </p>
+    <p>
+      <strong>怎么验证：</strong>dry-run 输出应明确分类，且不包含 Memory 和
+      active Task。
+    </p>
+  </div>
+</div>
+<ul>
+  <li>原子写临时文件跨目录，rename 不再原子。</li>
+  <li>output path 直接给 LLM。</li>
+  <li>round 同时表示 turn 和 loop，导致压缩年龄判断漂移。</li>
+</ul>
+
+<h2 id="validate">如何验证</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>手工 query：</strong>制造大日志和旧 output，运行
+      dry-run，检查计划是否可解释。
+    </p>
+    <p>
+      <strong>确定性测试：</strong>测试坏 JSON 不污染正式文件，日志超限后轮转。
+    </p>
+    <p>
+      <strong>集成观察：</strong>OutputStore 只能通过 output_id 读取登记输出。
+    </p>
+    <p>
+      <strong>失败信号：</strong>清理计划包含长期 Memory，或坏 JSON 让启动崩溃。
+    </p>
+  </div>
+</div>
+<ul>
+  <li><code>src/atomic-write.test.ts</code> 验证原子写。</li>
+  <li><code>src/llm-logger.test.ts</code> 验证轮转。</li>
+  <li><code>src/output-store.test.ts</code> 验证 output_id。</li>
+</ul>
+
+<h2 id="debug">如果实现失败，先查哪里</h2>
+<ul>
+  <li>先分类数据目录。</li>
+  <li>检查 store 读写是否对称。</li>
+  <li>检查清理计划是否 dry-run。</li>
+  <li>检查时间字段是否语义明确。</li>
+</ul>
+
+<h2 id="practice">本章练习</h2>
+<p>
+  练习：不看 Prompt Card，自己写一段 prompt，让另一个 coding agent 实现本章的
+  Runtime Hardening。写完后对照卡片，看是否遗漏了状态边界、失败模式和测试。
+</p>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  主线教程到这里已经从最小 loop 长成了一个可长期运行的教学
+  agent。接下来两个专题分别讲模型差异和如何测试不确定系统。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>专题 A：不同大模型不是只换模型名。</p>

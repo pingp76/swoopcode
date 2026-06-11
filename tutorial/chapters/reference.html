@@ -1,0 +1,344 @@
+<p class="article__eyebrow">Reference · 复盘与速查</p>
+<h1 class="article__title">术语、Prompt Pack 与验证手册</h1>
+<p class="article__lede">
+  这一页不是新功能章节，而是把整套教程的核心术语、prompt
+  写法和验证层级收束成查阅入口。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="known-and-unknown">你已经知道什么，还不知道什么</h2>
+<p>
+  你已经走过最小 loop、工具、权限、持久化、调度、模型适配和
+  eval。现在需要一张地图，帮助你回头查概念并写自己的重建 prompt。
+</p>
+<p>
+  读这一章时请把注意力放在 agent loop
+  的接入点：读完整套教程后，把分散的概念整理成可复用 prompt
+  和验收清单。代码片段只服务于理解架构边界，不要求你逐行背实现。
+</p>
+
+<h2 id="study-path">本章怎么学</h2>
+<p>
+  先把自己放进一个真实 query：没有 Reference Pack 时，当前 agent 会在哪里卡住。
+</p>
+<p>
+  再故意设计一个朴素方案，观察它如何破坏
+  loop、状态或安全边界。这个失败比“正确答案”更重要，因为它能帮你写出更好的重建
+  prompt。
+</p>
+<p>
+  最后才看实现：先看图和数据流，再看少量接口、源码入口和验证方法。读完后，你应该能用自己的话描述
+  Reference Pack 的职责，而不是只记住文件名。
+</p>
+
+<h2 id="scene">本章场景</h2>
+<p>
+  你准备让另一个 coding agent 从零重建类似项目。此时不该把 20
+  多章原文全复制过去，而应该提炼：目标、模块边界、接线顺序、corner
+  case、验证命令。
+</p>
+<p>Reference 的任务就是把这些材料归档成 Prompt Pack 和验证手册。</p>
+
+<h2 id="naive">先试一个朴素方案</h2>
+<p>
+  朴素方案是把所有章节 Prompt Card 直接拼成一个超长 prompt，一次性让 coding
+  agent 实现全部功能。
+</p>
+<p>
+  这个朴素方案的问题在于：它把 Reference Pack 当成普通实现细节，而不是 agent
+  harness 的一条稳定边界。
+</p>
+<pre
+  class="code-block"
+><code>prompt = chapter00 + chapter01 + ... + chapter15 + topicA + topicB;</code></pre>
+
+<h2 id="why-naive-fails">朴素方案为什么不够</h2>
+<dl class="defs">
+  <dt>任务过大</dt>
+  <dd>一次性实现全部功能会打破递进设计，也让 review 和测试失去边界。</dd>
+
+  <dt>验收模糊</dt>
+  <dd>超长 prompt 往往没有分阶段验收，失败时不知道该回滚哪里。</dd>
+
+  <dt>教学节奏丢失</dt>
+  <dd>本项目的价值在于逐步长出 agent，而不是一口气堆完功能。</dd>
+</dl>
+
+<h2 id="loop">回到 Agent Loop</h2>
+<p>
+  Reference Pack 接入 loop 的位置是：读完整套教程后，把分散的概念整理成可复用
+  prompt 和验收清单。理解这个位置，比记住具体函数名更重要。
+</p>
+<p>
+  Reference 不接入 runtime loop，它服务学习者的构建 loop：读一章、写
+  prompt、实现、验证、复盘，再进入下一章。
+</p>
+
+<h2 id="architecture">架构图解</h2>
+<figure class="figure">
+  <div class="flow-map" role="img" aria-label="学习者重建 Agent 的循环">
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Read Chapter</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Prompt Card</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Implement</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Run Tests</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Review Trace</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Fix</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Update Docs</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Next Chapter</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Agent grows</span>
+    </div>
+  </div>
+  <figcaption>
+    图 R-1 · 学习者也有自己的 loop：阅读、提示、实现、验证、复盘。
+  </figcaption>
+</figure>
+
+<h2 id="from-principle-to-code">从原理落到代码</h2>
+<p>
+  到这里我们已经知道 Reference Pack 为什么存在、插在 loop
+  的哪里，以及朴素方案会怎样失败。下面才进入实现层：只抓住能固定架构的接口、状态边界和接线路径。
+</p>
+<p>
+  读源码时不要从文件顶部一路啃到底。更有效的顺序是：先找入口函数，再找它读写的状态，最后看测试如何证明这些状态变化是真的发生了。
+</p>
+
+<h2 id="walkthrough">一次真实运行 walkthrough</h2>
+<ol>
+  <li>选择一个章节，例如工具调用。</li>
+  <li>提取 Prompt Card 中的目标、模块、接线和边界。</li>
+  <li>让 coding agent 只实现这一章，不提前做后续章节。</li>
+  <li>运行该章对应的确定性测试和手工 query。</li>
+  <li>阅读源码地图，确认实现边界没有漂移。</li>
+  <li>更新 summary 或教程，再进入下一章。</li>
+</ol>
+
+<h2 id="interfaces">关键接口和伪码</h2>
+<p>
+  下面的接口和伪码只保留本章最关键的形状。真正写代码时，可以让 coding agent
+  参考源码地图中的文件补齐细节。
+</p>
+<pre class="code-block"><code>interface RebuildPrompt {
+  goal: string;
+  modules: string[];
+  wiring: string[];
+  boundaries: string[];
+  cornerCases: string[];
+  validation: string[];
+  docs: string[];
+}</code></pre>
+
+<h2 id="source-map">源码地图</h2>
+<p>
+  源码阅读建议从第一个文件开始，按数据流往后看。当前项目源码已经包含后续章节能力，所以读本章时只聚焦这里列出的入口。
+</p>
+<div class="source-links" aria-label="R 章源码阅读路线">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/doc/web-tutorial-plan.md"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>doc/web-tutorial-plan.md</code> · 教程总蓝图
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/doc/summary.md"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>doc/summary.md</code> · 当前实现状态
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/tutorial/assets/content.js"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>tutorial/assets/content.js</code> · 章节元数据
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/tutorial/chapters/00-preface.html"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>tutorial/chapters/00-preface.html</code> · 样章结构
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/eval/README.md"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/eval/README.md</code> · 验证系统说明
+  </a>
+</div>
+<div class="note">
+  <p class="note__title">读源码时的提醒</p>
+  <p>
+    GitHub 链接指向当前主干实现，可能已经包含后续章节能力。学习本章时，请只沿着
+    Reference Pack 相关的数据流阅读，暂时忽略旁边更复杂的分支。
+  </p>
+</div>
+
+<h2 id="design">设计直觉</h2>
+<p>
+  Reference 要帮助学生形成架构意识：不是背函数名，而是知道每个能力插在 loop
+  的哪里，状态属于哪里，怎么验证。
+</p>
+<p>
+  Prompt Pack 最好按章节拆分。每次只实现一个独立增量，保留教学项目的递进性。
+</p>
+
+<h2 id="split">架构拆分</h2>
+<dl class="defs">
+  <dt>术语表</dt>
+  <dd>解释 History、Transcript、ToolResult、Reminder、Occurrence 等概念。</dd>
+
+  <dt>Prompt Pack</dt>
+  <dd>按章节整理可复制实现任务。</dd>
+
+  <dt>验证手册</dt>
+  <dd>列出 deterministic、integration、live、judge 的使用边界。</dd>
+</dl>
+
+<h2 id="state-boundary">状态与边界</h2>
+<dl class="defs">
+  <dt>学习资料</dt>
+  <dd>Reference 总结教程，不参与 agent runtime。</dd>
+
+  <dt>实现状态</dt>
+  <dd>以 summary.md 和源码为准，而不是旧 PDD 草稿。</dd>
+
+  <dt>验证证据</dt>
+  <dd>以测试、trace、report 和手工 query 为准。</dd>
+</dl>
+
+<h2 id="prompt">Prompt Card</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card</span>
+    <button class="card__copy" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标：</strong>把整套教程整理成可分阶段执行的 Prompt Pack
+      和验证手册。
+    </p>
+    <p>
+      <strong>场景：</strong>学生读完教程后，用自己的话指导 coding agent
+      逐章重建项目。
+    </p>
+    <p><strong>模块：</strong>教程章节、prompt pack、术语表、验证清单。</p>
+    <p>
+      <strong>接线：</strong>每张卡片都指向源码入口、测试入口和文档同步位置。
+    </p>
+    <p>
+      <strong>边界：</strong>不要一次性让 agent 实现全部章节；不要把 prompt
+      写成使用手册。
+    </p>
+    <p>
+      <strong>例外和 corner case：</strong>章节依赖、跨模块边界、live 测试
+      opt-in、文档和实现漂移。
+    </p>
+    <p>
+      <strong>验证：</strong>抽取任意章节 Prompt Card，看是否能指导另一个 agent
+      生成合理改动计划。
+    </p>
+    <p>
+      <strong>源码入口：</strong
+      >doc/web-tutorial-plan.md、tutorial/chapters/*、src/eval/README.md。
+    </p>
+    <p><strong>文档同步：</strong>Reference 本身就是教程收束页。</p>
+  </div>
+</div>
+
+<h2 id="trap">容易踩坑</h2>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">Design Trap</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误：</strong>把教程当 API 手册读。</p>
+    <p>
+      <strong>为什么错：</strong>本教程的目标是训练架构 prompt
+      能力，而不是记住工具命令列表。
+    </p>
+    <p>
+      <strong>正确做法：</strong>每章都追问：新增能力插在 loop
+      哪里，状态在哪里，如何验证。
+    </p>
+    <p>
+      <strong>怎么验证：</strong>不看源码细节，也能用自己的话写出本章实现
+      prompt。
+    </p>
+  </div>
+</div>
+<ul>
+  <li>一次性实现所有章节。</li>
+  <li>只复制 Prompt Card 不理解边界。</li>
+  <li>把 live smoke 当默认 CI 门禁。</li>
+</ul>
+
+<h2 id="validate">如何验证</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>手工 query：</strong
+      >选一章，口述场景、设计、边界、验证，再看正文补漏。
+    </p>
+    <p><strong>确定性测试：</strong>检查每章都有 Prompt Card 和验证项。</p>
+    <p><strong>集成观察：</strong>站点导航、页内目录、上一章/下一章都可用。</p>
+    <p>
+      <strong>失败信号：</strong>学生只能复述功能列表，无法说明 loop 接入点。
+    </p>
+  </div>
+</div>
+<ul>
+  <li>每章至少有场景、loop 位置、源码地图、Prompt Card、验证。</li>
+  <li>Prompt Card 面向实现 agent 能力，不面向写教程。</li>
+  <li>验证层级区分 deterministic/live/judge。</li>
+</ul>
+
+<h2 id="debug">如果实现失败，先查哪里</h2>
+<ul>
+  <li>找不到概念时先查术语表。</li>
+  <li>实现漂移时查 summary.md。</li>
+  <li>测试失败时先看 trace。</li>
+  <li>章节导航问题查 content.js。</li>
+</ul>
+
+<h2 id="practice">本章练习</h2>
+<p>
+  练习：不看 Prompt Card，自己写一段 prompt，让另一个 coding agent 实现本章的
+  Reference Pack。写完后对照卡片，看是否遗漏了状态边界、失败模式和测试。
+</p>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  Reference 是整套教程的出口。学生从这里带走的不是一个功能列表，而是一套能用
+  prompt 重建 agent harness 的表达方式。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  回到第 00 章，试着不用原文，只根据自己的理解重写最小 agent loop 的 Prompt
+  Card。
+</p>

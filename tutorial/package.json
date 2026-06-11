@@ -1,0 +1,15 @@
+{
+  "name": "learn-claude-code-ts-tutorial",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "面向中文读者的 TypeScript Coding Agent 网页教程雏形",
+  "scripts": {
+    "dev": "node scripts/dev-server.mjs",
+    "check": "node --check assets/app.js && node --check assets/content.js && node --check scripts/dev-server.mjs && node --check scripts/generate-chapters.mjs",
+    "format": "prettier --write \"**/*.{html,css,js,mjs,md,json}\""
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

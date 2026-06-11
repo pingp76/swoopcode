@@ -1,0 +1,360 @@
+<p class="article__eyebrow">第 09 章 · 跨会话长期事实</p>
+<h1 class="article__title">跨会话记忆：Memory</h1>
+<p class="article__lede">
+  History 记住当前对话，TODO 记住当前执行节奏，Memory
+  记住跨会话仍然有价值的用户偏好和项目事实。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="known-and-unknown">你已经知道什么，还不知道什么</h2>
+<p>
+  你已经知道 History 和 TODO 都是当前会话里的状态。Memory
+  解决的是另一个问题：用户说“以后默认用中文解释代码”或“这个项目不要自动推送
+  GitHub”时，agent 下次启动仍应知道。
+</p>
+<p>
+  读这一章时请把注意力放在 agent loop
+  的接入点：构建稳定上下文和动态提醒之前，决定哪些长期事实可以进入当前 LLM
+  请求。代码片段只服务于理解架构边界，不要求你逐行背实现。
+</p>
+
+<h2 id="study-path">本章怎么学</h2>
+<p>先把自己放进一个真实 query：没有 Memory 时，当前 agent 会在哪里卡住。</p>
+<p>
+  再故意设计一个朴素方案，观察它如何破坏
+  loop、状态或安全边界。这个失败比“正确答案”更重要，因为它能帮你写出更好的重建
+  prompt。
+</p>
+<p>
+  最后才看实现：先看图和数据流，再看少量接口、源码入口和验证方法。读完后，你应该能用自己的话描述
+  Memory 的职责，而不是只记住文件名。
+</p>
+
+<h2 id="scene">本章场景</h2>
+<p>
+  用户反复告诉
+  agent：“这个项目的提交信息用中文，除非我特别要求英文。”如果每次都靠
+  History，重启后就丢了；如果自动保存所有聊天，又会制造隐私和噪音。
+</p>
+<p>
+  Memory 要求 agent
+  只保存值得长期记住、用户明确允许或主动创建的事实，并通过工具提供
+  create/list/read/delete 能力。
+</p>
+
+<h2 id="naive">先试一个朴素方案</h2>
+<p>
+  朴素方案是把所有对话日志永久保存，然后每次启动都塞回
+  prompt。这样看似什么都不会忘，但实际上会保存大量临时、隐私和过期信息。
+</p>
+<p>
+  这个朴素方案的问题在于：它把 Memory 当成普通实现细节，而不是 agent harness
+  的一条稳定边界。
+</p>
+<pre class="code-block"><code>const memory = await readAllChatLogs();
+systemPrompt += &quot;\nPast conversations:\n&quot; + memory;</code></pre>
+
+<h2 id="why-naive-fails">朴素方案为什么不够</h2>
+<dl class="defs">
+  <dt>隐私和噪音</dt>
+  <dd>
+    不是所有聊天都值得长期保存，自动保存会把临时信息、敏感内容和错误事实混在一起。
+  </dd>
+
+  <dt>上下文污染</dt>
+  <dd>把所有历史塞回 prompt，会让当前任务被无关旧信息影响。</dd>
+
+  <dt>删除语义不清</dt>
+  <dd>
+    用户删除 memory 后，如果稳定 prompt
+    仍保留旧快照，就会出现看似删除但模型仍知道的错觉。
+  </dd>
+</dl>
+
+<h2 id="loop">回到 Agent Loop</h2>
+<p>
+  Memory 接入 loop
+  的位置是：构建稳定上下文和动态提醒之前，决定哪些长期事实可以进入当前 LLM
+  请求。理解这个位置，比记住具体函数名更重要。
+</p>
+<p>
+  Memory 的轻量索引可以参与稳定 prompt，具体内容则通过工具按需读取；memory
+  变化通过 reminder 告知当前会话，避免运行中重写 system prompt。
+</p>
+
+<h2 id="architecture">架构图解</h2>
+<figure class="figure">
+  <div class="flow-map" role="img" aria-label="Memory 与 History 的边界">
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">User Preference</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node flow-node--accent">Memory Tool</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">agentHome/memory</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Stable Index</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">System Prompt</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">LLM</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">invoke/read</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Current Messages</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Task Behavior</span>
+    </div>
+  </div>
+  <figcaption>图 09-1 · Memory 是跨会话知识，不是完整聊天日志。</figcaption>
+</figure>
+
+<h2 id="from-principle-to-code">从原理落到代码</h2>
+<p>
+  到这里我们已经知道 Memory 为什么存在、插在 loop
+  的哪里，以及朴素方案会怎样失败。下面才进入实现层：只抓住能固定架构的接口、状态边界和接线路径。
+</p>
+<p>
+  读源码时不要从文件顶部一路啃到底。更有效的顺序是：先找入口函数，再找它读写的状态，最后看测试如何证明这些状态变化是真的发生了。
+</p>
+
+<h2 id="walkthrough">一次真实运行 walkthrough</h2>
+<ol>
+  <li>用户要求记录一条长期偏好。</li>
+  <li>LLM 调用 memory create 工具，传入简短、可解释的事实。</li>
+  <li>MemoryManager 把记录写入 agentHome 下的 memory 目录。</li>
+  <li>后续会话启动时，system prompt 只看到 memory 索引或摘要。</li>
+  <li>当任务需要细节时，模型通过 memory read 获取完整内容。</li>
+  <li>用户删除 memory 后，当前会话通过 reminder 得知删除事实。</li>
+</ol>
+
+<h2 id="interfaces">关键接口和伪码</h2>
+<p>
+  下面的接口和伪码只保留本章最关键的形状。真正写代码时，可以让 coding agent
+  参考源码地图中的文件补齐细节。
+</p>
+<pre class="code-block"><code>interface MemoryEntry {
+  id: string;
+  title: string;
+  content: string;
+  createdAt: string;
+}
+
+interface MemoryManager {
+  create(input: { title: string; content: string }): Promise&lt;MemoryEntry&gt;;
+  list(): Promise&lt;Array&lt;Pick&lt;MemoryEntry, &quot;id&quot; | &quot;title&quot;&gt;&gt;&gt;;
+  read(id: string): Promise&lt;MemoryEntry&gt;;
+  delete(id: string): Promise&lt;boolean&gt;;
+  buildPromptSection(): Promise&lt;string&gt;;
+}</code></pre>
+
+<h2 id="source-map">源码地图</h2>
+<p>
+  源码阅读建议从第一个文件开始，按数据流往后看。当前项目源码已经包含后续章节能力，所以读本章时只聚焦这里列出的入口。
+</p>
+<div class="source-links" aria-label="09 章源码阅读路线">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/memory.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/memory.ts</code> · Memory 管理器
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/tools/memory.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/tools/memory.ts</code> · Memory 工具 provider
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/memory.test.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/memory.test.ts</code> · Memory 生命周期测试
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/system-prompt.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/system-prompt.ts</code> · Memory 索引进入 prompt 的边界
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/project-context.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/project-context.ts</code> · agentHome 路径归属
+  </a>
+</div>
+<div class="note">
+  <p class="note__title">读源码时的提醒</p>
+  <p>
+    GitHub 链接指向当前主干实现，可能已经包含后续章节能力。学习本章时，请只沿着
+    Memory 相关的数据流阅读，暂时忽略旁边更复杂的分支。
+  </p>
+</div>
+
+<h2 id="design">设计直觉</h2>
+<p>
+  Memory
+  的设计要保守：宁可少记，也不要自动记一切。长期事实一旦进入未来上下文，会持续影响
+  agent 行为。
+</p>
+<p>
+  把 Memory 放在 agentHome，而不是项目源码里，可以避免 agent 个人偏好污染仓库。
+</p>
+
+<h2 id="split">架构拆分</h2>
+<dl class="defs">
+  <dt>MemoryManager</dt>
+  <dd>负责跨会话存储、读取、删除和 prompt section 构建。</dd>
+
+  <dt>Memory tools</dt>
+  <dd>让模型显式创建、列出、读取和删除长期记忆。</dd>
+
+  <dt>System prompt</dt>
+  <dd>只注入轻量索引，具体内容按需读取。</dd>
+</dl>
+
+<h2 id="state-boundary">状态与边界</h2>
+<dl class="defs">
+  <dt>持久化</dt>
+  <dd>经过确认的偏好、项目约定、长期工作方式。</dd>
+
+  <dt>不持久化</dt>
+  <dd>临时任务进度、一次性错误输出、未经确认的私人信息。</dd>
+
+  <dt>当前会话</dt>
+  <dd>memory 创建或删除后的 reminder，帮助模型处理快照边界。</dd>
+</dl>
+
+<h2 id="prompt">Prompt Card</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card</span>
+    <button class="card__copy" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标：</strong>实现跨会话 Memory 管理器和工具，让 agent
+      能保存、读取、删除长期偏好。
+    </p>
+    <p>
+      <strong>场景：</strong>用户明确要求记住长期事实时，agent 调用 Memory
+      工具落盘；后续会话可读取。
+    </p>
+    <p>
+      <strong>模块：</strong
+      >src/memory.ts、src/tools/memory.ts、system-prompt.ts、project-context.ts。
+    </p>
+    <p>
+      <strong>接线：</strong>composition root 创建 MemoryManager，注册 memory
+      tools，system prompt 注入轻量索引。
+    </p>
+    <p>
+      <strong>边界：</strong>不要自动保存所有对话；不要把 Memory
+      写进项目源码；删除后用 reminder 说明当前快照边界。
+    </p>
+    <p>
+      <strong>例外和 corner case：</strong>重复标题、读取不存在
+      id、删除后再读、敏感信息拒绝保存。
+    </p>
+    <p>
+      <strong>验证：</strong>测试
+      create/list/read/delete、重启后仍存在、删除后当前会话提醒。
+    </p>
+    <p>
+      <strong>源码入口：</strong
+      >src/memory.ts、src/tools/memory.ts、src/system-prompt.ts。
+    </p>
+    <p><strong>文档同步：</strong>说明 Memory 不是 History，也不是 Task。</p>
+  </div>
+</div>
+
+<h2 id="trap">容易踩坑</h2>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">Design Trap</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误：</strong>未经确认自动保存用户聊天内容。</p>
+    <p>
+      <strong>为什么错：</strong
+      >长期记忆会影响未来行为，自动保存会带来隐私和错误事实风险。
+    </p>
+    <p>
+      <strong>正确做法：</strong>让 Memory
+      创建成为显式工具动作，并尽量保存短小、可解释的事实。
+    </p>
+    <p>
+      <strong>怎么验证：</strong>普通聊天不应产生 memory 文件，只有 memory
+      create 才落盘。
+    </p>
+  </div>
+</div>
+<ul>
+  <li>把项目临时事实写成长期偏好。</li>
+  <li>Memory 删除后不提醒当前会话存在旧快照边界。</li>
+  <li>把 Memory 全文全部塞进 system prompt。</li>
+</ul>
+
+<h2 id="validate">如何验证</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>手工 query：</strong>创建一条偏好，重启后让 agent
+      list/read，再删除并确认不可读。
+    </p>
+    <p>
+      <strong>确定性测试：</strong>测试 MemoryManager 的文件读写和错误路径。
+    </p>
+    <p>
+      <strong>集成观察：</strong>检查 system prompt 只包含索引，read
+      工具才返回正文。
+    </p>
+    <p><strong>失败信号：</strong>未调用 create 时出现新的 memory 文件。</p>
+  </div>
+</div>
+<ul>
+  <li><code>src/memory.test.ts</code> 覆盖持久化生命周期。</li>
+  <li><code>src/tools/memory.test.ts</code> 覆盖工具 provider。</li>
+  <li><code>src/system-prompt.test.ts</code> 覆盖索引注入。</li>
+</ul>
+
+<h2 id="debug">如果实现失败，先查哪里</h2>
+<ul>
+  <li>检查 agentHome 是否正确。</li>
+  <li>检查 memory id 和文件名是否一致。</li>
+  <li>检查删除后索引是否刷新。</li>
+  <li>检查当前会话是否需要 reminder 说明变化。</li>
+</ul>
+
+<h2 id="practice">本章练习</h2>
+<p>
+  练习：不看 Prompt Card，自己写一段 prompt，让另一个 coding agent 实现本章的
+  Memory。写完后对照卡片，看是否遗漏了状态边界、失败模式和测试。
+</p>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章让 agent 拥有长期偏好。下一章要处理成本和性能：稳定 prompt、tools、memory
+  index 都不能每轮乱变。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>下一章进入 Prompt Cache 友好的请求布局。</p>

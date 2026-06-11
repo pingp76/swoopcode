@@ -10,6 +10,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
+    "tutorial:dev": "npm --prefix tutorial run dev",
+    "tutorial:check": "npm --prefix tutorial run check",
+    "tutorial:format": "npm --prefix tutorial run format",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

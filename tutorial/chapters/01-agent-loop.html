@@ -1,0 +1,537 @@
+<p class="article__eyebrow">第 01 章 · 最小可运行核心</p>
+<h1 class="article__title">最小 Agent Loop</h1>
+<p class="article__lede">
+  第 00 章已经把普通 LLM 调用和 agent loop 区分开了。这一章开始落地：用
+  TypeScript 拆出 REPL、History、LLM Client、Agent 和 Composition Root，让最小
+  loop 真正跑起来，并且能被 fake LLM 测试。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="known-and-unknown">你已经知道什么，还不知道什么</h2>
+<p>
+  你已经知道最小 agent loop 的故事：用户输入进入 History，History 变成
+  messages，LLM 返回 assistant message，assistant 再写回
+  History。现在的问题是：这个故事在 TypeScript 项目里应该拆成哪些模块？
+</p>
+<p>
+  这一章不会讲模型 API
+  的所有参数，也不会实现工具调用。我们只关心一个基础工程问题：怎样把最小 loop
+  写成后续可扩展、可测试、不会一加功能就崩的形状。
+</p>
+
+<h2 id="study-path">本章怎么学</h2>
+<p>
+  先把第 00 章的图景落到模块：谁接收用户输入，谁保存 History，谁调用
+  LLM，谁负责组装依赖。不要从
+  <code>index.ts</code> 一路读到底，而是先看这些职责如何被拆开。
+</p>
+<p>
+  然后观察一个朴素 demo
+  为什么会失败：它可以聊天，但不可测试、不可替换、不可继续生长。最后再看接口和
+  fake LLM 测试，确认这个 loop 不是偶然跑通，而是可验证。
+</p>
+
+<h2 id="scene">本章场景</h2>
+<p>
+  你准备从零实现这个项目。用户在命令行里输入：“你好，之后请用简洁风格回答。”Agent
+  应该调用模型回复。下一轮用户问：“我刚才要求什么风格？”Agent
+  应该把上一轮对话一起发给模型，让模型能基于上下文回答。
+</p>
+<p>
+  这件事听起来像聊天机器人，但我们从第一天就要把它写成 coding agent
+  的骨架。因为第 02 章工具调用会插进 LLM 返回后；第 07
+  章权限会插进工具执行前；第 22 章 eval 会替换真实 LLM 来测试 loop 行为。
+</p>
+
+<h2 id="naive">先试一个朴素方案</h2>
+<p>
+  最诱人的做法是把所有东西塞进 <code>index.ts</code>：读取环境变量、创建 OpenAI
+  client、启动 readline、维护数组、调用模型、打印结果。
+</p>
+<pre class="code-block"><code>const messages = [];
+
+rl.on("line", async (query) =&gt; {
+  messages.push({ role: "user", content: query });
+  const response = await openai.chat.completions.create({
+    model,
+    messages,
+  });
+  messages.push(response.choices[0].message);
+  console.log(response.choices[0].message.content);
+});</code></pre>
+<p>
+  这段代码很快能跑，但它把交互、状态、模型调用和主循环挤在一起。它适合写
+  demo，不适合成为后续 14 章继续生长的 agent harness。
+</p>
+
+<h2 id="why-naive-fails">朴素方案为什么不够</h2>
+<dl class="defs">
+  <dt>它很难测试</dt>
+  <dd>
+    逻辑绑在 readline 和真实 OpenAI client 上。你想验证“第二轮 messages
+    包含第一轮内容”，就必须启动终端和真实模型，测试会又慢又不稳定。
+  </dd>
+
+  <dt>它很难扩展</dt>
+  <dd>
+    第 02 章要处理 tool call，第 07 章要做权限，第 11
+    章要做错误恢复。如果所有分支都写在
+    <code>line</code> 回调里，主流程会很快失控。
+  </dd>
+
+  <dt>它会让共享状态失控</dt>
+  <dd>
+    后续子智能体、eval driver、CLI
+    命令都需要复用或替换部分依赖。如果依赖在模块内部随手
+    new，就很难保证哪些实例应该共享，哪些应该隔离。
+  </dd>
+</dl>
+
+<h2 id="loop">回到 Agent Loop</h2>
+<p>
+  最小 loop 不是“一个文件里写个 while”，而是几个职责稳定的模块协作。REPL
+  只把输入交给 Agent；Agent 拥有 loop；History 保存 messages；LLM Client
+  负责模型协议；Composition Root 创建它们并接线。
+</p>
+
+<figure class="figure">
+  <div class="flow-map" role="img" aria-label="最小 Agent Loop 模块数据流">
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Terminal / REPL</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">agent.run(query)</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">history.add(user)</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node">history.getMessages()</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node flow-node--accent">llm.chat(messages)</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">history.add(assistant)</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node">no tool calls</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node flow-node--accent">return final text</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">REPL prints answer</span>
+    </div>
+  </div>
+  <figcaption>
+    图 01-1 · 第 01 章只实现“没有工具调用”的路径；工具调用分支会在第 02 章接入。
+  </figcaption>
+</figure>
+
+<h2 id="architecture">架构图解</h2>
+<p>把模块关系画成依赖方向，会更容易看出谁应该知道谁。</p>
+<figure class="figure">
+  <div class="flow-map" role="img" aria-label="最小模块依赖图">
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">index.ts</span>
+      <span class="flow-arrow">creates</span>
+      <span class="flow-node">terminal</span>
+      <span class="flow-node">history</span>
+      <span class="flow-node">llm</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">index.ts</span>
+      <span class="flow-arrow">injects</span>
+      <span class="flow-node">agent</span>
+      <span class="flow-node">repl</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node">repl</span>
+      <span class="flow-arrow">calls</span>
+      <span class="flow-node flow-node--accent">agent.run()</span>
+      <span class="flow-arrow">uses</span>
+      <span class="flow-node">history + llm</span>
+    </div>
+  </div>
+  <figcaption>
+    图 01-2 · 依赖从组装根向业务模块注入；Agent 不自己创建 LLM，也不直接操作
+    terminal。
+  </figcaption>
+</figure>
+
+<h2 id="walkthrough">一次真实运行 walkthrough</h2>
+<ol>
+  <li>
+    <strong>启动：</strong><code>index.ts</code> 读取配置，创建
+    logger、terminal、history、llm、agent、repl。
+  </li>
+  <li>
+    <strong>接线：</strong><code>history</code> 和 <code>llm</code> 被传给
+    <code>createAgent()</code>；<code>agent</code> 和
+    <code>terminal</code> 被传给 <code>createRepl()</code>。
+  </li>
+  <li>
+    <strong>输入：</strong>用户在 REPL 输入一句 query，例如“之后请简洁回答”。
+  </li>
+  <li>
+    <strong>进入 loop：</strong>REPL 调用
+    <code>agent.run(query)</code>，不自己维护 messages。
+  </li>
+  <li>
+    <strong>保存用户消息：</strong>Agent 调用
+    <code>history.add({ role: "user", content: query })</code>。
+  </li>
+  <li>
+    <strong>准备请求：</strong>Agent 调用
+    <code>history.getMessages()</code>，拿到包含历史上下文的 messages。
+  </li>
+  <li>
+    <strong>调用模型：</strong>Agent 调用 <code>llm.chat(messages)</code>，得到
+    assistant message。
+  </li>
+  <li>
+    <strong>保存回复：</strong>Agent 把 assistant message 写回 History。如果没有
+    tool call，就把文本返回给 REPL。
+  </li>
+</ol>
+<p>
+  这 8 步是后续所有能力的地基。工具调用只是把第 8
+  步从“直接返回文本”改成“先执行工具，把结果写回 History，再继续下一轮 LLM”。
+</p>
+
+<h2 id="interfaces">关键接口和伪码</h2>
+<p>接口先于实现。我们先定义调用方需要什么，再在内部选择具体实现。</p>
+<pre class="code-block"><code>interface Agent {
+  run(query: string): Promise&lt;string&gt;;
+}
+
+interface History {
+  add(message: Message, meta?: MessageTiming): HistoryEntry;
+  getMessages(): Message[];
+  getEntries(): HistoryEntry[];
+  clear(): void;
+}
+
+interface LLMClient {
+  chat(messages: Message[], tools?: ToolDefinition[]): Promise&lt;LLMResponse&gt;;
+}</code></pre>
+<p>
+  最小 Agent 的伪码可以先写成下面这样。注意最后的 tool call
+  分支暂时只是占位，它提醒我们 loop 未来会继续扩展。
+</p>
+<pre class="code-block"><code>async function run(query: string) {
+  history.add(userMessage(query));
+
+  for (let round = 1; round &lt;= maxRounds; round += 1) {
+    const messages = history.getMessages();
+    const response = await llm.chat(messages);
+    history.add(response.message);
+
+    if (!response.toolCalls.length) {
+      return response.text;
+    }
+
+    // 第 02 章：
+    // permission -> execute tool -> append tool result -> continue
+  }
+
+  return "达到最大轮次，停止本轮执行。";
+}</code></pre>
+
+<h2 id="source-map">源码地图</h2>
+<p>
+  下面链接指向 GitHub 上的当前源码。当前
+  <code>main</code>
+  已经包含后续章节能力，所以阅读时先忽略工具、权限、压缩等复杂分支，只看本章提到的入口和接口。
+</p>
+<div class="source-links" aria-label="第 01 章源码阅读路线">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/index.ts"
+    target="_blank"
+    rel="noreferrer"
+    >src/index.ts：依赖创建与接线</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/repl.ts"
+    target="_blank"
+    rel="noreferrer"
+    >src/repl.ts：用户输入进入 agent.run()</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/agent.ts"
+    target="_blank"
+    rel="noreferrer"
+    >src/agent.ts：think → act → observe 主循环</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/history.ts"
+    target="_blank"
+    rel="noreferrer"
+    >src/history.ts：messages 与 timing 元信息</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/llm.ts"
+    target="_blank"
+    rel="noreferrer"
+    >src/llm.ts：模型请求与响应收敛</a
+  >
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/agent.test.ts"
+    target="_blank"
+    rel="noreferrer"
+    >src/agent.test.ts：主循环行为测试</a
+  >
+</div>
+
+<h2 id="design">设计直觉</h2>
+<p>
+  这一章的核心设计不是“能聊天”，而是“把能聊天这件事写成可替换、可测试、可继续生长的
+  loop”。所以我们宁愿多几个小模块，也不把所有逻辑塞进一个回调。
+</p>
+<p>
+  工厂函数和闭包是这个项目的基本风格。它们比 class 更直接：<code
+    >createHistory()</code
+  >
+  内部有私有数组，外部只能通过接口读写；<code>createAgent()</code>
+  内部拿到依赖，但不负责创建依赖。这种写法让学生很容易看见状态在哪，也让测试可以替换依赖。
+</p>
+
+<h2 id="split">架构拆分</h2>
+<dl class="defs">
+  <dt>config.ts</dt>
+  <dd>读取环境变量和模型配置。它只负责配置，不参与 loop。</dd>
+
+  <dt>terminal.ts</dt>
+  <dd>封装命令行输入输出。后续权限确认也会复用同一个 terminal。</dd>
+
+  <dt>history.ts</dt>
+  <dd>保存 user、assistant、tool 等消息。第 01 章先只用 user 和 assistant。</dd>
+
+  <dt>llm.ts</dt>
+  <dd>把 messages 发给模型，并把 provider 返回值收敛成 Agent 能理解的结构。</dd>
+
+  <dt>agent.ts</dt>
+  <dd>
+    拥有主循环。它不读取环境变量，不创建 terminal，不知道用户界面长什么样。
+  </dd>
+
+  <dt>repl.ts</dt>
+  <dd>
+    负责交互循环：读用户输入，调用 <code>agent.run()</code>，打印最终文本。
+  </dd>
+
+  <dt>index.ts</dt>
+  <dd>组装根。创建共享实例，按依赖关系接线，然后启动 REPL。</dd>
+</dl>
+
+<h2 id="state-boundary">状态与边界</h2>
+<dl class="defs">
+  <dt>History 是 session 内工作上下文</dt>
+  <dd>
+    它会影响下一次 LLM 请求。第 01 章可以先放在内存里；后续持久化
+    Task、Memory、Transcript 会分别解决长期状态和审计问题。
+  </dd>
+
+  <dt>System Prompt 与普通消息不同</dt>
+  <dd>
+    System prompt 是稳定规则，不是用户对话。实现时最好单独存储，在
+    <code>getMessages()</code> 时放到消息头部，避免被普通消息处理逻辑误伤。
+  </dd>
+
+  <dt>Agent 不应该拥有 terminal</dt>
+  <dd>
+    Agent 返回字符串，REPL 决定如何展示。这样同一个 Agent 可以被
+    REPL、测试、eval driver、子智能体工具复用。
+  </dd>
+
+  <dt>LLM 失败要能被调用方看见</dt>
+  <dd>
+    第 01 章可以先返回清晰错误或抛出错误；后续第 11
+    章会把错误分类、重试和压缩恢复做完整。
+  </dd>
+</dl>
+
+<h2 id="prompt">Prompt Card</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标：</strong>实现一个最小 TypeScript Agent Loop：REPL
+      读取用户输入，Agent 保存 History，调用 LLM，返回 assistant 回复。
+    </p>
+    <p>
+      <strong>场景：</strong
+      >这一章只支持普通文本对话，不实现工具调用、权限、压缩、记忆或持久化任务。
+    </p>
+    <p>
+      <strong>模块：</strong>新增
+      <code>config.ts</code
+      >、<code>terminal.ts</code>、<code>history.ts</code>、<code>llm.ts</code>、<code>agent.ts</code>、<code>repl.ts</code>、<code>index.ts</code>。每个模块导出
+      interface 和 <code>createXxx()</code> 工厂函数。
+    </p>
+    <p>
+      <strong>接线：</strong><code>index.ts</code> 创建
+      config、logger、terminal、history、llm、agent、repl；共享依赖通过参数注入，不在业务模块内部
+      new。
+    </p>
+    <p>
+      <strong>边界：</strong>REPL 只处理输入输出；Agent 只处理 loop；History
+      只保存消息；LLM Client 只处理模型请求。不要提前实现 tool registry。
+    </p>
+    <p>
+      <strong>例外和 corner case：</strong>空输入不写入
+      History；<code>exit</code>/<code>quit</code> 退出；LLM
+      返回空文本时给出可读提示；达到最大轮次时停止。
+    </p>
+    <p>
+      <strong>验证：</strong>用 fake LLM 测 <code>agent.run()</code>；断言
+      History 的 user/assistant 顺序；断言第二轮 messages 包含第一轮上下文；断言
+      REPL 不把空输入传给 Agent。
+    </p>
+    <p>
+      <strong>源码入口：</strong
+      ><code>src/agent.ts</code
+      >、<code>src/history.ts</code>、<code>src/repl.ts</code>、<code>src/index.ts</code>、<code>src/agent.test.ts</code>。
+    </p>
+  </div>
+</div>
+
+<h2 id="trap">容易踩坑</h2>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">Design Trap · A</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误：</strong>在
+      <code>agent.ts</code> 里直接读取环境变量、创建 LLM client、创建 terminal。
+    </p>
+    <p>
+      <strong>为什么错：</strong>Agent 会变得不可测试，也无法在子智能体或 eval
+      driver 中复用。
+    </p>
+    <p>
+      <strong>正确做法：</strong>让 <code>index.ts</code> 创建共享依赖，<code
+        >agent.ts</code
+      >
+      只接收接口。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">Design Trap · B</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误：</strong>不保存 assistant message，只保存 user message。
+    </p>
+    <p>
+      <strong>为什么错：</strong
+      >下一轮模型看不到自己上一轮承诺过什么，多轮协作会断裂。
+    </p>
+    <p>
+      <strong>正确做法：</strong>每轮 user 和 assistant 都进入 History；后续
+      tool result 也会进入同一条消息链。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">Design Trap · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误：</strong>测试只断言最终文本，不观察传给 LLM 的
+      messages。
+    </p>
+    <p>
+      <strong>为什么错：</strong>最终文本可能碰巧正确，但 history 顺序、system
+      prompt 位置、上下文保留都可能是错的。
+    </p>
+    <p>
+      <strong>正确做法：</strong>fake LLM 要记录收到的
+      messages，测试检查消息顺序和轮次。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>单元测试：</strong>fake LLM 固定返回“收到”，调用
+      <code>agent.run("你好")</code> 应返回“收到”。这证明 Agent 能完成最小闭环。
+    </p>
+    <p>
+      <strong>History 测试：</strong>添加两条消息后，<code>getMessages()</code>
+      返回副本且顺序不变。这证明外部无法偷偷改内部数组。
+    </p>
+    <p>
+      <strong>多轮测试：</strong>连续两次调用 <code>agent.run()</code>，第二次
+      fake LLM 收到的 messages 包含第一轮 user 和
+      assistant。这证明上下文保留正确。
+    </p>
+    <p>
+      <strong>REPL 测试：</strong>空输入不调用 Agent，<code>exit</code> 关闭
+      terminal。这证明交互层边界清晰。
+    </p>
+    <p>
+      <strong>结构检查：</strong
+      ><code>index.ts</code> 中能一眼看出依赖创建顺序；业务分支不应散落在
+      composition root。
+    </p>
+  </div>
+</div>
+
+<h2 id="debug">如果实现失败，先查哪里</h2>
+<ol>
+  <li>
+    如果第二轮忘记第一轮，先查 <code>history.add(assistant)</code> 有没有漏。
+  </li>
+  <li>如果测试很难写，先查 Agent 是否在内部 new 了真实 LLM 或 terminal。</li>
+  <li>
+    如果 system prompt 被当成普通对话压进 History，先查 History 是否把 system
+    prompt 单独存储。
+  </li>
+  <li>
+    如果 REPL 行为混乱，先查空输入、退出命令和异常显示是否都在 REPL 层处理。
+  </li>
+  <li>如果代码越来越难读，先查 <code>index.ts</code> 是否开始承载业务逻辑。</li>
+</ol>
+
+<h2 id="practice">本章练习</h2>
+<p>
+  试着写一段 prompt，让另一个 coding agent 实现这一章。写完后用下面三条自检：
+</p>
+<ol>
+  <li>有没有明确“不要实现工具调用”。</li>
+  <li>有没有要求 fake LLM 记录收到的 messages。</li>
+  <li>有没有要求 <code>index.ts</code> 只做接线。</li>
+</ol>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章把第 00 章的运行图落成 TypeScript 模块：REPL 管交互，Agent 管
+  loop，History 管上下文，LLM Client 管模型请求，Composition Root
+  管接线。这个形状会一直延续到后续章节。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  现在 agent 已经能多轮对话，但它仍然没有手。用户让它“读一下
+  <code>src/agent.ts</code>”时，它只能凭空猜。下一章我们会打开 tool call
+  分支，给 agent 接入第一组真实动作。
+</p>

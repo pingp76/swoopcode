@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="用 TypeScript 从零构建一个 Claude Code 风格的 Coding Agent 教程"
+    />
+    <title>重建一个 Coding Agent · TypeScript 教学版</title>
+    <link rel="stylesheet" href="./assets/styles.css" />
+    <script type="module" src="./assets/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到正文</a>
+
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="site-title" href="./" aria-label="返回教程首页">
+          <span class="site-title__main">重建一个 Coding Agent</span>
+          <span class="site-title__sub">TypeScript 教学版</span>
+        </a>
+        <nav class="site-nav" aria-label="主导航">
+          <a href="./" aria-current="page">主线教程</a>
+          <a href="./?chapter=model-policy">模型适配</a>
+          <a href="./?chapter=eval">Eval 专题</a>
+          <a href="./?chapter=reference">Reference</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="layout" data-layout>
+      <aside
+        class="sidebar sidebar--left"
+        aria-label="章节目录"
+        data-sidebar="left"
+      >
+        <button
+          type="button"
+          class="sidebar-toggle sidebar-toggle--right"
+          data-toggle="left"
+          aria-label="隐藏章节目录"
+          aria-expanded="true"
+          title="隐藏章节目录"
+        >
+          <span aria-hidden="true">‹</span>
+        </button>
+        <div class="sidebar__inner" id="chapter-nav"></div>
+      </aside>
+
+      <main id="main" class="article" tabindex="-1" aria-live="polite">
+        <article id="article-root">
+          <p class="article__eyebrow">正在加载</p>
+          <h1 class="article__title">教程内容载入中</h1>
+          <p class="article__lede">
+            如果停留在这里，请确认正在通过本地 web 服务访问页面。
+          </p>
+        </article>
+      </main>
+
+      <aside
+        class="sidebar sidebar--right"
+        aria-label="本页小节"
+        data-sidebar="right"
+      >
+        <button
+          type="button"
+          class="sidebar-toggle sidebar-toggle--left"
+          data-toggle="right"
+          aria-label="隐藏本页小节"
+          aria-expanded="true"
+          title="隐藏本页小节"
+        >
+          <span aria-hidden="true">›</span>
+        </button>
+        <div class="sidebar__inner sidebar__inner--right">
+          <p class="sidebar__heading">本页小节</p>
+          <nav class="toc" id="page-toc" aria-label="本页小节目录"></nav>
+        </div>
+      </aside>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,367 @@
+<p class="article__eyebrow">第 05 章 · 按需加载指导</p>
+<h1 class="article__title">按需加载能力：Skill</h1>
+<p class="article__lede">
+  Skill 不是工具，而是一份可按需注入的工作说明。它让 agent 在不膨胀 system
+  prompt 的情况下，临时学习某个领域的流程、约束和验证方法。
+</p>
+
+<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+
+<hr class="rule" />
+
+<h2 id="known-and-unknown">你已经知道什么，还不知道什么</h2>
+<p>
+  你已经有工具和 SubAgent。工具负责动作，SubAgent 负责委托。Skill
+  解决的是另一个问题：agent 面对特定领域时，需要一份“怎么做”的说明。
+</p>
+<p>
+  本章要区分 Skill 和 Tool：Tool 是 <code>run_read</code> 这种可执行动作；Skill
+  是 <code>SKILL.md</code> 这种指导文本。模型读了 Skill
+  后，仍然通过普通工具执行工作。
+</p>
+
+<h2 id="study-path">本章怎么学</h2>
+<p>先从本章场景和朴素方案进入问题，不急着记函数名。</p>
+<p>
+  再用 loop 位置和架构图建立心智模型：新增模块到底改变了哪条数据流或状态流。
+</p>
+<p>
+  最后再看接口、源码地图和验证方法，把概念压缩成能交给 coding agent 的 Prompt
+  Card。
+</p>
+
+<h2 id="scene">本章场景</h2>
+<p>
+  用户要求：“请做一次代码审查。”代码审查不只是读文件，它还包含优先级、输出格式、关注风险、不要堆摘要等工作习惯。如果这些都写进全局
+  system prompt，prompt 会越来越长。
+</p>
+<p>
+  Skill 系统让 agent 先扫描有哪些技能，再在需要时读取
+  code-review/SKILL.md。这样稳定 prompt 只保留索引，完整说明按需进入当前消息。
+</p>
+
+<h2 id="naive">先试一个朴素方案</h2>
+<p>
+  朴素方案是把所有领域说明都拼进 system prompt：代码审查、解释代码、写测试、调试
+  CI、重构计划……一次性全部给模型。
+</p>
+<p>
+  这看起来省事，但很快会破坏上下文预算和 prompt cache。更糟的是，Skill
+  内容更新后如果每轮重写 system prompt，稳定前缀就不稳定了。
+</p>
+<pre class="code-block"><code>const systemPrompt = [
+  basePrompt,
+  readFile(&quot;skills/code-review/SKILL.md&quot;),
+  readFile(&quot;skills/explain-code/SKILL.md&quot;),
+  readFile(&quot;skills/debug-ci/SKILL.md&quot;),
+].join(&quot;\n\n&quot;);</code></pre>
+
+<h2 id="why-naive-fails">朴素方案为什么不够</h2>
+<dl class="defs">
+  <dt>上下文膨胀</dt>
+  <dd>
+    大量未使用的 skill 文本占据
+    token，真正任务相关的源码和工具结果反而被挤出上下文。
+  </dd>
+
+  <dt>稳定前缀被破坏</dt>
+  <dd>
+    Skill 文件变化如果直接重写 system prompt，会让 prompt cache 失去稳定前缀。
+  </dd>
+
+  <dt>能力边界不清</dt>
+  <dd>
+    把所有说明混在一起，模型可能在普通解释任务里套用代码审查格式，输出风格漂移。
+  </dd>
+</dl>
+
+<h2 id="loop">回到 Agent Loop</h2>
+<p>
+  Skill 主要影响 “构建 messages 前” 的上下文选择。稳定 system prompt 只放轻量
+  skill 索引；当模型需要某个 skill 时，通过 skill
+  工具读取完整内容，再把它作为当前任务的上下文。
+</p>
+<p>
+  这和 Tool 的动作不同：Skill
+  本身不改文件、不跑命令，只改变模型接下来如何思考和使用已有工具。
+</p>
+
+<h2 id="architecture">架构图解</h2>
+<figure class="figure">
+  <div class="flow-map" role="img" aria-label="Skill 按需加载流程">
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">Stable Prompt</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Skill Index</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">LLM</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">LLM</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">run_skill_invoke</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node flow-node--accent">Skill Manager</span>
+    </div>
+    <div class="flow-row">
+      <span class="flow-node flow-node--accent">SKILL.md</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Current Messages</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-node">Domain-aware Action</span>
+    </div>
+  </div>
+  <figcaption>
+    图 05-1 · Skill 索引稳定，完整说明按需进入当前上下文。
+  </figcaption>
+</figure>
+
+<h2 id="from-principle-to-code">从原理落到代码</h2>
+<p>
+  到这里已经有了场景、失败原因和架构图。下面才进入实现层：只抓住接口形状、状态边界和源码入口。
+</p>
+<p>
+  读源码时先找入口函数，再找它读写的状态，最后看测试如何证明这些状态变化是真的发生了。
+</p>
+
+<h2 id="walkthrough">一次真实运行 walkthrough</h2>
+<ol>
+  <li>启动时 SkillManager 扫描 skills 目录，提取每个 skill 的名称和描述。</li>
+  <li>system prompt 中只加入简短 skill 索引，让模型知道有哪些指导可用。</li>
+  <li>用户发起代码审查任务，模型决定调用 skill invoke。</li>
+  <li>SkillManager 读取对应 SKILL.md，返回内容给模型。</li>
+  <li>模型根据 Skill 指导选择读文件、跑测试或输出 findings。</li>
+  <li>
+    如果用户移除 skill，当前系统通过 reminder 告知变化，而不是立刻重写稳定
+    prompt。
+  </li>
+</ol>
+
+<h2 id="interfaces">关键接口和伪码</h2>
+<p>
+  Skill 的接口围绕 scan、invoke、remove
+  展开。真正的执行仍然由普通工具完成，SkillManager 不应该偷偷操作项目文件。
+</p>
+<pre class="code-block"><code>interface SkillSummary {
+  name: string;
+  description: string;
+  path: string;
+}
+
+interface SkillManager {
+  scan(): Promise&lt;SkillSummary[]&gt;;
+  invoke(name: string): Promise&lt;string&gt;;
+  remove(name: string): Promise&lt;boolean&gt;;
+  buildPromptSection(): string; // 只包含稳定、轻量索引
+}</code></pre>
+
+<h2 id="source-map">源码地图</h2>
+<p>
+  先看 SkillManager 如何扫描和读取，再看 system prompt 如何只注入索引。Skill
+  的重点是上下文经济性，不是工具能力。
+</p>
+<div class="source-links" aria-label="05 章源码阅读路线">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/skills.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/skills.ts</code> · Skill 管理器和工具 provider
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/skills.test.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/skills.test.ts</code> · scan/invoke/remove 测试
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/system-prompt.ts"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>src/system-prompt.ts</code> · 稳定 prompt 中的 skill 索引
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/skills/code-review/SKILL.md"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>skills/code-review/SKILL.md</code> · 示例代码审查 Skill
+  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/skills/explain-code/SKILL.md"
+    target="_blank"
+    rel="noreferrer"
+  >
+    <code>skills/explain-code/SKILL.md</code> · 示例代码解释 Skill
+  </a>
+</div>
+
+<h2 id="design">设计直觉</h2>
+<p>
+  Skill
+  是“可加载的工作方式”。它把领域策略放进文件，让模型在需要时读取，而不是把所有策略永久塞进
+  system prompt。
+</p>
+<p>
+  这个设计也让课程更适合 vibe coding：你可以把某类任务的经验沉淀成 Skill，再让
+  agent 在合适时调用。
+</p>
+
+<h2 id="split">架构拆分</h2>
+<dl class="defs">
+  <dt>Skill files</dt>
+  <dd>用普通 Markdown 描述任务场景、工作流程、输出格式和验证方法。</dd>
+
+  <dt>SkillManager</dt>
+  <dd>扫描、解析、读取和移除 skill，提供稳定索引。</dd>
+
+  <dt>Skill tools</dt>
+  <dd>让模型按名称读取完整 Skill 内容，但不直接执行动作。</dd>
+</dl>
+
+<h2 id="state-boundary">状态与边界</h2>
+<dl class="defs">
+  <dt>稳定 prompt</dt>
+  <dd>只放 skill 名称、描述等轻量索引。</dd>
+
+  <dt>动态 messages</dt>
+  <dd>按需读取的完整 SKILL.md 内容进入当前任务上下文。</dd>
+
+  <dt>文件系统</dt>
+  <dd>Skill 文件位于 skillsDir，由 SkillManager 控制扫描和读取。</dd>
+</dl>
+
+<h2 id="prompt">Prompt Card</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card</span>
+    <button class="card__copy" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标：</strong>实现 Skill 系统，让 agent 能扫描技能索引并按需读取
+      SKILL.md 指导。
+    </p>
+    <p>
+      <strong>场景：</strong>面对代码审查、代码解释等任务时，模型先读取对应
+      Skill，再用普通工具完成工作。
+    </p>
+    <p>
+      <strong>模块：</strong>实现 src/skills.ts、SkillToolProvider、示例
+      skills/*/SKILL.md 和测试。
+    </p>
+    <p>
+      <strong>接线：</strong>在 system prompt 中注入稳定 skill 索引，把 skill
+      工具注册进 registry。
+    </p>
+    <p>
+      <strong>边界：</strong>不要把所有 Skill 全文塞进 system prompt；Skill
+      不执行工具动作。
+    </p>
+    <p>
+      <strong>例外和 corner case：</strong>skill
+      不存在、格式不完整、删除后索引更新、读取内容过大。
+    </p>
+    <p>
+      <strong>验证：</strong>测试 scan/invoke/remove，确认 system prompt
+      只含索引，完整内容按需返回。
+    </p>
+    <p>
+      <strong>源码入口：</strong
+      >src/skills.ts、src/system-prompt.ts、skills/code-review/SKILL.md。
+    </p>
+    <p><strong>文档同步：</strong>说明 Skill 是指导文本，Tool 是动作能力。</p>
+  </div>
+</div>
+
+<h2 id="trap">容易踩坑</h2>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">Design Trap</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误：</strong>把所有 SKILL.md 全文拼进 system prompt。</p>
+    <p>
+      <strong>为什么错：</strong>这会膨胀上下文并破坏 prompt
+      cache，也让无关技能干扰当前任务。
+    </p>
+    <p>
+      <strong>正确做法：</strong>稳定 prompt 只放索引，完整 skill
+      通过工具按需读取。
+    </p>
+    <p>
+      <strong>怎么验证：</strong>检查 system prompt snapshot 中没有完整 SKILL.md
+      正文。
+    </p>
+  </div>
+</div>
+<ul>
+  <li>Skill 文件格式过度复杂，会让学生难以编写自己的技能。</li>
+  <li>Skill 更新后立即重写稳定 prompt，会让 cache 友好设计失效。</li>
+  <li>把 Skill 当工具执行，会混淆“指导”和“动作”的边界。</li>
+</ul>
+
+<h2 id="validate">如何验证</h2>
+<div class="card card--validation">
+  <div class="card__head">
+    <span class="card__tag">Validation</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>手工 query：</strong>让 agent 先列出 skills，再调用 code-review
+      skill，看输出是否遵守审查格式。
+    </p>
+    <p>
+      <strong>确定性测试：</strong>测试 scan/invoke/remove 的返回值和错误路径。
+    </p>
+    <p>
+      <strong>集成观察：</strong>检查 system prompt 只出现 skill 摘要，invoke
+      后完整内容进入当前 messages。
+    </p>
+    <p>
+      <strong>失败信号：</strong>未调用 skill 时，完整 SKILL.md 已经出现在
+      system prompt 里。
+    </p>
+  </div>
+</div>
+<ul>
+  <li><code>src/skills.test.ts</code> 覆盖 skill 生命周期。</li>
+  <li><code>src/system-prompt.test.ts</code> 验证稳定索引注入。</li>
+  <li>
+    手动修改 skill 文件后，确认当前会话通过 reminder
+    知道变化，而不是重写稳定前缀。
+  </li>
+</ul>
+
+<h2 id="debug">如果实现失败，先查哪里</h2>
+<ul>
+  <li>先看 skillsDir 是否指向预期目录。</li>
+  <li>检查 SKILL.md 是否有可解析的名称和描述。</li>
+  <li>检查 invoke 工具是否按名称读取，而不是按用户输入路径任意读文件。</li>
+  <li>检查 skill 内容是否过长，需要在后续压缩章节处理。</li>
+</ul>
+
+<h2 id="practice">本章练习</h2>
+<p>
+  写一个 prompt，让 coding agent 新增一个 explain-error Skill：它只是一份
+  Markdown 指导，不新增任何工具。
+</p>
+
+<h2 id="summary">本章小结</h2>
+<p>
+  本章让 agent 能按需学习工作方式。接下来问题变成：随着工具结果、Skill
+  内容和多轮历史越来越多，messages 会变得太长，需要专门的标准化与压缩管道。
+</p>
+
+<h2 id="next">下一章伏笔</h2>
+<p>
+  下一章进入 Normalize、MessageBlock 和 Compress：我们要保护
+  tool_call/tool_result 配对，同时让长上下文可控。
+</p>
