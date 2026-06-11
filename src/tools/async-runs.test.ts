@@ -13,18 +13,24 @@ describe("AsyncRunToolProvider", () => {
     overrides?: Partial<AsyncRunManager>,
   ): AsyncRunManager {
     return {
-      start: vi.fn().mockImplementation((input) => ({
-        id: "ar_20260519_120000_abc123",
-        executor: input.executor ?? "command",
-        title: input.title ?? "Test",
-        status: "running",
-        startedAt: "2026-05-19T12:00:00.000Z",
-        timeoutAt: "2026-05-19T12:02:00.000Z",
-        resourceClaim: input.resources ?? { readPaths: ["src"], writePaths: [] },
-        preview: input.title ?? "Test",
-        outputPath: "/tmp/async-runs/ar_20260519_120000_abc123/output.txt",
-        trigger: { kind: "manual" },
-      } as AsyncRunRecord)),
+      start: vi.fn().mockImplementation(
+        (input) =>
+          ({
+            id: "ar_20260519_120000_abc123",
+            executor: input.executor ?? "command",
+            title: input.title ?? "Test",
+            status: "running",
+            startedAt: "2026-05-19T12:00:00.000Z",
+            timeoutAt: "2026-05-19T12:02:00.000Z",
+            resourceClaim: input.resources ?? {
+              readPaths: ["src"],
+              writePaths: [],
+            },
+            preview: input.title ?? "Test",
+            outputPath: "/tmp/async-runs/ar_20260519_120000_abc123/output.txt",
+            trigger: { kind: "manual" },
+          }) as AsyncRunRecord,
+      ),
       check: vi.fn().mockReturnValue(null),
       list: vi.fn().mockReturnValue([]),
       readOutput: vi.fn().mockReturnValue("output content"),
@@ -39,9 +45,7 @@ describe("AsyncRunToolProvider", () => {
   it("should have exactly 4 tool entries with correct names", () => {
     const provider = createAsyncRunToolProvider(createMockManager());
     expect(provider.toolEntries).toHaveLength(4);
-    const names = provider.toolEntries.map(
-      (e) => e.definition.function.name,
-    );
+    const names = provider.toolEntries.map((e) => e.definition.function.name);
     expect(names).toContain("run_async_start");
     expect(names).toContain("run_async_check");
     expect(names).toContain("run_async_list");
@@ -66,7 +70,9 @@ describe("AsyncRunToolProvider", () => {
         title: "Test",
       });
       expect(result.error).toBe(true);
-      expect(result.output).toContain("executor must be 'command' or 'subagent'");
+      expect(result.output).toContain(
+        "executor must be 'command' or 'subagent'",
+      );
     });
 
     it("should return error for missing command", async () => {

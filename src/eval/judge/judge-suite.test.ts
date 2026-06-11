@@ -22,7 +22,9 @@ function createScriptedJudgeLLM(responses: string[]): LLMClient {
   let index = 0;
   return {
     async chat() {
-      const text = responses[index] ?? '{"passed":false,"score":0,"summary":"No more responses"}';
+      const text =
+        responses[index] ??
+        '{"passed":false,"score":0,"summary":"No more responses"}';
       index += 1;
       return {
         content: text,
@@ -44,7 +46,11 @@ function makeJudgeInput(): EvalJudgeInput {
     finalOutputs: ["Hello!"],
     runtimeEvents: [],
     hardAssertionResults: [
-      { kind: "finalOutputContains", passed: true, message: "Output contains hello" },
+      {
+        kind: "finalOutputContains",
+        passed: true,
+        message: "Output contains hello",
+      },
     ],
     rubric: {
       goal: "Agent should greet the user politely.",
@@ -115,7 +121,9 @@ describe("Judge", () => {
   });
 
   it("parseJudgeResponse extracts JSON from nested text", () => {
-    const parsed = parseJudgeResponse('Some preamble {"passed":true,"score":5,"summary":"ok"} trailing text');
+    const parsed = parseJudgeResponse(
+      'Some preamble {"passed":true,"score":5,"summary":"ok"} trailing text',
+    );
     expect(parsed).toEqual({ passed: true, score: 5, summary: "ok" });
   });
 
@@ -134,7 +142,9 @@ describe("Judge", () => {
       evidence: [{ kind: "runtime_event", ref: "evt-1", note: "tool called" }],
       needsHumanReview: false,
     };
-    const parsed = parseJudgeResponse(`Preamble ${JSON.stringify(judgeObj)} trailing text`);
+    const parsed = parseJudgeResponse(
+      `Preamble ${JSON.stringify(judgeObj)} trailing text`,
+    );
     expect(parsed).toEqual(judgeObj);
   });
 });

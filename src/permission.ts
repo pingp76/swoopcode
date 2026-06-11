@@ -298,16 +298,12 @@ export function createPermissionManager(projectDir: string): PermissionManager {
               ? Number(ctx.args["timeout_ms"])
               : 120_000;
           // 从 resources 参数中解析读写路径列表，用于展示给用户的确认信息
-          const readPaths = (
-            (ctx.args["resources"] as Record<string, unknown> | undefined)?.[
-              "read_paths"
-            ] ?? []
-          ) as string[];
-          const writePaths = (
-            (ctx.args["resources"] as Record<string, unknown> | undefined)?.[
-              "write_paths"
-            ] ?? []
-          ) as string[];
+          const readPaths = ((
+            ctx.args["resources"] as Record<string, unknown> | undefined
+          )?.["read_paths"] ?? []) as string[];
+          const writePaths = ((
+            ctx.args["resources"] as Record<string, unknown> | undefined
+          )?.["write_paths"] ?? []) as string[];
           const command = ctx.args["command"]
             ? String(ctx.args["command"])
             : undefined;
@@ -525,7 +521,9 @@ export function createScopedSubagentPermissionManager(deps: {
           ? { action: "allow" }
           : {
               action: "deny",
-              reason: validation.reason ?? "Only read-only diagnostic commands are allowed in subagent",
+              reason:
+                validation.reason ??
+                "Only read-only diagnostic commands are allowed in subagent",
             };
       }
 

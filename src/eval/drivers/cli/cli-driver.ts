@@ -21,7 +21,10 @@ import type {
   AgentInput,
   AgentTurnResult,
 } from "../../core/driver.js";
-import type { AgentRuntimeEvent, CliDriverPlan } from "../../core/case-schema.js";
+import type {
+  AgentRuntimeEvent,
+  CliDriverPlan,
+} from "../../core/case-schema.js";
 
 /**
  * makeEventId — 生成稳定的事件唯一标识
@@ -72,7 +75,9 @@ export function createCliDriver(plan: CliDriverPlan): CodingAgentDriver {
       child.on("exit", (code, signal) => {
         if (signal) {
           exitCode = 1;
-          stderrChunks.push(`[cli-driver] Process terminated by signal: ${signal}`);
+          stderrChunks.push(
+            `[cli-driver] Process terminated by signal: ${signal}`,
+          );
         } else {
           exitCode = code ?? 0;
         }

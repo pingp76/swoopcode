@@ -847,7 +847,9 @@ describe("Agent 错误恢复", () => {
             assistantMessage: {
               role: "assistant",
               content: null,
-              tool_calls: [makeToolCall("call_1", "run_bash", '{"command":"ls"}')],
+              tool_calls: [
+                makeToolCall("call_1", "run_bash", '{"command":"ls"}'),
+              ],
             } as ChatCompletionMessageParam,
           };
         }
@@ -1131,7 +1133,11 @@ describe("Agent async run integration", () => {
         {
           content: null,
           toolCalls: [
-            makeToolCall("call_1", "run_write", '{"path":"src/file.ts","content":"x"}'),
+            makeToolCall(
+              "call_1",
+              "run_write",
+              '{"path":"src/file.ts","content":"x"}',
+            ),
           ],
           finishReason: "stop",
         },
@@ -1184,7 +1190,11 @@ describe("Agent async run integration", () => {
         {
           content: null,
           toolCalls: [
-            makeToolCall("call_1", "run_write", '{"path":"src/file.ts","content":"x"}'),
+            makeToolCall(
+              "call_1",
+              "run_write",
+              '{"path":"src/file.ts","content":"x"}',
+            ),
           ],
           finishReason: "stop",
         },
@@ -1276,17 +1286,13 @@ describe("Agent reasoning content preservation", () => {
     const responses: LLMResponse[] = [
       {
         content: null,
-        toolCalls: [
-          makeToolCall("call_1", "run_bash", '{"command":"ls"}'),
-        ],
+        toolCalls: [makeToolCall("call_1", "run_bash", '{"command":"ls"}')],
         finishReason: "stop",
         assistantMessage: {
           role: "assistant",
           content: null,
           reasoning_content: "Need to list files first",
-          tool_calls: [
-            makeToolCall("call_1", "run_bash", '{"command":"ls"}'),
-          ],
+          tool_calls: [makeToolCall("call_1", "run_bash", '{"command":"ls"}')],
         } as ChatCompletionMessageParam,
       },
       {
@@ -1337,7 +1343,8 @@ describe("Agent reasoning content preservation", () => {
     const assistantMsg = secondCall.find((m) => m.role === "assistant");
     expect(assistantMsg).toBeDefined();
     expect(
-      (assistantMsg as unknown as { reasoning_content?: string }).reasoning_content,
+      (assistantMsg as unknown as { reasoning_content?: string })
+        .reasoning_content,
     ).toBe("Need to list files first");
   });
 
@@ -1382,8 +1389,8 @@ describe("Agent reasoning content preservation", () => {
       (e) => (e.message as { role: string }).role === "assistant",
     );
     expect(assistantEntry).toBeDefined();
-    expect(
-      (assistantEntry!.message as { content: unknown }).content,
-    ).toBe("legacy response");
+    expect((assistantEntry!.message as { content: unknown }).content).toBe(
+      "legacy response",
+    );
   });
 });

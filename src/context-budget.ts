@@ -78,19 +78,13 @@ export function resolveContextBudgets(input: {
   );
 
   // 2. 保留安全余量
-  const headroom = Math.max(
-    8000,
-    Math.floor(effectiveBudgetTokens * 0.05),
-  );
+  const headroom = Math.max(8000, Math.floor(effectiveBudgetTokens * 0.05));
 
   // 3. 实际可分配给上下文内容的 token
   //    当 budget 很小时（如用户通过 /m c 1000 调低），outputReserve + headroom
   //    可能超过 effectiveBudgetTokens，导致 usable 为负。clamp 到 0，
   //    确保后续子预算不会变成负数。
-  const usable = Math.max(
-    0,
-    effectiveBudgetTokens - outputReserve - headroom,
-  );
+  const usable = Math.max(0, effectiveBudgetTokens - outputReserve - headroom);
 
   // 按压缩模式获取比例
   const ratios = getModeRatios(compressionMode);
@@ -122,10 +116,7 @@ export function resolveContextBudgets(input: {
   }
 
   if (overrides?.conversationReserveTokens !== undefined) {
-    conversation = Math.min(
-      overrides.conversationReserveTokens,
-      conversation,
-    );
+    conversation = Math.min(overrides.conversationReserveTokens, conversation);
   }
 
   // 6. 确保子预算总和不超过 usable，超出时按优先级裁剪
@@ -197,6 +188,11 @@ function getModeRatios(
       return { stable: 0.3, working: 0.35, evidence: 0.15, conversation: 0.2 };
     case "long_context":
       // 长上下文：stable pack 占比最大，evidence 和 conversation 较小
-      return { stable: 0.42, working: 0.35, evidence: 0.11, conversation: 0.12 };
+      return {
+        stable: 0.42,
+        working: 0.35,
+        evidence: 0.11,
+        conversation: 0.12,
+      };
   }
 }

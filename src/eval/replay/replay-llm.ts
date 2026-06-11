@@ -109,12 +109,18 @@ export async function createReplayLLMClient(options: {
     if (r.content !== undefined) response.content = r.content;
     if (r.toolCalls !== undefined) {
       response.toolCalls = r.toolCalls.map((tc) => {
-        const toolCall: { id: string; name: string; args?: Record<string, unknown>; rawArguments?: string } = {
+        const toolCall: {
+          id: string;
+          name: string;
+          args?: Record<string, unknown>;
+          rawArguments?: string;
+        } = {
           id: tc.id,
           name: tc.name,
         };
         if (tc.args !== undefined) toolCall.args = tc.args;
-        if (tc.rawArguments !== undefined) toolCall.rawArguments = tc.rawArguments;
+        if (tc.rawArguments !== undefined)
+          toolCall.rawArguments = tc.rawArguments;
         return toolCall;
       });
     }

@@ -5,10 +5,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import {
-  createCacheDebugTracker,
-  formatCacheDebugLog,
-} from "./cache-debug.js";
+import { createCacheDebugTracker, formatCacheDebugLog } from "./cache-debug.js";
 
 // ============================================================================
 // createCacheDebugTracker

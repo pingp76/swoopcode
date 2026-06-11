@@ -6,7 +6,10 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { createPermissionManager, createScopedSubagentPermissionManager } from "./permission.js";
+import {
+  createPermissionManager,
+  createScopedSubagentPermissionManager,
+} from "./permission.js";
 import type { PermissionContext } from "./permission.js";
 import {
   createDefaultAsyncCommandPolicy,
@@ -449,23 +452,33 @@ describe("async-run tools", () => {
   it("categorizes run_async_start as async-run (default mode asks)", () => {
     const pm = createPermissionManager(PROJECT_DIR);
     const decision = pm.check(
-      ctx("run_async_start", { executor: "command", title: "test", resources: { read_paths: [], write_paths: [] } }),
+      ctx("run_async_start", {
+        executor: "command",
+        title: "test",
+        resources: { read_paths: [], write_paths: [] },
+      }),
     );
     expect(decision.action).toBe("ask");
   });
 
   it("categorizes run_async_check/list/output_read as async-run (default mode allows)", () => {
     const pm = createPermissionManager(PROJECT_DIR);
-    expect(pm.check(ctx("run_async_check", { run_id: "ar_test" })).action).toBe("allow");
+    expect(pm.check(ctx("run_async_check", { run_id: "ar_test" })).action).toBe(
+      "allow",
+    );
     expect(pm.check(ctx("run_async_list")).action).toBe("allow");
-    expect(pm.check(ctx("run_async_output_read", { run_id: "ar_test" })).action).toBe("allow");
+    expect(
+      pm.check(ctx("run_async_output_read", { run_id: "ar_test" })).action,
+    ).toBe("allow");
   });
 
   it("allows run_async_check in all modes", () => {
     for (const mode of ["default", "auto", "plan"] as const) {
       const pm = createPermissionManager(PROJECT_DIR);
       pm.setMode(mode);
-      expect(pm.check(ctx("run_async_check", { run_id: "ar_test" })).action).toBe("allow");
+      expect(
+        pm.check(ctx("run_async_check", { run_id: "ar_test" })).action,
+      ).toBe("allow");
     }
   });
 
@@ -481,7 +494,9 @@ describe("async-run tools", () => {
     for (const mode of ["default", "auto", "plan"] as const) {
       const pm = createPermissionManager(PROJECT_DIR);
       pm.setMode(mode);
-      expect(pm.check(ctx("run_async_output_read", { run_id: "ar_test" })).action).toBe("allow");
+      expect(
+        pm.check(ctx("run_async_output_read", { run_id: "ar_test" })).action,
+      ).toBe("allow");
     }
   });
 
@@ -620,9 +635,7 @@ describe("createScopedSubagentPermissionManager", () => {
   const PROJECT_DIR = "/tmp/test-project";
 
   /** 创建 mock commandPolicy（允许所有命令，用于测试非 bash 分支） */
-  function createMockCommandPolicy(
-    allowed = true,
-  ): AsyncCommandPolicy {
+  function createMockCommandPolicy(allowed = true): AsyncCommandPolicy {
     return {
       maxTimeoutMs: 300_000,
       validate: () =>
@@ -772,9 +785,9 @@ describe("createScopedSubagentPermissionManager", () => {
     for (const toolName of writeTools) {
       const decision = scoped.check({ toolName, args: {} });
       expect(decision.action).toBe("deny");
-      expect(
-        decision.action === "deny" && decision.reason,
-      ).toContain("not allowed inside a subagent");
+      expect(decision.action === "deny" && decision.reason).toContain(
+        "not allowed inside a subagent",
+      );
     }
   });
 

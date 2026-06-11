@@ -216,7 +216,10 @@ export interface ScheduleStore {
   read(scheduleId: string): ScheduleFile | null;
   save(schedule: ScheduleFile): void;
   hardDelete(scheduleId: string): void;
-  readOccurrence(scheduleId: string, occurrenceId: string): ScheduleOccurrenceFile | null;
+  readOccurrence(
+    scheduleId: string,
+    occurrenceId: string,
+  ): ScheduleOccurrenceFile | null;
   saveOccurrence(occurrence: ScheduleOccurrenceFile): void;
   listOccurrences(scheduleId: string, limit?: number): ScheduleOccurrenceFile[];
   rebuildIndex(): void;
@@ -362,7 +365,10 @@ export function validateScheduleFile(
   const intent = value["intent"];
   if (!isRecord(intent)) {
     errors.push("intent must be an object");
-  } else if (typeof intent["prompt"] !== "string" || intent["prompt"].trim() === "") {
+  } else if (
+    typeof intent["prompt"] !== "string" ||
+    intent["prompt"].trim() === ""
+  ) {
     errors.push("intent.prompt is required");
   }
 
@@ -373,7 +379,10 @@ export function validateScheduleFile(
   } else {
     const timingType = timing["type"];
     if (timingType === "once") {
-      if (typeof timing["runAt"] !== "string" || timing["runAt"].trim() === "") {
+      if (
+        typeof timing["runAt"] !== "string" ||
+        timing["runAt"].trim() === ""
+      ) {
         errors.push("once timing requires runAt");
       }
     } else if (timingType === "recurring") {
@@ -391,7 +400,9 @@ export function validateScheduleFile(
           typeof timing["startsAt"] === "string" &&
           timing["startsAt"].trim() !== ""
         ) {
-          if (new Date(endsAt).getTime() <= new Date(timing["startsAt"]).getTime()) {
+          if (
+            new Date(endsAt).getTime() <= new Date(timing["startsAt"]).getTime()
+          ) {
             errors.push("endsAt must be later than startsAt");
           }
         }
@@ -419,7 +430,11 @@ export function validateScheduleFile(
     if (!VALID_EXECUTORS.has(String(executor ?? ""))) {
       errors.push('execution.executor must be "subagent" or "command"');
     }
-    if (executor === "command" && (typeof execution["command"] !== "string" || execution["command"].trim() === "")) {
+    if (
+      executor === "command" &&
+      (typeof execution["command"] !== "string" ||
+        execution["command"].trim() === "")
+    ) {
       errors.push("execution.command is required when executor is command");
     }
     if (
@@ -431,7 +446,11 @@ export function validateScheduleFile(
     if (!VALID_OVERLAP_POLICIES.has(String(execution["overlapPolicy"] ?? ""))) {
       errors.push('execution.overlapPolicy must be "allow" or "skip"');
     }
-    if (!VALID_PERMISSION_PROFILES.has(String(execution["permissionProfile"] ?? ""))) {
+    if (
+      !VALID_PERMISSION_PROFILES.has(
+        String(execution["permissionProfile"] ?? ""),
+      )
+    ) {
       errors.push("execution.permissionProfile is invalid");
     }
     const resources = execution["resources"];
@@ -458,7 +477,11 @@ export function validateScheduleFile(
     if (typeof outputPolicy["notifyLlm"] !== "boolean") {
       errors.push("outputPolicy.notifyLlm must be a boolean");
     }
-    if (!VALID_LINKED_TASK_UPDATE_POLICIES.has(String(outputPolicy["linkedTaskUpdate"] ?? ""))) {
+    if (
+      !VALID_LINKED_TASK_UPDATE_POLICIES.has(
+        String(outputPolicy["linkedTaskUpdate"] ?? ""),
+      )
+    ) {
       errors.push("outputPolicy.linkedTaskUpdate is invalid");
     }
   }
@@ -477,7 +500,8 @@ export function validateScheduleFile(
       }
       if (
         linkedTask["taskId"] !== undefined &&
-        (typeof linkedTask["taskId"] !== "string" || linkedTask["taskId"].trim() === "")
+        (typeof linkedTask["taskId"] !== "string" ||
+          linkedTask["taskId"].trim() === "")
       ) {
         errors.push("linkedTask.taskId must be a non-empty string");
       }
@@ -485,7 +509,10 @@ export function validateScheduleFile(
   }
 
   // counters
-  if (typeof value["triggeredCount"] !== "number" || value["triggeredCount"] < 0) {
+  if (
+    typeof value["triggeredCount"] !== "number" ||
+    value["triggeredCount"] < 0
+  ) {
     errors.push("triggeredCount must be a non-negative number");
   }
   if (typeof value["missedCount"] !== "number" || value["missedCount"] < 0) {
@@ -511,39 +538,64 @@ function validateRecurrenceRule(rule: Record<string, unknown>): string[] {
   switch (kind) {
     case "every_seconds": {
       const interval = rule["intervalSeconds"];
-      if (typeof interval !== "number" || interval <= 0 || !Number.isInteger(interval)) {
+      if (
+        typeof interval !== "number" ||
+        interval <= 0 ||
+        !Number.isInteger(interval)
+      ) {
         errors.push("every_seconds.intervalSeconds must be a positive integer");
       }
       break;
     }
     case "hourly": {
       const interval = rule["intervalHours"];
-      if (typeof interval !== "number" || interval <= 0 || !Number.isInteger(interval)) {
+      if (
+        typeof interval !== "number" ||
+        interval <= 0 ||
+        !Number.isInteger(interval)
+      ) {
         errors.push("hourly.intervalHours must be a positive integer");
       }
       const minute = rule["minute"];
-      if (minute !== undefined && (typeof minute !== "number" || minute < 0 || minute > 59)) {
+      if (
+        minute !== undefined &&
+        (typeof minute !== "number" || minute < 0 || minute > 59)
+      ) {
         errors.push("hourly.minute must be between 0 and 59");
       }
       const second = rule["second"];
-      if (second !== undefined && (typeof second !== "number" || second < 0 || second > 59)) {
+      if (
+        second !== undefined &&
+        (typeof second !== "number" || second < 0 || second > 59)
+      ) {
         errors.push("hourly.second must be between 0 and 59");
       }
       break;
     }
     case "daily": {
       const interval = rule["intervalDays"];
-      if (typeof interval !== "number" || interval <= 0 || !Number.isInteger(interval)) {
+      if (
+        typeof interval !== "number" ||
+        interval <= 0 ||
+        !Number.isInteger(interval)
+      ) {
         errors.push("daily.intervalDays must be a positive integer");
       }
-      if (typeof rule["timeOfDay"] !== "string" || !/^\d{2}:\d{2}:\d{2}$/.test(String(rule["timeOfDay"]))) {
+      if (
+        typeof rule["timeOfDay"] !== "string" ||
+        !/^\d{2}:\d{2}:\d{2}$/.test(String(rule["timeOfDay"]))
+      ) {
         errors.push("daily.timeOfDay must be HH:mm:ss");
       }
       break;
     }
     case "weekly": {
       const interval = rule["intervalWeeks"];
-      if (typeof interval !== "number" || interval <= 0 || !Number.isInteger(interval)) {
+      if (
+        typeof interval !== "number" ||
+        interval <= 0 ||
+        !Number.isInteger(interval)
+      ) {
         errors.push("weekly.intervalWeeks must be a positive integer");
       }
       const daysOfWeek = rule["daysOfWeek"];
@@ -552,33 +604,49 @@ function validateRecurrenceRule(rule: Record<string, unknown>): string[] {
       } else {
         for (const day of daysOfWeek) {
           if (!VALID_WEEKDAYS.has(String(day))) {
-            errors.push(`weekly.daysOfWeek contains invalid weekday: ${String(day)}`);
+            errors.push(
+              `weekly.daysOfWeek contains invalid weekday: ${String(day)}`,
+            );
             break;
           }
         }
       }
-      if (typeof rule["timeOfDay"] !== "string" || !/^\d{2}:\d{2}:\d{2}$/.test(String(rule["timeOfDay"]))) {
+      if (
+        typeof rule["timeOfDay"] !== "string" ||
+        !/^\d{2}:\d{2}:\d{2}$/.test(String(rule["timeOfDay"]))
+      ) {
         errors.push("weekly.timeOfDay must be HH:mm:ss");
       }
       break;
     }
     case "monthly": {
       const interval = rule["intervalMonths"];
-      if (typeof interval !== "number" || interval <= 0 || !Number.isInteger(interval)) {
+      if (
+        typeof interval !== "number" ||
+        interval <= 0 ||
+        !Number.isInteger(interval)
+      ) {
         errors.push("monthly.intervalMonths must be a positive integer");
       }
       const dayOfMonth = rule["dayOfMonth"];
       if (typeof dayOfMonth !== "number" || dayOfMonth < 1 || dayOfMonth > 31) {
         errors.push("monthly.dayOfMonth must be between 1 and 31");
       }
-      if (typeof rule["timeOfDay"] !== "string" || !/^\d{2}:\d{2}:\d{2}$/.test(String(rule["timeOfDay"]))) {
+      if (
+        typeof rule["timeOfDay"] !== "string" ||
+        !/^\d{2}:\d{2}:\d{2}$/.test(String(rule["timeOfDay"]))
+      ) {
         errors.push("monthly.timeOfDay must be HH:mm:ss");
       }
       break;
     }
     case "yearly": {
       const interval = rule["intervalYears"];
-      if (typeof interval !== "number" || interval <= 0 || !Number.isInteger(interval)) {
+      if (
+        typeof interval !== "number" ||
+        interval <= 0 ||
+        !Number.isInteger(interval)
+      ) {
         errors.push("yearly.intervalYears must be a positive integer");
       }
       const month = rule["month"];
@@ -589,7 +657,10 @@ function validateRecurrenceRule(rule: Record<string, unknown>): string[] {
       if (typeof dayOfMonth !== "number" || dayOfMonth < 1 || dayOfMonth > 31) {
         errors.push("yearly.dayOfMonth must be between 1 and 31");
       }
-      if (typeof rule["timeOfDay"] !== "string" || !/^\d{2}:\d{2}:\d{2}$/.test(String(rule["timeOfDay"]))) {
+      if (
+        typeof rule["timeOfDay"] !== "string" ||
+        !/^\d{2}:\d{2}:\d{2}$/.test(String(rule["timeOfDay"]))
+      ) {
         errors.push("yearly.timeOfDay must be HH:mm:ss");
       }
       break;
@@ -630,7 +701,10 @@ export function validateOccurrenceFile(
     errors.push("scheduleId has invalid format");
   }
 
-  if (typeof value["scheduledAt"] !== "string" || value["scheduledAt"].trim() === "") {
+  if (
+    typeof value["scheduledAt"] !== "string" ||
+    value["scheduledAt"].trim() === ""
+  ) {
     errors.push("scheduledAt is required");
   }
 
@@ -779,7 +853,9 @@ export function createScheduleStore(options: {
   function assertValidForSave(schedule: ScheduleFile): void {
     const errors = validateScheduleFile(schedule, schedule.id);
     if (errors.length > 0) {
-      throw new Error(`Invalid schedule "${schedule.id}": ${errors.join("; ")}`);
+      throw new Error(
+        `Invalid schedule "${schedule.id}": ${errors.join("; ")}`,
+      );
     }
   }
 
@@ -840,7 +916,8 @@ export function createScheduleStore(options: {
       return [...schedules.values()]
         .filter((schedule) => {
           if (!includeArchived && schedule.status === "archived") return false;
-          if (!includeCancelled && schedule.status === "cancelled") return false;
+          if (!includeCancelled && schedule.status === "cancelled")
+            return false;
           if (
             projectRootFilter !== undefined &&
             path.resolve(schedule.projectRoot) !== projectRootFilter

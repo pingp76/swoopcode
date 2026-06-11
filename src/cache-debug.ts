@@ -97,7 +97,9 @@ function sha256(input: string): string {
  * 取第一条 role === "system" 的 message content。
  * 如果没有 system message，hash 为空字符串的 hash。
  */
-function computeSystemPromptHash(messages: ChatCompletionMessageParam[]): string {
+function computeSystemPromptHash(
+  messages: ChatCompletionMessageParam[],
+): string {
   const systemMsg = messages.find((m) => m.role === "system");
   const content =
     typeof systemMsg?.content === "string"

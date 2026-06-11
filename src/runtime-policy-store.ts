@@ -104,7 +104,8 @@ export function createRuntimePolicyStore(
         override.compressionMode,
         merged.context.effectiveBudgetTokens,
       );
-      merged.context.toolOutputCompressionThresholdTokens = defaults.thresholdToolOutput;
+      merged.context.toolOutputCompressionThresholdTokens =
+        defaults.thresholdToolOutput;
       merged.context.decayThresholdLoops = defaults.decayThreshold;
       merged.context.decayPreviewTokens = defaults.decayPreview;
       merged.context.compactKeepRecentBlocks = defaults.compactKeepRecent;
@@ -115,7 +116,11 @@ export function createRuntimePolicyStore(
     if (override.thinkingMode !== undefined) {
       merged.request.thinkingMode = override.thinkingMode;
       // 重新构建 extraBody
-      merged.request.extraBody = buildExtraBody(profile, override.thinkingMode, merged.request.reasoningEffort);
+      merged.request.extraBody = buildExtraBody(
+        profile,
+        override.thinkingMode,
+        merged.request.reasoningEffort,
+      );
     }
     if (override.reasoningEffort !== undefined) {
       if (override.reasoningEffort === null) {
@@ -252,5 +257,3 @@ export function createRuntimePolicyStore(
     },
   };
 }
-
-

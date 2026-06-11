@@ -90,7 +90,9 @@ describe("loadConfig", () => {
     expect(config.modelProfile).toBeDefined();
     expect(config.modelProfile.id).toBe("generic-openai-compatible");
     expect(config.runtimePolicy).toBeDefined();
-    expect(config.runtimePolicy.modelProfileId).toBe("generic-openai-compatible");
+    expect(config.runtimePolicy.modelProfileId).toBe(
+      "generic-openai-compatible",
+    );
   });
 
   it("logLevel 默认值为 info", () => {

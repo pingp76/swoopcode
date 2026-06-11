@@ -5,7 +5,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -176,7 +182,9 @@ describe("CLI model policy command", () => {
   it("dispatches /m to show policy status", () => {
     const store = createPolicyStore();
     const registry = createCliCommandRegistry();
-    registry.register(createModelPolicyCliCommand(store, createLogger("error")));
+    registry.register(
+      createModelPolicyCliCommand(store, createLogger("error")),
+    );
 
     expect(registry.dispatch("/m")).toBe(true);
     expect(console.log).toHaveBeenCalledWith(
@@ -190,7 +198,9 @@ describe("CLI model policy command", () => {
   it("dispatches /模型 alias", () => {
     const store = createPolicyStore();
     const registry = createCliCommandRegistry();
-    registry.register(createModelPolicyCliCommand(store, createLogger("error")));
+    registry.register(
+      createModelPolicyCliCommand(store, createLogger("error")),
+    );
 
     expect(registry.dispatch("/模型")).toBe(true);
     expect(console.log).toHaveBeenCalledWith(
@@ -206,7 +216,9 @@ describe("CLI model policy command", () => {
     });
     const store = createRuntimePolicyStore(profile, "deepseek-v4");
     const registry = createCliCommandRegistry();
-    registry.register(createModelPolicyCliCommand(store, createLogger("error")));
+    registry.register(
+      createModelPolicyCliCommand(store, createLogger("error")),
+    );
 
     registry.dispatch("/m c 300k");
 
@@ -217,7 +229,9 @@ describe("CLI model policy command", () => {
   it("updates max output with /m out 16k", () => {
     const store = createPolicyStore();
     const registry = createCliCommandRegistry();
-    registry.register(createModelPolicyCliCommand(store, createLogger("error")));
+    registry.register(
+      createModelPolicyCliCommand(store, createLogger("error")),
+    );
 
     registry.dispatch("/m out 16k");
 
@@ -228,7 +242,9 @@ describe("CLI model policy command", () => {
     const store = createPolicyStore();
     store.updateOverride({ contextBudgetTokens: 100000 }, "cli");
     const registry = createCliCommandRegistry();
-    registry.register(createModelPolicyCliCommand(store, createLogger("error")));
+    registry.register(
+      createModelPolicyCliCommand(store, createLogger("error")),
+    );
 
     registry.dispatch("/m r");
 
@@ -316,9 +332,7 @@ describe("CLI thinking command", () => {
 
     registry.dispatch("/t 开");
 
-    expect(console.log).toHaveBeenCalledWith(
-      expect.stringContaining("Error:"),
-    );
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Error:"));
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("does not support thinking mode"),
     );
@@ -352,9 +366,16 @@ describe("CLI stable context rank commands", () => {
 
   it("dispatches /c 排 to show ranked files", () => {
     const ranker = createContextRanker(tempDir);
-    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const manager = createStableContextManager(
+      tempDir,
+      "generic",
+      undefined,
+      ranker,
+    );
     const registry = createCliCommandRegistry();
-    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+    registry.register(
+      createStableContextCliCommand(manager, createLogger("error")),
+    );
 
     expect(registry.dispatch("/c 排")).toBe(true);
     expect(console.log).toHaveBeenCalledWith(
@@ -364,9 +385,16 @@ describe("CLI stable context rank commands", () => {
 
   it("dispatches /c rank alias", () => {
     const ranker = createContextRanker(tempDir);
-    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const manager = createStableContextManager(
+      tempDir,
+      "generic",
+      undefined,
+      ranker,
+    );
     const registry = createCliCommandRegistry();
-    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+    registry.register(
+      createStableContextCliCommand(manager, createLogger("error")),
+    );
 
     expect(registry.dispatch("/c rank")).toBe(true);
     expect(console.log).toHaveBeenCalledWith(
@@ -376,24 +404,36 @@ describe("CLI stable context rank commands", () => {
 
   it("dispatches /c why <path> to explain file ranking", () => {
     const ranker = createContextRanker(tempDir);
-    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const manager = createStableContextManager(
+      tempDir,
+      "generic",
+      undefined,
+      ranker,
+    );
     const registry = createCliCommandRegistry();
-    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+    registry.register(
+      createStableContextCliCommand(manager, createLogger("error")),
+    );
 
     expect(registry.dispatch("/c why README.md")).toBe(true);
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Context rank: README.md"),
     );
-    expect(console.log).toHaveBeenCalledWith(
-      expect.stringContaining("score:"),
-    );
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("score:"));
   });
 
   it("dispatches /c 因 <path> alias", () => {
     const ranker = createContextRanker(tempDir);
-    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const manager = createStableContextManager(
+      tempDir,
+      "generic",
+      undefined,
+      ranker,
+    );
     const registry = createCliCommandRegistry();
-    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+    registry.register(
+      createStableContextCliCommand(manager, createLogger("error")),
+    );
 
     expect(registry.dispatch("/c 因 README.md")).toBe(true);
     expect(console.log).toHaveBeenCalledWith(
@@ -403,9 +443,16 @@ describe("CLI stable context rank commands", () => {
 
   it("reports file not found for unknown path", () => {
     const ranker = createContextRanker(tempDir);
-    const manager = createStableContextManager(tempDir, "generic", undefined, ranker);
+    const manager = createStableContextManager(
+      tempDir,
+      "generic",
+      undefined,
+      ranker,
+    );
     const registry = createCliCommandRegistry();
-    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+    registry.register(
+      createStableContextCliCommand(manager, createLogger("error")),
+    );
 
     registry.dispatch("/c why nonexistent.ts");
     expect(console.log).toHaveBeenCalledWith(
@@ -416,7 +463,9 @@ describe("CLI stable context rank commands", () => {
   it("reports no ranker when not configured", () => {
     const manager = createStableContextManager(tempDir, "generic");
     const registry = createCliCommandRegistry();
-    registry.register(createStableContextCliCommand(manager, createLogger("error")));
+    registry.register(
+      createStableContextCliCommand(manager, createLogger("error")),
+    );
 
     registry.dispatch("/c 排");
     expect(console.log).toHaveBeenCalledWith(

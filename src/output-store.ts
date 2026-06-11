@@ -11,12 +11,7 @@
  * 且 index 记录的 relativePath 仍然落在 outputDir 内”。
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { resolve, sep } from "node:path";
 import { atomicWriteJsonFile, atomicWriteTextFile } from "./atomic-write.js";
@@ -182,7 +177,10 @@ export function createOutputStore(options: OutputStoreOptions): OutputStore {
       const relativePath = `${OUTPUTS_DIR_NAME}/${id}.txt`;
       // 即使 relativePath 是本模块生成的，也走统一路径防线。
       // 这样未来如果生成规则变化，仍不会绕过 outputDir 边界。
-      const filePath = ensureRelativePathWithinOutputDir(relativePath, outputDir);
+      const filePath = ensureRelativePathWithinOutputDir(
+        relativePath,
+        outputDir,
+      );
 
       const record: OutputRecord = {
         version: 1,
@@ -196,11 +194,13 @@ export function createOutputStore(options: OutputStoreOptions): OutputStore {
         contentType: "text/plain",
       };
 
-      if (input.projectRoot !== undefined) record.projectRoot = input.projectRoot;
+      if (input.projectRoot !== undefined)
+        record.projectRoot = input.projectRoot;
       if (input.toolName !== undefined) record.toolName = input.toolName;
       if (input.runId !== undefined) record.runId = input.runId;
       if (input.scheduleId !== undefined) record.scheduleId = input.scheduleId;
-      if (input.occurrenceId !== undefined) record.occurrenceId = input.occurrenceId;
+      if (input.occurrenceId !== undefined)
+        record.occurrenceId = input.occurrenceId;
 
       try {
         mkdirSync(outputsDir, { recursive: true });
@@ -307,7 +307,10 @@ function validateRecord(record: OutputRecord): void {
   if (typeof record.sourceId !== "string" || record.sourceId.length === 0) {
     throw new Error(`Invalid output sourceId: ${record.id}`);
   }
-  if (typeof record.relativePath !== "string" || record.relativePath.length === 0) {
+  if (
+    typeof record.relativePath !== "string" ||
+    record.relativePath.length === 0
+  ) {
     throw new Error(`Invalid output relativePath: ${record.id}`);
   }
   if (!Number.isInteger(record.byteLength) || record.byteLength < 0) {
@@ -335,7 +338,10 @@ function ensureRelativePathWithinOutputDir(
 }
 
 function formatOutputId(date: Date, suffix: string): string {
-  const safeSuffix = suffix.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 6);
+  const safeSuffix = suffix
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 6);
   if (safeSuffix.length !== 6) {
     throw new Error("output id suffix must contain 6 alphanumeric characters");
   }
@@ -349,7 +355,10 @@ function formatOutputId(date: Date, suffix: string): string {
   return `out_${yyyy}${mm}${dd}_${hh}${mi}${ss}_${safeSuffix}`;
 }
 
-function normalizeMaxBytes(value: number | undefined, defaultValue: number): number {
+function normalizeMaxBytes(
+  value: number | undefined,
+  defaultValue: number,
+): number {
   if (value === undefined) return defaultValue;
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error("max_bytes must be a positive number");

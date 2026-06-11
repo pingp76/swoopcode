@@ -12,7 +12,10 @@ import {
   type FoundationModelProfile,
 } from "./foundation-models.js";
 
-function getProfile(id: string, provider = "openai_compatible"): FoundationModelProfile {
+function getProfile(
+  id: string,
+  provider = "openai_compatible",
+): FoundationModelProfile {
   return resolveFoundationModelProfile({
     provider: provider as import("./llm-providers.js").LLMProviderId,
     model: id,

@@ -28,11 +28,18 @@ import type {
  */
 export interface TraceRecorder {
   /** 记录一条运行时事件 */
-  pushEvent(event: AgentRuntimeEvent | Omit<AgentRuntimeEvent, "id" | "timestamp">): void;
+  pushEvent(
+    event: AgentRuntimeEvent | Omit<AgentRuntimeEvent, "id" | "timestamp">,
+  ): void;
   /** 开始一个步骤 */
   startStep(stepId: string, query: string): void;
   /** 结束一个步骤 */
-  endStep(stepId: string, finalOutput?: string, exitCode?: number, error?: EvalRunError): void;
+  endStep(
+    stepId: string,
+    finalOutput?: string,
+    exitCode?: number,
+    error?: EvalRunError,
+  ): void;
   /** 获取当前已记录的步骤痕迹（只读视图） */
   getStepTraces(): EvalStepTrace[];
   /** 组装最终 EvalTrace */

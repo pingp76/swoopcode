@@ -9,8 +9,12 @@ describe("ExecutionPolicy command validation", () => {
   const policy = createExecutionPolicy();
 
   it("allows readonly diagnostic commands", () => {
-    expect(policy.validateCommand({ command: "git status" }).allowed).toBe(true);
-    expect(policy.validateCommand({ command: "npm run typecheck" }).allowed).toBe(true);
+    expect(policy.validateCommand({ command: "git status" }).allowed).toBe(
+      true,
+    );
+    expect(
+      policy.validateCommand({ command: "npm run typecheck" }).allowed,
+    ).toBe(true);
     expect(
       policy.validateCommand({ command: "npx vitest run src/foo.test.ts" })
         .allowed,
@@ -18,21 +22,27 @@ describe("ExecutionPolicy command validation", () => {
   });
 
   it("allows npx tsc only with --noEmit in readonly profile", () => {
-    expect(policy.validateCommand({ command: "npx tsc --noEmit" }).allowed).toBe(true);
+    expect(
+      policy.validateCommand({ command: "npx tsc --noEmit" }).allowed,
+    ).toBe(true);
     const result = policy.validateCommand({ command: "npx tsc" });
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain("--noEmit");
   });
 
   it("rejects write/fix flags in readonly profile", () => {
-    expect(policy.validateCommand({ command: "npx eslint --fix" }).allowed).toBe(false);
+    expect(
+      policy.validateCommand({ command: "npx eslint --fix" }).allowed,
+    ).toBe(false);
     expect(
       policy.validateCommand({ command: "npm run lint -- --fix" }).allowed,
     ).toBe(false);
   });
 
   it("rejects build in readonly but allows it in ci", () => {
-    expect(policy.validateCommand({ command: "npm run build" }).allowed).toBe(false);
+    expect(policy.validateCommand({ command: "npm run build" }).allowed).toBe(
+      false,
+    );
     expect(
       policy.validateCommand({ command: "npm run build", profile: "ci" })
         .allowed,
@@ -66,9 +76,9 @@ describe("ExecutionPolicy command validation", () => {
     expect(adapter.maxTimeoutMs).toBe(300_000);
     expect(adapter.validate("git status").allowed).toBe(true);
     expect(adapter.validate("npm run build").allowed).toBe(false);
-    expect(createDefaultAsyncCommandPolicy().validate("git status").allowed).toBe(
-      true,
-    );
+    expect(
+      createDefaultAsyncCommandPolicy().validate("git status").allowed,
+    ).toBe(true);
   });
 });
 

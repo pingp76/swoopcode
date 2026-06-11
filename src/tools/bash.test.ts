@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { isDangerousCommand, executeBash, createDefaultAsyncCommandPolicy } from "./bash.js";
+import {
+  isDangerousCommand,
+  executeBash,
+  createDefaultAsyncCommandPolicy,
+} from "./bash.js";
 
 describe("isDangerousCommand", () => {
   it("blocks rm -rf", () => {

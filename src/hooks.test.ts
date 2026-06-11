@@ -1,8 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import {
-  createHookRunner,
-  createNoopHookRunner,
-} from "./hooks.js";
+import { createHookRunner, createNoopHookRunner } from "./hooks.js";
 import type { HookEvent, HookHandler } from "./hooks.js";
 import type { Logger } from "./logger.js";
 
@@ -107,7 +104,9 @@ describe("createHookRunner", () => {
   it("handler 返回 1 后，后续 handler 不执行", async () => {
     const logger = createMockLogger();
     const handler1 = vi.fn<HookHandler>().mockReturnValue({ exitCode: 0 });
-    const handler2 = vi.fn<HookHandler>().mockReturnValue({ exitCode: 1, message: "stop" });
+    const handler2 = vi
+      .fn<HookHandler>()
+      .mockReturnValue({ exitCode: 1, message: "stop" });
     const handler3 = vi.fn<HookHandler>().mockReturnValue({ exitCode: 0 });
 
     const runner = createHookRunner(

@@ -50,7 +50,9 @@ function writeFile(dir: string, relativePath: string, content: string): void {
   fs.writeFileSync(fullPath, content);
 }
 
-function makeFacts(overrides: Partial<FileFacts> & { path: string }): FileFacts {
+function makeFacts(
+  overrides: Partial<FileFacts> & { path: string },
+): FileFacts {
   return {
     name: path.basename(overrides.path),
     extension: path.extname(overrides.path),
@@ -79,7 +81,9 @@ function makeEmptyTask(overrides?: Partial<TaskContext>): TaskContext {
   };
 }
 
-function makeEmptyRepo(overrides?: Partial<RepoClassification>): RepoClassification {
+function makeEmptyRepo(
+  overrides?: Partial<RepoClassification>,
+): RepoClassification {
   return {
     primary: "unknown",
     all: [],
@@ -96,7 +100,9 @@ function makeEmptyRepo(overrides?: Partial<RepoClassification>): RepoClassificat
 
 describe("identifyFileRoles", () => {
   it("identifies AGENTS.md as project_instruction", () => {
-    expect(identifyFileRoles("AGENTS.md", "AGENTS.md")).toContain("project_instruction");
+    expect(identifyFileRoles("AGENTS.md", "AGENTS.md")).toContain(
+      "project_instruction",
+    );
   });
 
   it("identifies README.md as readme", () => {
@@ -104,11 +110,15 @@ describe("identifyFileRoles", () => {
   });
 
   it("identifies doc/summary.md as project_summary", () => {
-    expect(identifyFileRoles("doc/summary.md", "summary.md")).toContain("project_summary");
+    expect(identifyFileRoles("doc/summary.md", "summary.md")).toContain(
+      "project_summary",
+    );
   });
 
   it("identifies package.json as manifest", () => {
-    expect(identifyFileRoles("package.json", "package.json")).toContain("manifest");
+    expect(identifyFileRoles("package.json", "package.json")).toContain(
+      "manifest",
+    );
   });
 
   it("identifies Cargo.toml as manifest", () => {
@@ -116,7 +126,9 @@ describe("identifyFileRoles", () => {
   });
 
   it("identifies pyproject.toml as manifest", () => {
-    expect(identifyFileRoles("pyproject.toml", "pyproject.toml")).toContain("manifest");
+    expect(identifyFileRoles("pyproject.toml", "pyproject.toml")).toContain(
+      "manifest",
+    );
   });
 
   it("identifies go.mod as manifest", () => {
@@ -129,15 +141,21 @@ describe("identifyFileRoles", () => {
   });
 
   it("identifies src/index.ts as entrypoint", () => {
-    expect(identifyFileRoles("src/index.ts", "index.ts")).toContain("entrypoint");
+    expect(identifyFileRoles("src/index.ts", "index.ts")).toContain(
+      "entrypoint",
+    );
   });
 
   it("identifies *.test.ts as test", () => {
-    expect(identifyFileRoles("src/foo.test.ts", "foo.test.ts")).toContain("test");
+    expect(identifyFileRoles("src/foo.test.ts", "foo.test.ts")).toContain(
+      "test",
+    );
   });
 
   it("identifies test_*.py as test", () => {
-    expect(identifyFileRoles("tests/test_main.py", "test_main.py")).toContain("test");
+    expect(identifyFileRoles("tests/test_main.py", "test_main.py")).toContain(
+      "test",
+    );
   });
 
   it("identifies *_test.go as test", () => {
@@ -149,11 +167,15 @@ describe("identifyFileRoles", () => {
   });
 
   it("identifies .github/workflows/*.yml as ci_config", () => {
-    expect(identifyFileRoles(".github/workflows/ci.yml", "ci.yml")).toContain("ci_config");
+    expect(identifyFileRoles(".github/workflows/ci.yml", "ci.yml")).toContain(
+      "ci_config",
+    );
   });
 
   it("identifies openapi.yaml as schema", () => {
-    expect(identifyFileRoles("openapi.yaml", "openapi.yaml")).toContain("schema");
+    expect(identifyFileRoles("openapi.yaml", "openapi.yaml")).toContain(
+      "schema",
+    );
   });
 
   it("identifies .env as secret", () => {
@@ -199,11 +221,31 @@ describe("identifyFileEcosystems", () => {
 describe("classifyRepository", () => {
   it("classifies typescript project", () => {
     const files: FileFacts[] = [
-      makeFacts({ path: "package.json", roles: ["manifest"], ecosystems: ["typescript"] }),
-      makeFacts({ path: "tsconfig.json", roles: ["build_config"], ecosystems: ["typescript"] }),
-      makeFacts({ path: "src/index.ts", roles: ["entrypoint", "source"], ecosystems: ["typescript"] }),
-      makeFacts({ path: "src/agent.ts", roles: ["source"], ecosystems: ["typescript"] }),
-      makeFacts({ path: "src/agent.test.ts", roles: ["test"], ecosystems: ["typescript"] }),
+      makeFacts({
+        path: "package.json",
+        roles: ["manifest"],
+        ecosystems: ["typescript"],
+      }),
+      makeFacts({
+        path: "tsconfig.json",
+        roles: ["build_config"],
+        ecosystems: ["typescript"],
+      }),
+      makeFacts({
+        path: "src/index.ts",
+        roles: ["entrypoint", "source"],
+        ecosystems: ["typescript"],
+      }),
+      makeFacts({
+        path: "src/agent.ts",
+        roles: ["source"],
+        ecosystems: ["typescript"],
+      }),
+      makeFacts({
+        path: "src/agent.test.ts",
+        roles: ["test"],
+        ecosystems: ["typescript"],
+      }),
     ];
     const result = classifyRepository(files);
     expect(result.primary).toBe("typescript");
@@ -212,10 +254,22 @@ describe("classifyRepository", () => {
 
   it("classifies python project", () => {
     const files: FileFacts[] = [
-      makeFacts({ path: "pyproject.toml", roles: ["manifest"], ecosystems: ["python"] }),
-      makeFacts({ path: "requirements.txt", roles: ["manifest"], ecosystems: ["python"] }),
+      makeFacts({
+        path: "pyproject.toml",
+        roles: ["manifest"],
+        ecosystems: ["python"],
+      }),
+      makeFacts({
+        path: "requirements.txt",
+        roles: ["manifest"],
+        ecosystems: ["python"],
+      }),
       makeFacts({ path: "app.py", roles: ["source"], ecosystems: ["python"] }),
-      makeFacts({ path: "tests/test_app.py", roles: ["test"], ecosystems: ["python"] }),
+      makeFacts({
+        path: "tests/test_app.py",
+        roles: ["test"],
+        ecosystems: ["python"],
+      }),
     ];
     const result = classifyRepository(files);
     expect(result.primary).toBe("python");
@@ -223,9 +277,21 @@ describe("classifyRepository", () => {
 
   it("classifies rust project", () => {
     const files: FileFacts[] = [
-      makeFacts({ path: "Cargo.toml", roles: ["manifest"], ecosystems: ["rust"] }),
-      makeFacts({ path: "src/main.rs", roles: ["entrypoint", "source"], ecosystems: ["rust"] }),
-      makeFacts({ path: "src/lib.rs", roles: ["source"], ecosystems: ["rust"] }),
+      makeFacts({
+        path: "Cargo.toml",
+        roles: ["manifest"],
+        ecosystems: ["rust"],
+      }),
+      makeFacts({
+        path: "src/main.rs",
+        roles: ["entrypoint", "source"],
+        ecosystems: ["rust"],
+      }),
+      makeFacts({
+        path: "src/lib.rs",
+        roles: ["source"],
+        ecosystems: ["rust"],
+      }),
     ];
     const result = classifyRepository(files);
     expect(result.primary).toBe("rust");
@@ -234,7 +300,11 @@ describe("classifyRepository", () => {
   it("classifies go project", () => {
     const files: FileFacts[] = [
       makeFacts({ path: "go.mod", roles: ["manifest"], ecosystems: ["go"] }),
-      makeFacts({ path: "main.go", roles: ["entrypoint", "source"], ecosystems: ["go"] }),
+      makeFacts({
+        path: "main.go",
+        roles: ["entrypoint", "source"],
+        ecosystems: ["go"],
+      }),
       makeFacts({ path: "main_test.go", roles: ["test"], ecosystems: ["go"] }),
     ];
     const result = classifyRepository(files);
@@ -244,9 +314,21 @@ describe("classifyRepository", () => {
   it("classifies java project with deep directory patterns", () => {
     const files: FileFacts[] = [
       makeFacts({ path: "pom.xml", roles: ["manifest"], ecosystems: ["java"] }),
-      makeFacts({ path: "src/main/java/com/example/App.java", roles: ["source"], ecosystems: ["java"] }),
-      makeFacts({ path: "src/main/java/com/example/Service.java", roles: ["source"], ecosystems: ["java"] }),
-      makeFacts({ path: "src/test/java/com/example/AppTest.java", roles: ["test"], ecosystems: ["java"] }),
+      makeFacts({
+        path: "src/main/java/com/example/App.java",
+        roles: ["source"],
+        ecosystems: ["java"],
+      }),
+      makeFacts({
+        path: "src/main/java/com/example/Service.java",
+        roles: ["source"],
+        ecosystems: ["java"],
+      }),
+      makeFacts({
+        path: "src/test/java/com/example/AppTest.java",
+        roles: ["test"],
+        ecosystems: ["java"],
+      }),
     ];
     const result = classifyRepository(files);
     expect(result.primary).toBe("java");
@@ -277,14 +359,46 @@ describe("classifyRepository", () => {
 
   it("classifies mixed monorepo", () => {
     const files: FileFacts[] = [
-      makeFacts({ path: "frontend/package.json", roles: ["manifest"], ecosystems: ["typescript"] }),
-      makeFacts({ path: "frontend/tsconfig.json", roles: ["build_config"], ecosystems: ["typescript"] }),
-      makeFacts({ path: "frontend/src/index.ts", roles: ["entrypoint"], ecosystems: ["typescript"] }),
-      makeFacts({ path: "frontend/src/app.ts", roles: ["source"], ecosystems: ["typescript"] }),
-      makeFacts({ path: "backend/pyproject.toml", roles: ["manifest"], ecosystems: ["python"] }),
-      makeFacts({ path: "backend/requirements.txt", roles: ["manifest"], ecosystems: ["python"] }),
-      makeFacts({ path: "backend/app.py", roles: ["source"], ecosystems: ["python"] }),
-      makeFacts({ path: "backend/main.py", roles: ["source"], ecosystems: ["python"] }),
+      makeFacts({
+        path: "frontend/package.json",
+        roles: ["manifest"],
+        ecosystems: ["typescript"],
+      }),
+      makeFacts({
+        path: "frontend/tsconfig.json",
+        roles: ["build_config"],
+        ecosystems: ["typescript"],
+      }),
+      makeFacts({
+        path: "frontend/src/index.ts",
+        roles: ["entrypoint"],
+        ecosystems: ["typescript"],
+      }),
+      makeFacts({
+        path: "frontend/src/app.ts",
+        roles: ["source"],
+        ecosystems: ["typescript"],
+      }),
+      makeFacts({
+        path: "backend/pyproject.toml",
+        roles: ["manifest"],
+        ecosystems: ["python"],
+      }),
+      makeFacts({
+        path: "backend/requirements.txt",
+        roles: ["manifest"],
+        ecosystems: ["python"],
+      }),
+      makeFacts({
+        path: "backend/app.py",
+        roles: ["source"],
+        ecosystems: ["python"],
+      }),
+      makeFacts({
+        path: "backend/main.py",
+        roles: ["source"],
+        ecosystems: ["python"],
+      }),
     ];
     const result = classifyRepository(files);
     expect(result.primary).toBe("mixed");
@@ -308,7 +422,11 @@ describe("classifyTaskIntent", () => {
   it("classifies orientation intent", () => {
     const result = classifyTaskIntent({
       query: "解释这个项目的架构",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.intent).toBe("orientation");
   });
@@ -316,7 +434,11 @@ describe("classifyTaskIntent", () => {
   it("classifies implementation intent", () => {
     const result = classifyTaskIntent({
       query: "实现一个新的排序功能",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.intent).toBe("implementation");
   });
@@ -324,7 +446,11 @@ describe("classifyTaskIntent", () => {
   it("classifies debug intent", () => {
     const result = classifyTaskIntent({
       query: "修复这个 error",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.intent).toBe("debug");
   });
@@ -332,8 +458,11 @@ describe("classifyTaskIntent", () => {
   it("classifies debug intent from failing files", () => {
     const result = classifyTaskIntent({
       query: "看看这个",
-      recentFiles: [], openFiles: [], changedFiles: [],
-      failingFiles: ["src/foo.test.ts"], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: ["src/foo.test.ts"],
+      stackTraceFiles: [],
     });
     expect(result.intent).toBe("debug");
   });
@@ -341,7 +470,11 @@ describe("classifyTaskIntent", () => {
   it("classifies review intent", () => {
     const result = classifyTaskIntent({
       query: "review 一下这段代码",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.intent).toBe("review");
   });
@@ -349,7 +482,11 @@ describe("classifyTaskIntent", () => {
   it("classifies testing intent", () => {
     const result = classifyTaskIntent({
       query: "补测试",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.intent).toBe("testing");
   });
@@ -357,7 +494,11 @@ describe("classifyTaskIntent", () => {
   it("classifies documentation intent", () => {
     const result = classifyTaskIntent({
       query: "更新 README 文档",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.intent).toBe("documentation");
   });
@@ -365,7 +506,11 @@ describe("classifyTaskIntent", () => {
   it("classifies refactor intent", () => {
     const result = classifyTaskIntent({
       query: "重构这个模块",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.intent).toBe("refactor");
   });
@@ -373,7 +518,11 @@ describe("classifyTaskIntent", () => {
   it("extracts mentioned paths", () => {
     const result = classifyTaskIntent({
       query: "看看 src/foo.ts 这个文件",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.explicitlyMentionedPaths).toContain("src/foo.ts");
   });
@@ -381,7 +530,11 @@ describe("classifyTaskIntent", () => {
   it("extracts design doc IDs", () => {
     const result = classifyTaskIntent({
       query: "按照 pdd21-1 实现",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.explicitlyMentionedTerms).toContain("pdd21-1");
   });
@@ -389,7 +542,11 @@ describe("classifyTaskIntent", () => {
   it("returns unknown for empty query", () => {
     const result = classifyTaskIntent({
       query: "",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     expect(result.intent).toBe("unknown");
   });
@@ -401,7 +558,10 @@ describe("classifyTaskIntent", () => {
 
 describe("computeRoleScore", () => {
   it("gives high score to project_summary", () => {
-    const facts = makeFacts({ path: "doc/summary.md", roles: ["project_summary"] });
+    const facts = makeFacts({
+      path: "doc/summary.md",
+      roles: ["project_summary"],
+    });
     expect(computeRoleScore(facts).score).toBe(420);
   });
 
@@ -428,43 +588,71 @@ describe("computeRoleScore", () => {
 
 describe("computeEcosystemScore", () => {
   it("gives typescript bonus to package.json", () => {
-    const facts = makeFacts({ path: "package.json", name: "package.json", roles: ["manifest"] });
+    const facts = makeFacts({
+      path: "package.json",
+      name: "package.json",
+      roles: ["manifest"],
+    });
     const repo = makeEmptyRepo({ primary: "typescript" });
     expect(computeEcosystemScore(facts, repo).score).toBe(250);
   });
 
   it("gives python bonus to pyproject.toml", () => {
-    const facts = makeFacts({ path: "pyproject.toml", name: "pyproject.toml", roles: ["manifest"] });
+    const facts = makeFacts({
+      path: "pyproject.toml",
+      name: "pyproject.toml",
+      roles: ["manifest"],
+    });
     const repo = makeEmptyRepo({ primary: "python" });
     expect(computeEcosystemScore(facts, repo).score).toBe(250);
   });
 
   it("gives rust bonus to Cargo.toml", () => {
-    const facts = makeFacts({ path: "Cargo.toml", name: "Cargo.toml", roles: ["manifest"] });
+    const facts = makeFacts({
+      path: "Cargo.toml",
+      name: "Cargo.toml",
+      roles: ["manifest"],
+    });
     const repo = makeEmptyRepo({ primary: "rust" });
     expect(computeEcosystemScore(facts, repo).score).toBe(250);
   });
 
   it("gives no bonus for wrong ecosystem", () => {
-    const facts = makeFacts({ path: "package.json", name: "package.json", roles: ["manifest"] });
+    const facts = makeFacts({
+      path: "package.json",
+      name: "package.json",
+      roles: ["manifest"],
+    });
     const repo = makeEmptyRepo({ primary: "python" });
     expect(computeEcosystemScore(facts, repo).score).toBe(0);
   });
 
   it("matches path-based profile keys (e.g. src/index.ts)", () => {
-    const facts = makeFacts({ path: "src/index.ts", name: "index.ts", roles: ["entrypoint", "source"] });
+    const facts = makeFacts({
+      path: "src/index.ts",
+      name: "index.ts",
+      roles: ["entrypoint", "source"],
+    });
     const repo = makeEmptyRepo({ primary: "typescript" });
     expect(computeEcosystemScore(facts, repo).score).toBe(200);
   });
 
   it("matches src/main.ts path-based key", () => {
-    const facts = makeFacts({ path: "src/main.ts", name: "main.ts", roles: ["entrypoint", "source"] });
+    const facts = makeFacts({
+      path: "src/main.ts",
+      name: "main.ts",
+      roles: ["entrypoint", "source"],
+    });
     const repo = makeEmptyRepo({ primary: "typescript" });
     expect(computeEcosystemScore(facts, repo).score).toBe(220);
   });
 
   it("matches rust src/lib.rs path-based key", () => {
-    const facts = makeFacts({ path: "src/lib.rs", name: "lib.rs", roles: ["source"] });
+    const facts = makeFacts({
+      path: "src/lib.rs",
+      name: "lib.rs",
+      roles: ["source"],
+    });
     const repo = makeEmptyRepo({ primary: "rust" });
     expect(computeEcosystemScore(facts, repo).score).toBe(240);
   });
@@ -733,7 +921,11 @@ describe("full fixture: typescript project", () => {
     writeFile(tempDir, "README.md", "# Test Project");
     writeFile(tempDir, "src/index.ts", 'import { agent } from "./agent.js";\n');
     writeFile(tempDir, "src/agent.ts", "export function run() {}\n");
-    writeFile(tempDir, "src/agent.test.ts", 'import { run } from "./agent.js";\n');
+    writeFile(
+      tempDir,
+      "src/agent.test.ts",
+      'import { run } from "./agent.js";\n',
+    );
   });
 
   afterEach(() => cleanup(tempDir));
@@ -744,7 +936,11 @@ describe("full fixture: typescript project", () => {
     const repo = ranker.classifyRepo(files);
     const task = ranker.classifyTask({
       query: "",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     const ranked = ranker.rankFiles({ files, repo, task });
 
@@ -777,12 +973,18 @@ describe("full fixture: python project", () => {
 
     const task = ranker.classifyTask({
       query: "",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     const ranked = ranker.rankFiles({ files, repo, task });
 
     const pyprojectRank = ranked.findIndex((r) => r.path === "pyproject.toml");
-    const conftestRank = ranked.findIndex((r) => r.path === "tests/conftest.py");
+    const conftestRank = ranked.findIndex(
+      (r) => r.path === "tests/conftest.py",
+    );
     expect(pyprojectRank).toBeLessThan(conftestRank);
   });
 
@@ -815,7 +1017,11 @@ describe("full fixture: rust project", () => {
 
     const task = ranker.classifyTask({
       query: "",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     const ranked = ranker.rankFiles({ files, repo, task });
 
@@ -848,12 +1054,18 @@ describe("full fixture: go project", () => {
 
     const task = ranker.classifyTask({
       query: "",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     const ranked = ranker.rankFiles({ files, repo, task });
 
     const goModRank = ranked.findIndex((r) => r.path === "go.mod");
-    const handlerRank = ranked.findIndex((r) => r.path === "internal/handler.go");
+    const handlerRank = ranked.findIndex(
+      (r) => r.path === "internal/handler.go",
+    );
     expect(goModRank).toBeLessThan(handlerRank);
   });
 });
@@ -879,7 +1091,11 @@ describe("full fixture: docs-only project", () => {
 
     const task = ranker.classifyTask({
       query: "",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     const ranked = ranker.rankFiles({ files, repo, task });
 
@@ -950,11 +1166,17 @@ describe("full fixture: mixed monorepo", () => {
     const repo = ranker.classifyRepo(files);
     const task = ranker.classifyTask({
       query: "",
-      recentFiles: [], openFiles: [], changedFiles: [], failingFiles: [], stackTraceFiles: [],
+      recentFiles: [],
+      openFiles: [],
+      changedFiles: [],
+      failingFiles: [],
+      stackTraceFiles: [],
     });
     const ranked = ranker.rankFiles({ files, repo, task });
 
-    const frontendIndex = ranked.find((r) => r.path === "frontend/src/index.ts");
+    const frontendIndex = ranked.find(
+      (r) => r.path === "frontend/src/index.ts",
+    );
     expect(frontendIndex).toBeDefined();
     expect(frontendIndex!.score).toBeGreaterThan(0);
   });
@@ -973,7 +1195,11 @@ describe("review intent test file handling", () => {
   });
 
   it("gives bonus to changed test files in review intent", () => {
-    const facts = makeFacts({ path: "src/foo.test.ts", roles: ["test"], isGitModified: true });
+    const facts = makeFacts({
+      path: "src/foo.test.ts",
+      roles: ["test"],
+      isGitModified: true,
+    });
     const task = makeEmptyTask({
       intent: "review",
       changedFiles: ["src/foo.test.ts"],

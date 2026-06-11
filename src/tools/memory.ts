@@ -46,7 +46,7 @@ const memoryCreateDef: ChatCompletionTool = {
   function: {
     name: "run_memory_create",
     description:
-      'Create or update a long-term memory. Use when the user explicitly asks to ' +
+      "Create or update a long-term memory. Use when the user explicitly asks to " +
       '"remember" something, or when the user confirms a suggested memory. ' +
       "Memory persists across sessions, so only store information that will be " +
       "valuable in many future conversations. Before creating a new memory, check " +

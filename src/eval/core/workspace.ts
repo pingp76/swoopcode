@@ -9,7 +9,14 @@
  * - 默认 case 结束后自动清理
  */
 
-import { mkdtemp, mkdir, writeFile, readFile, access, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  access,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname, isAbsolute } from "node:path";
 import type { EvalWorkspacePlan } from "./case-schema.js";

@@ -69,7 +69,8 @@ export function createExecutionPolicy(): ExecutionPolicy {
         // 现在显式拒绝，比“类型上支持但运行时悄悄放行”更安全，也更适合教学。
         return {
           allowed: false,
-          reason: "workspace_write execution profile is reserved for a later lesson",
+          reason:
+            "workspace_write execution profile is reserved for a later lesson",
         };
       }
 
@@ -81,7 +82,8 @@ export function createExecutionPolicy(): ExecutionPolicy {
       if (profile === "workspace_write") {
         return {
           allowed: false,
-          reason: "workspace_write execution profile is reserved for a later lesson",
+          reason:
+            "workspace_write execution profile is reserved for a later lesson",
         };
       }
 
@@ -97,7 +99,10 @@ export function createExecutionPolicy(): ExecutionPolicy {
 
       for (const p of input.readPaths) {
         if (typeof p !== "string") {
-          return { allowed: false, reason: "read_paths must contain only strings" };
+          return {
+            allowed: false,
+            reason: "read_paths must contain only strings",
+          };
         }
         // read path 必须落在当前 projectRoot 下，避免后台任务读取用户未授权目录。
         if (!isPathWithin(p, projectRoot)) {
@@ -110,7 +115,10 @@ export function createExecutionPolicy(): ExecutionPolicy {
 
       for (const p of input.writePaths) {
         if (typeof p !== "string") {
-          return { allowed: false, reason: "write_paths must contain only strings" };
+          return {
+            allowed: false,
+            reason: "write_paths must contain only strings",
+          };
         }
       }
 
@@ -206,7 +214,10 @@ function validateReadonlyCommand(argv: string[]): PolicyValidation {
   if (isNpx(argv, "tsc")) {
     return argv.includes("--noEmit")
       ? { allowed: true }
-      : { allowed: false, reason: "npx tsc must include --noEmit in readonly profile" };
+      : {
+          allowed: false,
+          reason: "npx tsc must include --noEmit in readonly profile",
+        };
   }
 
   if (isNpmRun(argv, "build")) {
@@ -248,7 +259,9 @@ function allowsCommonReadonlyCommand(argv: string[]): boolean {
   if (cmd === "git") {
     if (!sub) return false;
     if (GIT_WRITE_COMMANDS.has(sub)) return false;
-    return sub === "status" || sub === "diff" || sub === "log" || sub === "show";
+    return (
+      sub === "status" || sub === "diff" || sub === "log" || sub === "show"
+    );
   }
   if (cmd === "find") return false;
   return false;
@@ -261,7 +274,10 @@ function isGitWriteCommand(argv: string[]): boolean {
 
 function rejectFixFlag(argv: string[]): PolicyValidation {
   if (argv.includes("--fix")) {
-    return { allowed: false, reason: "--fix is not allowed in non-interactive commands" };
+    return {
+      allowed: false,
+      reason: "--fix is not allowed in non-interactive commands",
+    };
   }
   return { allowed: true };
 }

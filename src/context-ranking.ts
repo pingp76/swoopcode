@@ -175,19 +175,56 @@ const EXCLUDED_DIRS = new Set([
 
 /** 默认排除的文件扩展名 */
 const EXCLUDED_EXTENSIONS = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
-  ".pdf", ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
-  ".woff", ".woff2", ".ttf", ".eot",
-  ".mp3", ".mp4", ".avi", ".mov", ".wav",
-  ".exe", ".dll", ".so", ".dylib", ".o", ".a",
-  ".pyc", ".pyo", ".class",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".bmp",
+  ".ico",
+  ".svg",
+  ".pdf",
+  ".zip",
+  ".tar",
+  ".gz",
+  ".bz2",
+  ".xz",
+  ".7z",
+  ".rar",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".eot",
+  ".mp3",
+  ".mp4",
+  ".avi",
+  ".mov",
+  ".wav",
+  ".exe",
+  ".dll",
+  ".so",
+  ".dylib",
+  ".o",
+  ".a",
+  ".pyc",
+  ".pyo",
+  ".class",
 ]);
 
 /** 默认排除的文件名 */
 const EXCLUDED_FILENAMES = new Set([
-  ".env", ".env.local", ".env.development", ".env.production", ".env.test",
-  "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
-  "Cargo.lock", "poetry.lock", "Pipfile.lock", "Gemfile.lock", "composer.lock",
+  ".env",
+  ".env.local",
+  ".env.development",
+  ".env.production",
+  ".env.test",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "Cargo.lock",
+  "poetry.lock",
+  "Pipfile.lock",
+  "Gemfile.lock",
+  "composer.lock",
 ]);
 
 /** 永远不自动装载的路径 */
@@ -237,9 +274,12 @@ function isSecretFile(fileName: string, relativePath: string): boolean {
 
 /** 判断文件是否为生成物 */
 function isGeneratedFile(relativePath: string, fileName: string): boolean {
-  if (relativePath.startsWith("dist/") || relativePath.startsWith("build/")) return true;
-  if (relativePath.startsWith("target/") || relativePath.startsWith("out/")) return true;
-  if (fileName.endsWith(".min.js") || fileName.endsWith(".min.css")) return true;
+  if (relativePath.startsWith("dist/") || relativePath.startsWith("build/"))
+    return true;
+  if (relativePath.startsWith("target/") || relativePath.startsWith("out/"))
+    return true;
+  if (fileName.endsWith(".min.js") || fileName.endsWith(".min.css"))
+    return true;
   if (fileName.includes(".generated.")) return true;
   return false;
 }
@@ -255,30 +295,68 @@ function clamp(min: number, max: number, value: number): number {
 
 /** manifest 文件名集合（跨生态） */
 const MANIFEST_NAMES = new Set([
-  "package.json", "pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
-  "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts",
-  "CMakeLists.txt", "Makefile", "Gemfile", "mix.exs", "composer.json",
+  "package.json",
+  "pyproject.toml",
+  "requirements.txt",
+  "setup.py",
+  "setup.cfg",
+  "Cargo.toml",
+  "go.mod",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "CMakeLists.txt",
+  "Makefile",
+  "Gemfile",
+  "mix.exs",
+  "composer.json",
 ]);
 
 /** build config 文件名集合 */
 const BUILD_CONFIG_NAMES = new Set([
-  "tsconfig.json", "tsconfig.build.json",
-  "vite.config.ts", "vite.config.js",
-  "next.config.js", "next.config.mjs", "next.config.ts",
-  "webpack.config.js", "webpack.config.ts",
-  "rollup.config.js", "rollup.config.mjs",
-  "tsup.config.ts", "esbuild.config.js",
-  "jest.config.js", "jest.config.ts",
-  "vitest.config.ts", "vitest.config.js",
-  ".eslintrc.js", ".eslintrc.cjs", "eslint.config.js", "eslint.config.mjs",
-  ".prettierrc", ".prettierrc.js", "prettier.config.js",
-  "babel.config.js", "babel.config.json", ".babelrc",
-  "postcss.config.js", "tailwind.config.js", "tailwind.config.ts",
-  "Makefile", "CMakeLists.txt",
-  "build.gradle", "build.gradle.kts",
-  "settings.gradle", "settings.gradle.kts",
-  "tox.ini", "pytest.ini", "conftest.py",
-  ".flake8", "mypy.ini", "ruff.toml", ".ruff.toml",
+  "tsconfig.json",
+  "tsconfig.build.json",
+  "vite.config.ts",
+  "vite.config.js",
+  "next.config.js",
+  "next.config.mjs",
+  "next.config.ts",
+  "webpack.config.js",
+  "webpack.config.ts",
+  "rollup.config.js",
+  "rollup.config.mjs",
+  "tsup.config.ts",
+  "esbuild.config.js",
+  "jest.config.js",
+  "jest.config.ts",
+  "vitest.config.ts",
+  "vitest.config.js",
+  ".eslintrc.js",
+  ".eslintrc.cjs",
+  "eslint.config.js",
+  "eslint.config.mjs",
+  ".prettierrc",
+  ".prettierrc.js",
+  "prettier.config.js",
+  "babel.config.js",
+  "babel.config.json",
+  ".babelrc",
+  "postcss.config.js",
+  "tailwind.config.js",
+  "tailwind.config.ts",
+  "Makefile",
+  "CMakeLists.txt",
+  "build.gradle",
+  "build.gradle.kts",
+  "settings.gradle",
+  "settings.gradle.kts",
+  "tox.ini",
+  "pytest.ini",
+  "conftest.py",
+  ".flake8",
+  "mypy.ini",
+  "ruff.toml",
+  ".ruff.toml",
 ]);
 
 /** entrypoint 路径模式 */
@@ -339,7 +417,10 @@ const CI_PATTERNS = [
  * 一个文件可以有多个角色。例如 package.json 同时是 manifest 和 build_config。
  * 角色识别是通用排序的核心，不依赖特定生态。
  */
-export function identifyFileRoles(relativePath: string, fileName: string): FileRole[] {
+export function identifyFileRoles(
+  relativePath: string,
+  fileName: string,
+): FileRole[] {
   const roles: FileRole[] = [];
 
   if (fileName === "AGENTS.md" || fileName === "CLAUDE.md") {
@@ -360,7 +441,8 @@ export function identifyFileRoles(relativePath: string, fileName: string): FileR
   ) {
     roles.push("design_doc");
   } else if (
-    (/^doc\/.*\.md$/i.test(relativePath) || /^docs\/.*\.md$/i.test(relativePath)) &&
+    (/^doc\/.*\.md$/i.test(relativePath) ||
+      /^docs\/.*\.md$/i.test(relativePath)) &&
     !FORBIDDEN_PATHS.has(relativePath) &&
     !roles.includes("project_summary") &&
     !roles.includes("readme")
@@ -453,17 +535,55 @@ export function identifyFileRoles(relativePath: string, fileName: string): FileR
   if (roles.length === 0) {
     const ext = path.extname(fileName).toLowerCase();
     const sourceExts = new Set([
-      ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-      ".py", ".rs", ".go", ".java", ".kt", ".kts",
-      ".c", ".cc", ".cpp", ".h", ".hpp", ".hxx",
-      ".rb", ".php", ".swift", ".scala", ".lua",
-      ".sh", ".bash", ".zsh", ".fish",
-      ".css", ".scss", ".sass", ".less",
-      ".html", ".htm", ".vue", ".svelte",
-      ".sql", ".graphql", ".gql",
-      ".tf", ".hcl",
-      ".yaml", ".yml", ".toml", ".ini", ".cfg",
-      ".md", ".rst", ".txt", ".adoc",
+      ".ts",
+      ".tsx",
+      ".js",
+      ".jsx",
+      ".mjs",
+      ".cjs",
+      ".py",
+      ".rs",
+      ".go",
+      ".java",
+      ".kt",
+      ".kts",
+      ".c",
+      ".cc",
+      ".cpp",
+      ".h",
+      ".hpp",
+      ".hxx",
+      ".rb",
+      ".php",
+      ".swift",
+      ".scala",
+      ".lua",
+      ".sh",
+      ".bash",
+      ".zsh",
+      ".fish",
+      ".css",
+      ".scss",
+      ".sass",
+      ".less",
+      ".html",
+      ".htm",
+      ".vue",
+      ".svelte",
+      ".sql",
+      ".graphql",
+      ".gql",
+      ".tf",
+      ".hcl",
+      ".yaml",
+      ".yml",
+      ".toml",
+      ".ini",
+      ".cfg",
+      ".md",
+      ".rst",
+      ".txt",
+      ".adoc",
     ]);
     if (sourceExts.has(ext)) {
       roles.push("source");
@@ -482,25 +602,38 @@ export function identifyFileRoles(relativePath: string, fileName: string): FileR
  *
  * 基于扩展名做初步判断，后续 RepoClassifier 会结合 manifest 做更精确的分类。
  */
-export function identifyFileEcosystems(fileName: string, extension: string): RepoEcosystem[] {
+export function identifyFileEcosystems(
+  fileName: string,
+  extension: string,
+): RepoEcosystem[] {
   const ecosystems: RepoEcosystem[] = [];
   const ext = extension.toLowerCase();
 
-  if ([".ts", ".tsx", ".mts", ".cts"].includes(ext)) ecosystems.push("typescript");
-  if ([".js", ".jsx", ".mjs", ".cjs"].includes(ext)) ecosystems.push("javascript");
+  if ([".ts", ".tsx", ".mts", ".cts"].includes(ext))
+    ecosystems.push("typescript");
+  if ([".js", ".jsx", ".mjs", ".cjs"].includes(ext))
+    ecosystems.push("javascript");
   if (ext === ".py") ecosystems.push("python");
   if (ext === ".rs") ecosystems.push("rust");
   if (ext === ".go") ecosystems.push("go");
   if (ext === ".java") ecosystems.push("java");
   if ([".kt", ".kts"].includes(ext)) ecosystems.push("kotlin");
-  if ([".c", ".cc", ".cpp", ".h", ".hpp", ".hxx"].includes(ext)) ecosystems.push("cpp");
+  if ([".c", ".cc", ".cpp", ".h", ".hpp", ".hxx"].includes(ext))
+    ecosystems.push("cpp");
 
   if (fileName === "package.json" || fileName === "tsconfig.json") {
-    if (!ecosystems.includes("typescript") && !ecosystems.includes("javascript")) {
+    if (
+      !ecosystems.includes("typescript") &&
+      !ecosystems.includes("javascript")
+    ) {
       ecosystems.push("typescript");
     }
   }
-  if (fileName === "pyproject.toml" || fileName === "requirements.txt" || fileName === "setup.py") {
+  if (
+    fileName === "pyproject.toml" ||
+    fileName === "requirements.txt" ||
+    fileName === "setup.py"
+  ) {
     if (!ecosystems.includes("python")) ecosystems.push("python");
   }
   if (fileName === "Cargo.toml") {
@@ -509,7 +642,11 @@ export function identifyFileEcosystems(fileName: string, extension: string): Rep
   if (fileName === "go.mod") {
     if (!ecosystems.includes("go")) ecosystems.push("go");
   }
-  if (fileName === "pom.xml" || fileName === "build.gradle" || fileName === "build.gradle.kts") {
+  if (
+    fileName === "pom.xml" ||
+    fileName === "build.gradle" ||
+    fileName === "build.gradle.kts"
+  ) {
     if (!ecosystems.includes("java")) ecosystems.push("java");
   }
 
@@ -605,12 +742,16 @@ export function scanProjectFiles(projectRoot: string): FileFacts[] {
  *
  * 只对已知生态做简单字符串匹配，不引入 AST parser。
  */
-export function buildImportGraph(files: FileFacts[], projectRoot: string): void {
+export function buildImportGraph(
+  files: FileFacts[],
+  projectRoot: string,
+): void {
   const pathSet = new Set(files.map((f) => f.path));
 
   for (const file of files) {
     if (file.sizeBytes > 500_000) continue;
-    if (file.roles.includes("binary") || file.roles.includes("generated")) continue;
+    if (file.roles.includes("binary") || file.roles.includes("generated"))
+      continue;
 
     const ext = file.extension.toLowerCase();
     let content: string;
@@ -635,7 +776,8 @@ export function buildImportGraph(files: FileFacts[], projectRoot: string): void 
     }
 
     if (ext === ".py") {
-      const pyImportRegex = /(?:from\s+(\.[\w.]+)\s+import|import\s+(\.[\w.]+))/g;
+      const pyImportRegex =
+        /(?:from\s+(\.[\w.]+)\s+import|import\s+(\.[\w.]+))/g;
       let match: RegExpExecArray | null;
       while ((match = pyImportRegex.exec(content)) !== null) {
         const mod = match[1] ?? match[2] ?? "";
@@ -660,12 +802,19 @@ export function buildImportGraph(files: FileFacts[], projectRoot: string): void 
         const strippedMjs = resolved.replace(/\.mjs$/, "");
         const candidates = [
           resolved,
-          resolved + ".ts", resolved + ".tsx",
-          resolved + ".js", resolved + ".jsx",
-          resolved + ".py", resolved + ".go", resolved + ".rs",
-          strippedJs + ".ts", strippedJs + ".tsx",
-          strippedMjs + ".ts", strippedMjs + ".mts",
-          resolved + "/index.ts", resolved + "/index.js",
+          resolved + ".ts",
+          resolved + ".tsx",
+          resolved + ".js",
+          resolved + ".jsx",
+          resolved + ".py",
+          resolved + ".go",
+          resolved + ".rs",
+          strippedJs + ".ts",
+          strippedJs + ".tsx",
+          strippedMjs + ".ts",
+          strippedMjs + ".mts",
+          resolved + "/index.ts",
+          resolved + "/index.js",
           resolved + "/mod.rs",
         ];
         for (const candidate of candidates) {
@@ -735,7 +884,12 @@ const ECOSYSTEM_SIGNALS: EcosystemSignal[] = [
   {
     name: "typescript",
     manifests: ["package.json"],
-    filePatterns: [/\.tsx?$/, /tsconfig\.json$/, /vite\.config\.ts$/, /next\.config\.(ts|mjs|js)$/],
+    filePatterns: [
+      /\.tsx?$/,
+      /tsconfig\.json$/,
+      /vite\.config\.ts$/,
+      /next\.config\.(ts|mjs|js)$/,
+    ],
     dirPatterns: [/^src$/],
   },
   {
@@ -866,7 +1020,9 @@ export function classifyRepository(files: FileFacts[]): RepoClassification {
   }
 
   if (scores.has("java") && scores.has("kotlin")) {
-    const ktFiles = files.filter((f) => f.extension === ".kt" || f.extension === ".kts");
+    const ktFiles = files.filter(
+      (f) => f.extension === ".kt" || f.extension === ".kts",
+    );
     if (ktFiles.length === 0) {
       scores.delete("kotlin");
     }
@@ -889,9 +1045,7 @@ export function classifyRepository(files: FileFacts[]): RepoClassification {
 
   const roots: string[] = [];
   const topLevelDirs = new Set(
-    allPaths
-      .filter((p) => p.includes("/"))
-      .map((p) => p.split("/")[0]!),
+    allPaths.filter((p) => p.includes("/")).map((p) => p.split("/")[0]!),
   );
   for (const dir of topLevelDirs) {
     const dirManifests = files.filter(
@@ -946,34 +1100,102 @@ export function classifyRepository(files: FileFacts[]): RepoClassification {
 /** 意图关键词映射 */
 const INTENT_KEYWORDS: Record<Exclude<TaskIntent, "unknown">, string[]> = {
   orientation: [
-    "解释", "说明", "介绍", "架构", "怎么运行", "有哪些模块", "项目结构",
-    "explain", "describe", "overview", "architecture", "how to run",
-    "what is", "tell me about", "walk me through",
+    "解释",
+    "说明",
+    "介绍",
+    "架构",
+    "怎么运行",
+    "有哪些模块",
+    "项目结构",
+    "explain",
+    "describe",
+    "overview",
+    "architecture",
+    "how to run",
+    "what is",
+    "tell me about",
+    "walk me through",
   ],
   implementation: [
-    "实现", "添加", "新增", "修改", "开发", "创建", "编写",
-    "implement", "add", "create", "build", "develop", "write", "modify",
+    "实现",
+    "添加",
+    "新增",
+    "修改",
+    "开发",
+    "创建",
+    "编写",
+    "implement",
+    "add",
+    "create",
+    "build",
+    "develop",
+    "write",
+    "modify",
   ],
   debug: [
-    "error", "失败", "报错", "异常", "bug", "修复", "fix", "debug",
-    "stack trace", "不通过", "crash", "panic", "exception", "traceback",
-    "为什么", "why", "broken", "failing",
+    "error",
+    "失败",
+    "报错",
+    "异常",
+    "bug",
+    "修复",
+    "fix",
+    "debug",
+    "stack trace",
+    "不通过",
+    "crash",
+    "panic",
+    "exception",
+    "traceback",
+    "为什么",
+    "why",
+    "broken",
+    "failing",
   ],
   review: [
-    "review", "检查", "审查", "有没有问题", "看看", "code review",
-    "inspect", "audit", "check", "review this",
+    "review",
+    "检查",
+    "审查",
+    "有没有问题",
+    "看看",
+    "code review",
+    "inspect",
+    "audit",
+    "check",
+    "review this",
   ],
   testing: [
-    "测试", "补测试", "修测试", "coverage", "test", "tests",
-    "unit test", "integration test", "覆盖率",
+    "测试",
+    "补测试",
+    "修测试",
+    "coverage",
+    "test",
+    "tests",
+    "unit test",
+    "integration test",
+    "覆盖率",
   ],
   documentation: [
-    "文档", "readme", "pdd", "说明", "docs", "documentation",
-    "changelog", "注释", "comment",
+    "文档",
+    "readme",
+    "pdd",
+    "说明",
+    "docs",
+    "documentation",
+    "changelog",
+    "注释",
+    "comment",
   ],
   refactor: [
-    "重构", "整理", "拆分", "抽象", "refactor", "cleanup",
-    "reorganize", "restructure", "extract",
+    "重构",
+    "整理",
+    "拆分",
+    "抽象",
+    "refactor",
+    "cleanup",
+    "reorganize",
+    "restructure",
+    "extract",
   ],
 };
 
@@ -1024,7 +1246,8 @@ export function classifyTaskIntent(input: {
     }
   }
 
-  const pathPattern = /(?:^|\s)((?:\.\/|\/|[a-zA-Z0-9_-]+\/)[a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)/g;
+  const pathPattern =
+    /(?:^|\s)((?:\.\/|\/|[a-zA-Z0-9_-]+\/)[a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)/g;
   const mentionedPaths: string[] = [];
   let pathMatch: RegExpExecArray | null;
   while ((pathMatch = pathPattern.exec(input.query)) !== null) {
@@ -1131,10 +1354,10 @@ const ECOSYSTEM_PROFILES: Record<string, EcosystemProfile> = {
   },
   cpp: {
     "CMakeLists.txt": 230,
-    "Makefile": 200,
+    Makefile: 200,
   },
   infra: {
-    "Dockerfile": 220,
+    Dockerfile: 220,
     "compose.yaml": 220,
     "compose.yml": 220,
     "docker-compose.yaml": 220,
@@ -1143,7 +1366,10 @@ const ECOSYSTEM_PROFILES: Record<string, EcosystemProfile> = {
 };
 
 /** 计算 roleScore */
-export function computeRoleScore(facts: FileFacts): { score: number; reasons: ScoreReason[] } {
+export function computeRoleScore(facts: FileFacts): {
+  score: number;
+  reasons: ScoreReason[];
+} {
   const reasons: ScoreReason[] = [];
 
   let bestRole: FileRole = "unknown";
@@ -1162,7 +1388,11 @@ export function computeRoleScore(facts: FileFacts): { score: number; reasons: Sc
     const roleScore = ROLE_SCORES[role] ?? 0;
     if (roleScore < 0) {
       penalty += roleScore;
-      reasons.push({ signal: "role", points: roleScore, note: `${role} penalty` });
+      reasons.push({
+        signal: "role",
+        points: roleScore,
+        note: `${role} penalty`,
+      });
     }
   }
 
@@ -1192,15 +1422,27 @@ export function computeEcosystemScore(
     const ecoScore = profile[facts.name] ?? profile[facts.path];
     if (ecoScore !== undefined) {
       score += ecoScore;
-      reasons.push({ signal: "ecosystem", points: ecoScore, note: `${eco} ${facts.path}` });
+      reasons.push({
+        signal: "ecosystem",
+        points: ecoScore,
+        note: `${eco} ${facts.path}`,
+      });
     } else {
       if (eco === "python" && facts.name === "__init__.py") {
         score += 80;
-        reasons.push({ signal: "ecosystem", points: 80, note: "python __init__.py" });
+        reasons.push({
+          signal: "ecosystem",
+          points: 80,
+          note: "python __init__.py",
+        });
       }
       if (eco === "go" && /^cmd\/[^/]+\/main\.go$/.test(facts.path)) {
         score += 220;
-        reasons.push({ signal: "ecosystem", points: 220, note: "go cmd entrypoint" });
+        reasons.push({
+          signal: "ecosystem",
+          points: 220,
+          note: "go cmd entrypoint",
+        });
       }
       if (eco === "java" && facts.path.startsWith("src/main/java/")) {
         score += 160;
@@ -1208,11 +1450,19 @@ export function computeEcosystemScore(
       }
       if (eco === "infra" && facts.roles.includes("ci_config")) {
         score += 170;
-        reasons.push({ signal: "ecosystem", points: 170, note: "infra CI config" });
+        reasons.push({
+          signal: "ecosystem",
+          points: 170,
+          note: "infra CI config",
+        });
       }
       if (eco === "infra" && facts.path.endsWith(".tf")) {
         score += 180;
-        reasons.push({ signal: "ecosystem", points: 180, note: "terraform file" });
+        reasons.push({
+          signal: "ecosystem",
+          points: 180,
+          note: "terraform file",
+        });
       }
     }
   }
@@ -1231,7 +1481,11 @@ export function computeTaskRelevanceScore(
   for (const mentionedPath of task.explicitlyMentionedPaths) {
     if (facts.path === mentionedPath || facts.path.endsWith(mentionedPath)) {
       score += 1000;
-      reasons.push({ signal: "task_relevance", points: 1000, note: `exact path mentioned: ${mentionedPath}` });
+      reasons.push({
+        signal: "task_relevance",
+        points: 1000,
+        note: `exact path mentioned: ${mentionedPath}`,
+      });
     }
   }
 
@@ -1239,15 +1493,26 @@ export function computeTaskRelevanceScore(
     const baseName = path.basename(mentionedPath);
     if (facts.name === baseName && facts.path !== mentionedPath) {
       score += 600;
-      reasons.push({ signal: "task_relevance", points: 600, note: `basename mentioned: ${baseName}` });
+      reasons.push({
+        signal: "task_relevance",
+        points: 600,
+        note: `basename mentioned: ${baseName}`,
+      });
     }
   }
 
   for (const term of task.explicitlyMentionedTerms) {
     const termLower = term.toLowerCase();
-    if (facts.name.toLowerCase().includes(termLower) || facts.path.toLowerCase().includes(termLower)) {
+    if (
+      facts.name.toLowerCase().includes(termLower) ||
+      facts.path.toLowerCase().includes(termLower)
+    ) {
       score += 300;
-      reasons.push({ signal: "task_relevance", points: 300, note: `term matched: "${term}"` });
+      reasons.push({
+        signal: "task_relevance",
+        points: 300,
+        note: `term matched: "${term}"`,
+      });
     }
   }
 
@@ -1255,26 +1520,46 @@ export function computeTaskRelevanceScore(
     if (/^pdd/i.test(term) && facts.roles.includes("design_doc")) {
       if (facts.name.toLowerCase().includes(term.toLowerCase())) {
         score += 800;
-        reasons.push({ signal: "task_relevance", points: 800, note: `design doc id mentioned: ${term}` });
+        reasons.push({
+          signal: "task_relevance",
+          points: 800,
+          note: `design doc id mentioned: ${term}`,
+        });
       }
     }
   }
 
   for (const mentionedPath of task.explicitlyMentionedPaths) {
     const dir = path.dirname(mentionedPath);
-    if (dir !== "." && facts.path.startsWith(dir + "/") && facts.path !== mentionedPath) {
+    if (
+      dir !== "." &&
+      facts.path.startsWith(dir + "/") &&
+      facts.path !== mentionedPath
+    ) {
       score += 250;
-      reasons.push({ signal: "task_relevance", points: 250, note: `directory mentioned: ${dir}` });
+      reasons.push({
+        signal: "task_relevance",
+        points: 250,
+        note: `directory mentioned: ${dir}`,
+      });
     }
   }
 
   if (facts.roles.includes("test")) {
     if (["debug", "testing", "review"].includes(task.intent)) {
       score += 250;
-      reasons.push({ signal: "task_relevance", points: 250, note: `test file + ${task.intent} task` });
+      reasons.push({
+        signal: "task_relevance",
+        points: 250,
+        note: `test file + ${task.intent} task`,
+      });
     } else if (task.intent === "orientation") {
       score -= 120;
-      reasons.push({ signal: "task_relevance", points: -120, note: "test file - orientation task" });
+      reasons.push({
+        signal: "task_relevance",
+        points: -120,
+        note: "test file - orientation task",
+      });
     }
   }
 
@@ -1296,7 +1581,11 @@ export function computeEvidenceScore(
 
   if (task.failingFiles.includes(facts.path)) {
     score += 850;
-    reasons.push({ signal: "evidence", points: 850, note: "failing test file" });
+    reasons.push({
+      signal: "evidence",
+      points: 850,
+      note: "failing test file",
+    });
   }
 
   if (facts.isGitStaged) {
@@ -1306,17 +1595,29 @@ export function computeEvidenceScore(
 
   if (facts.isGitModified) {
     score += 700;
-    reasons.push({ signal: "evidence", points: 700, note: "git modified file" });
+    reasons.push({
+      signal: "evidence",
+      points: 700,
+      note: "git modified file",
+    });
   }
 
   if (task.recentFiles.includes(facts.path)) {
     score += 500;
-    reasons.push({ signal: "evidence", points: 500, note: "recently read file" });
+    reasons.push({
+      signal: "evidence",
+      points: 500,
+      note: "recently read file",
+    });
   }
 
   if (facts.isCurrentlyOpen || task.openFiles.includes(facts.path)) {
     score += 450;
-    reasons.push({ signal: "evidence", points: 450, note: "currently open file" });
+    reasons.push({
+      signal: "evidence",
+      points: 450,
+      note: "currently open file",
+    });
   }
 
   if (task.changedFiles.includes(facts.path)) {
@@ -1339,37 +1640,57 @@ export function computeGraphScore(
   if (importedByCount > 0) {
     const pts = importedByCount * 35;
     score += pts;
-    reasons.push({ signal: "graph", points: pts, note: `imported by ${importedByCount} file(s)` });
+    reasons.push({
+      signal: "graph",
+      points: pts,
+      note: `imported by ${importedByCount} file(s)`,
+    });
   }
 
   const importsCount = Math.min(facts.imports.length, 8);
   if (importsCount > 0) {
     const pts = importsCount * 10;
     score += pts;
-    reasons.push({ signal: "graph", points: pts, note: `imports ${importsCount} file(s)` });
+    reasons.push({
+      signal: "graph",
+      points: pts,
+      note: `imports ${importsCount} file(s)`,
+    });
   }
 
   if (facts.pairedFiles.length > 0) {
     const needsTests = ["debug", "testing", "review"].includes(task.intent);
     if (needsTests) {
       score += 160;
-      reasons.push({ signal: "graph", points: 160, note: "paired test/source relation" });
+      reasons.push({
+        signal: "graph",
+        points: 160,
+        note: "paired test/source relation",
+      });
     }
   }
 
   if (
-    (facts.roles.includes("manifest") || facts.roles.includes("build_config")) &&
+    (facts.roles.includes("manifest") ||
+      facts.roles.includes("build_config")) &&
     facts.importedBy.length >= 3
   ) {
     score += 160;
-    reasons.push({ signal: "graph", points: 160, note: "central config referenced by many" });
+    reasons.push({
+      signal: "graph",
+      points: 160,
+      note: "central config referenced by many",
+    });
   }
 
   return { score: clamp(0, 400, score), reasons };
 }
 
 /** 计算 recencyScore */
-export function computeRecencyScore(facts: FileFacts): { score: number; reasons: ScoreReason[] } {
+export function computeRecencyScore(facts: FileFacts): {
+  score: number;
+  reasons: ScoreReason[];
+} {
   const reasons: ScoreReason[] = [];
 
   if (facts.isGitModified || facts.isGitStaged) {
@@ -1380,11 +1701,18 @@ export function computeRecencyScore(facts: FileFacts): { score: number; reasons:
     return { score: 0, reasons };
   }
 
-  const hours = (Date.now() - facts.lastModifiedMs) / 3_600_000;
+  // 教学说明：文件系统 mtime 可能比 Date.now() 早/晚几毫秒。
+  // 如果直接格式化，会在缓存一致性测试里出现 "0.0h" 与 "-0.0h" 的抖动；
+  // recency 只关心粗粒度小时差，所以这里把未来时间收口为 0。
+  const hours = Math.max(0, (Date.now() - facts.lastModifiedMs) / 3_600_000);
   const score = clamp(0, 180, Math.round(180 - hours * 4));
 
   if (score > 0) {
-    reasons.push({ signal: "recency", points: score, note: `modified ${hours.toFixed(1)}h ago` });
+    reasons.push({
+      signal: "recency",
+      points: score,
+      note: `modified ${hours.toFixed(1)}h ago`,
+    });
   }
 
   return { score, reasons };
@@ -1400,25 +1728,40 @@ export function computeUserSignalScore(
 
   if (facts.isCurrentlyOpen) {
     score += 500;
-    reasons.push({ signal: "user_signal", points: 500, note: "currently open by user" });
+    reasons.push({
+      signal: "user_signal",
+      points: 500,
+      note: "currently open by user",
+    });
   }
 
   if (facts.isRecentlyRead) {
     score += 300;
-    reasons.push({ signal: "user_signal", points: 300, note: "recently read by user" });
+    reasons.push({
+      signal: "user_signal",
+      points: 300,
+      note: "recently read by user",
+    });
   }
 
   const queryLower = task.query.toLowerCase();
   if (queryLower.includes(facts.name.toLowerCase()) && facts.name.length > 3) {
     score += 400;
-    reasons.push({ signal: "user_signal", points: 400, note: `filename mentioned in query: ${facts.name}` });
+    reasons.push({
+      signal: "user_signal",
+      points: 400,
+      note: `filename mentioned in query: ${facts.name}`,
+    });
   }
 
   return { score: clamp(0, 1000, score), reasons };
 }
 
 /** 计算 noisePenalty */
-export function computeNoisePenalty(facts: FileFacts): { score: number; reasons: ScoreReason[] } {
+export function computeNoisePenalty(facts: FileFacts): {
+  score: number;
+  reasons: ScoreReason[];
+} {
   const reasons: ScoreReason[] = [];
   let penalty = 0;
 
@@ -1444,7 +1787,11 @@ export function computeNoisePenalty(facts: FileFacts): { score: number; reasons:
 
   if (facts.sizeBytes > 1_000_000) {
     penalty -= 300;
-    reasons.push({ signal: "noise", points: -300, note: "very large file (>1MB)" });
+    reasons.push({
+      signal: "noise",
+      points: -300,
+      note: "very large file (>1MB)",
+    });
   }
 
   if (FORBIDDEN_PATHS.has(facts.path)) {
@@ -1475,7 +1822,8 @@ export function rankAllFiles(input: {
   const ranked: RankedFile[] = [];
 
   for (const facts of files) {
-    if (facts.roles.includes("secret") || facts.roles.includes("binary")) continue;
+    if (facts.roles.includes("secret") || facts.roles.includes("binary"))
+      continue;
 
     const allReasons: ScoreReason[] = [];
 

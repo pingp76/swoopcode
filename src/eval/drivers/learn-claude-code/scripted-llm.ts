@@ -17,7 +17,10 @@ import type {
 } from "openai/resources/chat/completions";
 import type { LLMClient, LLMResponse } from "../../../llm.js";
 import type { AgentRuntimeEvent } from "../../core/case-schema.js";
-import type { ScriptedLLMResponse, ScriptedToolCall } from "../../core/case-schema.js";
+import type {
+  ScriptedLLMResponse,
+  ScriptedToolCall,
+} from "../../core/case-schema.js";
 
 /**
  * createScriptedLLMClient — 创建脚本化 LLM 客户端
@@ -61,10 +64,14 @@ export function createScriptedLLMClient(options: {
       // 构造 assistant message
       let assistantMessage: ChatCompletionMessageParam;
       let toolCalls: ChatCompletionMessageToolCall[];
-      if (scripted.assistantMessage && typeof scripted.assistantMessage === "object") {
+      if (
+        scripted.assistantMessage &&
+        typeof scripted.assistantMessage === "object"
+      ) {
         // 当 case 显式提供 assistantMessage 时，优先使用它。
         // 为保证返回值一致性，toolCalls 从 assistantMessage.tool_calls 同步派生。
-        assistantMessage = scripted.assistantMessage as ChatCompletionMessageParam;
+        assistantMessage =
+          scripted.assistantMessage as ChatCompletionMessageParam;
         const am = assistantMessage as ChatCompletionMessageParam & {
           tool_calls?: ChatCompletionMessageToolCall[];
         };
@@ -106,7 +113,9 @@ export function createScriptedLLMClient(options: {
       return {
         content: scripted.content ?? null,
         toolCalls,
-        finishReason: scripted.finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
+        finishReason:
+          scripted.finishReason ??
+          (toolCalls.length > 0 ? "tool_calls" : "stop"),
         assistantMessage,
       };
     },

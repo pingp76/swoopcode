@@ -35,7 +35,9 @@ describe("normalizeMessages - metadata filtering", () => {
 
     const result = normalizeMessages(messages);
     // content 数组中的 _timestamp 字段应该被移除
-    const content = result[0]!.content as unknown as Array<Record<string, unknown>>;
+    const content = result[0]!.content as unknown as Array<
+      Record<string, unknown>
+    >;
     expect(content[0]).toEqual({ type: "text", text: "hello" });
     expect(content[0]).not.toHaveProperty("_timestamp");
   });
@@ -213,7 +215,9 @@ describe("normalizeMessages - consecutive role merging", () => {
     const result = normalizeMessages(messages);
     expect(result).toHaveLength(1);
     // 合并后的 content 应该是数组格式，包含两条消息
-    const content = result[0]!.content as unknown as Array<Record<string, unknown>>;
+    const content = result[0]!.content as unknown as Array<
+      Record<string, unknown>
+    >;
     expect(content).toHaveLength(2);
     expect(content[0]).toEqual({ type: "text", text: "first message" });
     expect(content[1]).toEqual({ type: "text", text: "second message" });
@@ -227,7 +231,9 @@ describe("normalizeMessages - consecutive role merging", () => {
 
     const result = normalizeMessages(messages);
     expect(result).toHaveLength(1);
-    const content = result[0]!.content as unknown as Array<Record<string, unknown>>;
+    const content = result[0]!.content as unknown as Array<
+      Record<string, unknown>
+    >;
     expect(content).toHaveLength(2);
   });
 
@@ -335,7 +341,10 @@ describe("normalizeMessages - provider field preservation", () => {
     const result = normalizeMessages(messages);
 
     expect(result).toHaveLength(1);
-    expect(result[0]).toHaveProperty("reasoning_content", "Let me think step by step...");
+    expect(result[0]).toHaveProperty(
+      "reasoning_content",
+      "Let me think step by step...",
+    );
   });
 
   it("preserves reasoning_content on assistant messages with tool_calls", () => {
@@ -358,8 +367,12 @@ describe("normalizeMessages - provider field preservation", () => {
 
     // ensureToolResults 会补全缺失的 tool 消息
     expect(result).toHaveLength(2);
-    expect(result[0]).toHaveProperty("reasoning_content", "I need to run a command");
-    const toolCalls = (result[0] as unknown as { tool_calls: unknown[] }).tool_calls;
+    expect(result[0]).toHaveProperty(
+      "reasoning_content",
+      "I need to run a command",
+    );
+    const toolCalls = (result[0] as unknown as { tool_calls: unknown[] })
+      .tool_calls;
     expect(toolCalls).toHaveLength(1);
   });
 

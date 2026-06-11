@@ -221,7 +221,10 @@ describe("replaceEntries", () => {
       { turnIndex: 1, loopRound: 0, loopIndex: 1 },
     );
 
-    expect(history.getMessages()[0]).toEqual({ role: "user", content: "hello" });
+    expect(history.getMessages()[0]).toEqual({
+      role: "user",
+      content: "hello",
+    });
   });
 
   it("does not modify system prompt", () => {

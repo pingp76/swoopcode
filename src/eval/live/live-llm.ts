@@ -11,7 +11,11 @@
  * - maxCalls 限制防止 live case 因模型异常进入无限循环，保护 eval 预算。
  */
 
-import { createLLMClient, type LLMClient, type LLMResponse } from "../../llm.js";
+import {
+  createLLMClient,
+  type LLMClient,
+  type LLMResponse,
+} from "../../llm.js";
 import { loadConfig } from "../../config.js";
 import type { AgentRuntimeEvent } from "../core/case-schema.js";
 import type { ResolvedLLMConfig } from "../../llm-providers.js";

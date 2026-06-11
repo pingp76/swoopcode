@@ -25,7 +25,10 @@ import { createOutputStore } from "./output-store.js";
  * 创建临时目录用于测试输出
  */
 function createTempDir(): string {
-  const dir = resolve(tmpdir(), `async-runs-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const dir = resolve(
+    tmpdir(),
+    `async-runs-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -260,7 +263,7 @@ describe("AsyncRunManager", () => {
             command: "ls",
             resources: { read_paths: ["../outside"], write_paths: [] },
           }),
-        ).toThrow('is outside project directory');
+        ).toThrow("is outside project directory");
       } finally {
         cleanupTempDir(tempDir);
       }
@@ -587,9 +590,7 @@ describe("AsyncRunManager", () => {
 
         await new Promise((r) => setTimeout(r, 500));
 
-        const completed = manager
-          .list()
-          .find((r) => r.status === "completed");
+        const completed = manager.list().find((r) => r.status === "completed");
         expect(completed?.outputId).toBe("out_20260528_153000_abc123");
         expect(
           outputStore!.read({ outputId: completed!.outputId! }).content,
@@ -612,7 +613,6 @@ describe("AsyncRunManager", () => {
         cleanupTempDir(tempDir);
       }
     });
-
   });
 
   describe("checkForegroundToolConflict", () => {

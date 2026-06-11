@@ -17,10 +17,7 @@
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import type { ToolResult } from "./types.js";
-import type {
-  AsyncRunManager,
-  AsyncRunRecord,
-} from "../async-runs.js";
+import type { AsyncRunManager, AsyncRunRecord } from "../async-runs.js";
 import type { AsyncCommandPolicy } from "../execution-policy.js";
 
 /**
@@ -53,7 +50,8 @@ const runAsyncStartDefinition: ChatCompletionTool = {
         executor: {
           type: "string",
           enum: ["command", "subagent"],
-          description: "The executor type: 'command' for shell commands, 'subagent' for delegated AI tasks",
+          description:
+            "The executor type: 'command' for shell commands, 'subagent' for delegated AI tasks",
         },
         command: {
           type: "string",
@@ -83,7 +81,8 @@ const runAsyncStartDefinition: ChatCompletionTool = {
         },
         resources: {
           type: "object",
-          description: "Resource declaration: read_paths and write_paths (write_paths must be empty in v1)",
+          description:
+            "Resource declaration: read_paths and write_paths (write_paths must be empty in v1)",
           properties: {
             read_paths: {
               type: "array",
@@ -94,7 +93,8 @@ const runAsyncStartDefinition: ChatCompletionTool = {
             write_paths: {
               type: "array",
               items: { type: "string" },
-              description: "Paths the async run is allowed to write (must be empty in v1)",
+              description:
+                "Paths the async run is allowed to write (must be empty in v1)",
               default: [],
             },
           },
@@ -339,7 +339,8 @@ export function createAsyncRunToolProvider(
       resources === null
     ) {
       return {
-        output: "Error: resources must be an object with read_paths and write_paths",
+        output:
+          "Error: resources must be an object with read_paths and write_paths",
         error: true,
       };
     }
@@ -384,8 +385,7 @@ export function createAsyncRunToolProvider(
       // 因此可选字段都用 if 判断后再赋值，而不是直接写 command: undefined。
       if (command) startInput.command = command;
       if (prompt) startInput.prompt = prompt;
-      if (args["group_id"])
-        startInput.groupId = String(args["group_id"]);
+      if (args["group_id"]) startInput.groupId = String(args["group_id"]);
       if (args["task_id"])
         startInput.persistentTaskId = String(args["task_id"]);
       if (args["resources"])
@@ -399,14 +399,20 @@ export function createAsyncRunToolProvider(
       if (args["timeout_ms"] !== undefined) {
         const timeoutMs = Number(args["timeout_ms"]);
         if (timeoutMs < 0) {
-          return { output: "Error: timeout_ms must be non-negative", error: true };
+          return {
+            output: "Error: timeout_ms must be non-negative",
+            error: true,
+          };
         }
         startInput.timeoutMs = timeoutMs;
       }
       if (args["max_rounds"] !== undefined) {
         const maxRounds = Number(args["max_rounds"]);
         if (maxRounds < 0) {
-          return { output: "Error: max_rounds must be non-negative", error: true };
+          return {
+            output: "Error: max_rounds must be non-negative",
+            error: true,
+          };
         }
         startInput.maxRounds = maxRounds;
       }
@@ -420,8 +426,7 @@ export function createAsyncRunToolProvider(
       };
     } catch (err) {
       // 捕获 manager.start 抛出的异常，统一包装为 ToolResult 返回
-      const message =
-        err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
       return {
         output: `Error starting async run: ${message}`,
         error: true,
@@ -457,12 +462,11 @@ export function createAsyncRunToolProvider(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
     // status 可选，有值时转为字符串
-    const status = args["status"]
-      ? String(args["status"])
-      : undefined;
+    const status = args["status"] ? String(args["status"]) : undefined;
     // 构建查询对象，只附加有值的字段
     const query: import("../async-runs.js").AsyncRunListQuery = {};
-    if (status) query.status = status as import("../async-runs.js").AsyncRunStatus;
+    if (status)
+      query.status = status as import("../async-runs.js").AsyncRunStatus;
     if (args["include_terminal"] !== undefined)
       query.includeTerminal = Boolean(args["include_terminal"]);
 
@@ -484,9 +488,7 @@ export function createAsyncRunToolProvider(
 
     // max_bytes 可选，传入时校验非负数
     const maxBytes =
-      args["max_bytes"] !== undefined
-        ? Number(args["max_bytes"])
-        : undefined;
+      args["max_bytes"] !== undefined ? Number(args["max_bytes"]) : undefined;
     if (maxBytes !== undefined && maxBytes < 0) {
       return { output: "Error: max_bytes must be non-negative", error: true };
     }
@@ -515,8 +517,7 @@ export function createAsyncRunToolProvider(
       };
     } catch (err) {
       // 读输出异常时捕获并包装为 ToolResult
-      const message =
-        err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
       return {
         output: `Error reading output: ${message}`,
         error: true,

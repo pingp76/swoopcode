@@ -28,8 +28,14 @@ function createTempProject(): string {
   fs.writeFileSync(path.join(dir, "tsconfig.json"), '{"compilerOptions":{}}\n');
   fs.writeFileSync(path.join(dir, "AGENTS.md"), "# Agents\n");
   fs.writeFileSync(path.join(dir, "src", "index.ts"), "export const a = 1;\n");
-  fs.writeFileSync(path.join(dir, "src", "tools", "bash.ts"), "export function run() {}\n");
-  fs.writeFileSync(path.join(dir, "doc", "summary.md"), "# Summary\nProject overview.\n");
+  fs.writeFileSync(
+    path.join(dir, "src", "tools", "bash.ts"),
+    "export function run() {}\n",
+  );
+  fs.writeFileSync(
+    path.join(dir, "doc", "summary.md"),
+    "# Summary\nProject overview.\n",
+  );
   return dir;
 }
 
@@ -43,7 +49,10 @@ describe("StableContextManager", () => {
 
   beforeEach(() => {
     projectDir = createTempProject();
-    manager = createStableContextManager(projectDir, "generic-openai-compatible");
+    manager = createStableContextManager(
+      projectDir,
+      "generic-openai-compatible",
+    );
   });
 
   afterEach(() => {
@@ -170,8 +179,11 @@ describe("StableContextManager", () => {
     const state = manager.getState();
     // repo map 会列出目录结构（包含 todo.md 文件名），但不会读取其内容
     // 检查 source_file 类型资产中没有 todo.md
-    const fileAssets = state.stablePack?.assets.filter((a) => a.kind === "source_file") ?? [];
-    expect(fileAssets.some((a) => a.source.path?.includes("todo.md"))).toBe(false);
+    const fileAssets =
+      state.stablePack?.assets.filter((a) => a.kind === "source_file") ?? [];
+    expect(fileAssets.some((a) => a.source.path?.includes("todo.md"))).toBe(
+      false,
+    );
   });
 });
 
@@ -181,17 +193,35 @@ describe("StableContextManager", () => {
 
 import { createContextRanker } from "./context-ranking.js";
 
-function createTempProjectWithRanker(): { dir: string; manager: StableContextManager } {
+function createTempProjectWithRanker(): {
+  dir: string;
+  manager: StableContextManager;
+} {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stable-ctx-rank-test-"));
   fs.mkdirSync(path.join(dir, "src"));
   fs.mkdirSync(path.join(dir, "doc"));
   fs.writeFileSync(path.join(dir, "package.json"), '{"name":"test"}\n');
   fs.writeFileSync(path.join(dir, "tsconfig.json"), '{"compilerOptions":{}}\n');
-  fs.writeFileSync(path.join(dir, "README.md"), "# Test Project\nOverview here.\n");
-  fs.writeFileSync(path.join(dir, "src", "index.ts"), 'import { agent } from "./agent.js";\n');
-  fs.writeFileSync(path.join(dir, "src", "agent.ts"), "export function run() {}\n");
-  fs.writeFileSync(path.join(dir, "src", "agent.test.ts"), 'import { run } from "./agent.js";\n');
-  fs.writeFileSync(path.join(dir, "doc", "summary.md"), "# Summary\nProject overview.\n");
+  fs.writeFileSync(
+    path.join(dir, "README.md"),
+    "# Test Project\nOverview here.\n",
+  );
+  fs.writeFileSync(
+    path.join(dir, "src", "index.ts"),
+    'import { agent } from "./agent.js";\n',
+  );
+  fs.writeFileSync(
+    path.join(dir, "src", "agent.ts"),
+    "export function run() {}\n",
+  );
+  fs.writeFileSync(
+    path.join(dir, "src", "agent.test.ts"),
+    'import { run } from "./agent.js";\n',
+  );
+  fs.writeFileSync(
+    path.join(dir, "doc", "summary.md"),
+    "# Summary\nProject overview.\n",
+  );
   fs.writeFileSync(path.join(dir, "doc", "pdd21.md"), "# PDD21\nDesign doc.\n");
 
   const ranker = createContextRanker(dir);
@@ -214,9 +244,13 @@ describe("StableContextManager with ContextRanker", () => {
   });
 
   it("uses ranker for working set selection", () => {
-    const messages = manager.buildMessages({ currentQuery: "explain the project" });
+    const messages = manager.buildMessages({
+      currentQuery: "explain the project",
+    });
     const contents = messages.map((m) => m.content as string);
-    const workingSetMsg = contents.find((c) => c.includes("<working-set-pack>"));
+    const workingSetMsg = contents.find((c) =>
+      c.includes("<working-set-pack>"),
+    );
     expect(workingSetMsg).toBeDefined();
     // working set should include ranked files, not just doc/summary.md
     expect(workingSetMsg).toContain("score=");
@@ -225,7 +259,9 @@ describe("StableContextManager with ContextRanker", () => {
   it("includes rank reasons in manifest", () => {
     const messages = manager.buildMessages({ currentQuery: "" });
     const contents = messages.map((m) => m.content as string);
-    const workingSetMsg = contents.find((c) => c.includes("<working-set-pack>"));
+    const workingSetMsg = contents.find((c) =>
+      c.includes("<working-set-pack>"),
+    );
     expect(workingSetMsg).toBeDefined();
     expect(workingSetMsg).toContain("repo:");
     expect(workingSetMsg).toContain("task:");
@@ -236,8 +272,12 @@ describe("StableContextManager with ContextRanker", () => {
     const msgs1 = manager.buildMessages({ currentQuery: "debug error" });
     const msgs2 = manager.buildMessages({ currentQuery: "implement feature" });
 
-    const stable1 = msgs1.find((m) => (m.content as string).includes("<stable-context-pack>"));
-    const stable2 = msgs2.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stable1 = msgs1.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
+    const stable2 = msgs2.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     expect(stable1).toBeDefined();
     expect(stable2).toBeDefined();
@@ -295,7 +335,8 @@ describe("StableContextManager with ContextRanker", () => {
 
     expect(stableMsg).toBeDefined();
     // Count how many times README.md appears as a file path attribute across both packs
-    const stableReadmeCount = (stableMsg!.match(/path="README\.md"/g) ?? []).length;
+    const stableReadmeCount = (stableMsg!.match(/path="README\.md"/g) ?? [])
+      .length;
     const workingReadmeCount = workingMsg
       ? (workingMsg.match(/path="README\.md"/g) ?? []).length
       : 0;
@@ -312,8 +353,12 @@ describe("StableContextManager with ContextRanker", () => {
       recentFiles: ["src/agent.test.ts"],
     });
 
-    const ws1 = msgsNoEvidence.find((m) => (m.content as string).includes("<working-set-pack>"));
-    const ws2 = msgsWithEvidence.find((m) => (m.content as string).includes("<working-set-pack>"));
+    const ws1 = msgsNoEvidence.find((m) =>
+      (m.content as string).includes("<working-set-pack>"),
+    );
+    const ws2 = msgsWithEvidence.find((m) =>
+      (m.content as string).includes("<working-set-pack>"),
+    );
 
     // Both should have working set packs
     expect(ws1).toBeDefined();
@@ -328,8 +373,12 @@ describe("StableContextManager with ContextRanker", () => {
     const msgs1 = manager.buildMessages({ currentQuery: "test" });
     const msgs2 = manager.buildMessages({ currentQuery: "test" });
 
-    const ws1 = msgs1.find((m) => (m.content as string).includes("<working-set-pack>"));
-    const ws2 = msgs2.find((m) => (m.content as string).includes("<working-set-pack>"));
+    const ws1 = msgs1.find((m) =>
+      (m.content as string).includes("<working-set-pack>"),
+    );
+    const ws2 = msgs2.find((m) =>
+      (m.content as string).includes("<working-set-pack>"),
+    );
     expect(ws1).toBeDefined();
     expect(ws2).toBeDefined();
     // Same query, same cache → same working set content
@@ -361,7 +410,9 @@ describe("StableContextManager with ContextRanker", () => {
     );
 
     const messages = tightBudgetManager.buildMessages({ currentQuery: "" });
-    const wsMsg = messages.find((m) => (m.content as string).includes("<working-set-pack>"));
+    const wsMsg = messages.find((m) =>
+      (m.content as string).includes("<working-set-pack>"),
+    );
 
     // Working set should exist and should not be empty
     // (previously, the truncation marker could push actualTokens over budget,
@@ -395,11 +446,19 @@ describe("StableContextManager stable snapshot caching", () => {
   it("stable pack is byte-identical across multiple buildMessages calls", () => {
     const msgs1 = manager.buildMessages({ currentQuery: "hello" });
     const msgs2 = manager.buildMessages({ currentQuery: "world" });
-    const msgs3 = manager.buildMessages({ currentQuery: "something else entirely" });
+    const msgs3 = manager.buildMessages({
+      currentQuery: "something else entirely",
+    });
 
-    const stable1 = msgs1.find((m) => (m.content as string).includes("<stable-context-pack>"));
-    const stable2 = msgs2.find((m) => (m.content as string).includes("<stable-context-pack>"));
-    const stable3 = msgs3.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stable1 = msgs1.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
+    const stable2 = msgs2.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
+    const stable3 = msgs3.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     expect(stable1).toBeDefined();
     expect(stable1!.content).toBe(stable2!.content);
@@ -416,8 +475,12 @@ describe("StableContextManager stable snapshot caching", () => {
       stackTraceFiles: ["src/agent.ts"],
     });
 
-    const stable1 = msgsPlain.find((m) => (m.content as string).includes("<stable-context-pack>"));
-    const stable2 = msgsDynamic.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stable1 = msgsPlain.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
+    const stable2 = msgsDynamic.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     expect(stable1).toBeDefined();
     expect(stable2).toBeDefined();
@@ -427,12 +490,16 @@ describe("StableContextManager stable snapshot caching", () => {
 
   it("pinPath invalidates stable snapshot", () => {
     const msgsBefore = manager.buildMessages({ currentQuery: "" });
-    const stableBefore = msgsBefore.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableBefore = msgsBefore.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     manager.pinPath("src/agent.ts");
 
     const msgsAfter = manager.buildMessages({ currentQuery: "" });
-    const stableAfter = msgsAfter.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableAfter = msgsAfter.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     expect(stableBefore).toBeDefined();
     expect(stableAfter).toBeDefined();
@@ -443,11 +510,15 @@ describe("StableContextManager stable snapshot caching", () => {
   it("unpinPath invalidates stable snapshot", () => {
     manager.pinPath("src/agent.ts");
     const msgsWithPin = manager.buildMessages({ currentQuery: "" });
-    const stableWithPin = msgsWithPin.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableWithPin = msgsWithPin.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     manager.unpinPath("src/agent.ts");
     const msgsAfterUnpin = manager.buildMessages({ currentQuery: "" });
-    const stableAfterUnpin = msgsAfterUnpin.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableAfterUnpin = msgsAfterUnpin.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     expect(stableWithPin).toBeDefined();
     expect(stableAfterUnpin).toBeDefined();
@@ -456,12 +527,16 @@ describe("StableContextManager stable snapshot caching", () => {
 
   it("invalidateStableSnapshot forces rebuild on next call", () => {
     const msgs1 = manager.buildMessages({ currentQuery: "" });
-    const stable1 = msgs1.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stable1 = msgs1.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     manager.invalidateStableSnapshot();
 
     const msgs2 = manager.buildMessages({ currentQuery: "" });
-    const stable2 = msgs2.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stable2 = msgs2.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     // Content should be the same (same data), but the snapshot was rebuilt
     // We verify no errors and the pack is still present
@@ -472,14 +547,21 @@ describe("StableContextManager stable snapshot caching", () => {
 
   it("rebuildRepoMap invalidates stable snapshot", () => {
     const msgsBefore = manager.buildMessages({ currentQuery: "" });
-    const stableBefore = msgsBefore.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableBefore = msgsBefore.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     // Add a new file to the project
-    fs.writeFileSync(path.join(projectDir, "new-file.ts"), "export const x = 1;\n");
+    fs.writeFileSync(
+      path.join(projectDir, "new-file.ts"),
+      "export const x = 1;\n",
+    );
     manager.rebuildRepoMap();
 
     const msgsAfter = manager.buildMessages({ currentQuery: "" });
-    const stableAfter = msgsAfter.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableAfter = msgsAfter.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     expect(stableBefore).toBeDefined();
     expect(stableAfter).toBeDefined();
@@ -490,11 +572,15 @@ describe("StableContextManager stable snapshot caching", () => {
   it("stable snapshot survives budget increase without rebuild", () => {
     // First call with default budget
     const msgs1 = manager.buildMessages({ currentQuery: "" });
-    const stable1 = msgs1.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stable1 = msgs1.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     // Second call — same manager, same budget — should reuse cache
     const msgs2 = manager.buildMessages({ currentQuery: "different query" });
-    const stable2 = msgs2.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stable2 = msgs2.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     expect(stable1!.content).toBe(stable2!.content);
   });
@@ -503,17 +589,24 @@ describe("StableContextManager stable snapshot caching", () => {
     // Pin a file and build stable snapshot
     manager.pinPath("src/agent.ts");
     const msgsBefore = manager.buildMessages({ currentQuery: "" });
-    const stableBefore = msgsBefore.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableBefore = msgsBefore.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     // Simulate file modification: update content on disk
-    fs.writeFileSync(path.join(projectDir, "src", "agent.ts"), "export function run() { return 'modified'; }\n");
+    fs.writeFileSync(
+      path.join(projectDir, "src", "agent.ts"),
+      "export function run() { return 'modified'; }\n",
+    );
 
     // Notify that the pinned file was changed
     manager.notifyFileChanged("src/agent.ts");
 
     // Build messages again — stable snapshot should be rebuilt with new content
     const msgsAfter = manager.buildMessages({ currentQuery: "" });
-    const stableAfter = msgsAfter.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableAfter = msgsAfter.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     expect(stableBefore).toBeDefined();
     expect(stableAfter).toBeDefined();
@@ -526,14 +619,18 @@ describe("StableContextManager stable snapshot caching", () => {
   it("notifyFileChanged does NOT invalidate when non-pinned file is modified", () => {
     // Build stable snapshot without pinning any files
     const msgsBefore = manager.buildMessages({ currentQuery: "" });
-    const stableBefore = msgsBefore.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableBefore = msgsBefore.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     // Notify that a non-pinned file was changed
     manager.notifyFileChanged("src/agent.ts");
 
     // Build messages again — stable snapshot should be reused (same content)
     const msgsAfter = manager.buildMessages({ currentQuery: "" });
-    const stableAfter = msgsAfter.find((m) => (m.content as string).includes("<stable-context-pack>"));
+    const stableAfter = msgsAfter.find((m) =>
+      (m.content as string).includes("<stable-context-pack>"),
+    );
 
     expect(stableBefore).toBeDefined();
     expect(stableAfter).toBeDefined();

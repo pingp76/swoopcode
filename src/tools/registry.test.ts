@@ -141,14 +141,20 @@ describe("ToolRegistry async run provider", () => {
         {
           definition: {
             type: "function" as const,
-            function: { name: "run_async_start", description: "start async run" },
+            function: {
+              name: "run_async_start",
+              description: "start async run",
+            },
           },
           execute: async () => ({ output: "ok", error: false }),
         },
         {
           definition: {
             type: "function" as const,
-            function: { name: "run_async_check", description: "check async run" },
+            function: {
+              name: "run_async_check",
+              description: "check async run",
+            },
           },
           execute: async () => ({ output: "ok", error: false }),
         },
@@ -156,7 +162,11 @@ describe("ToolRegistry async run provider", () => {
     };
 
     const registry = createToolRegistry(
-      undefined, undefined, undefined, undefined, undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       asyncRunProvider,
     );
     const names = registry.getToolDefinitions().map((d) => d.function?.name);
@@ -209,7 +219,9 @@ describe("ToolRegistry output provider", () => {
       undefined,
       { includeFileWrite: false, includeFileEdit: false },
     );
-    const subNames = subRegistry.getToolDefinitions().map((d) => d.function?.name);
+    const subNames = subRegistry
+      .getToolDefinitions()
+      .map((d) => d.function?.name);
     expect(subNames).not.toContain("run_output_read");
   });
 });
@@ -220,9 +232,17 @@ describe("ToolRegistry output provider", () => {
 
 describe("ToolRegistry filtering options", () => {
   it("excludes run_write when includeFileWrite=false", () => {
-    const registry = createToolRegistry(undefined, undefined, undefined, undefined, undefined, undefined, {
-      includeFileWrite: false,
-    });
+    const registry = createToolRegistry(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        includeFileWrite: false,
+      },
+    );
     const names = registry.getToolDefinitions().map((d) => d.function?.name);
     expect(names).not.toContain("run_write");
     expect(names).toContain("run_read");
@@ -230,9 +250,17 @@ describe("ToolRegistry filtering options", () => {
   });
 
   it("excludes run_edit when includeFileEdit=false", () => {
-    const registry = createToolRegistry(undefined, undefined, undefined, undefined, undefined, undefined, {
-      includeFileEdit: false,
-    });
+    const registry = createToolRegistry(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        includeFileEdit: false,
+      },
+    );
     const names = registry.getToolDefinitions().map((d) => d.function?.name);
     expect(names).not.toContain("run_edit");
     expect(names).not.toContain("run_edit_exact");
@@ -242,9 +270,17 @@ describe("ToolRegistry filtering options", () => {
 
   it("applies commandPolicy in run_bash executor", async () => {
     const policy = createDefaultAsyncCommandPolicy();
-    const registry = createToolRegistry(undefined, undefined, undefined, undefined, undefined, undefined, {
-      commandPolicy: policy,
-    });
+    const registry = createToolRegistry(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        commandPolicy: policy,
+      },
+    );
     const executor = registry.getExecutor("run_bash");
     expect(executor).toBeDefined();
 
@@ -254,16 +290,24 @@ describe("ToolRegistry filtering options", () => {
   });
 
   it("applies readPolicy in run_read executor", async () => {
-    const registry = createToolRegistry(undefined, undefined, undefined, undefined, undefined, undefined, {
-      readPolicy: {
-        validate(path: string) {
-          if (path.startsWith("/secret")) {
-            return { allowed: false, reason: "Secret path blocked" };
-          }
-          return { allowed: true };
+    const registry = createToolRegistry(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        readPolicy: {
+          validate(path: string) {
+            if (path.startsWith("/secret")) {
+              return { allowed: false, reason: "Secret path blocked" };
+            }
+            return { allowed: true };
+          },
         },
       },
-    });
+    );
     const executor = registry.getExecutor("run_read");
     expect(executor).toBeDefined();
 
@@ -285,7 +329,11 @@ describe("ToolRegistry filtering options", () => {
       ],
     };
     const registry = createToolRegistry(
-      undefined, undefined, undefined, undefined, undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       asyncRunProvider,
       { includeFileWrite: false, includeFileEdit: false },
     );
@@ -297,10 +345,17 @@ describe("ToolRegistry filtering options", () => {
 
     // 子智能体注册表：不传 asyncRunProvider
     const subRegistry = createToolRegistry(
-      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       { includeFileWrite: false, includeFileEdit: false },
     );
-    const subNames = subRegistry.getToolDefinitions().map((d) => d.function?.name);
+    const subNames = subRegistry
+      .getToolDefinitions()
+      .map((d) => d.function?.name);
     expect(subNames).not.toContain("run_async_start");
     expect(subNames).not.toContain("run_subagent");
   });

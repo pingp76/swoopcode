@@ -178,6 +178,8 @@ EVAL_LIVE_TEAM=1 EVAL_LIVE_MCP=1 npm run test:eval:live:team:mcp
 - [设计文档索引](./doc/README.md)：公开版 PDD 文档入口。
 - [网页教程](./tutorial/README.md)：面向中文新手的 coding agent 教程。
 - [Eval 系统说明](./src/eval/README.md)：评测 harness 的使用说明。
+- [贡献指南](./CONTRIBUTING.md)：参与开发、文档和 eval 贡献前建议先读。
+- [安全策略](./SECURITY.md)：安全问题报告方式和敏感数据处理建议。
 
 启动网页教程：
 

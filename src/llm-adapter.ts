@@ -163,13 +163,18 @@ export function createOpenAIChatCompletionsAdapter(
 
       // 如果模型返回 reasoning 字段，保留在 assistantMessage 中
       const rawMsg = message as unknown as Record<string, unknown>;
-      if (rawMsg.reasoning_content && typeof rawMsg.reasoning_content === "string") {
-        (assistantMessage as unknown as Record<string, unknown>).reasoning_content =
-          rawMsg.reasoning_content;
+      if (
+        rawMsg.reasoning_content &&
+        typeof rawMsg.reasoning_content === "string"
+      ) {
+        (
+          assistantMessage as unknown as Record<string, unknown>
+        ).reasoning_content = rawMsg.reasoning_content;
       }
       if (rawMsg.reasoning_details) {
-        (assistantMessage as unknown as Record<string, unknown>).reasoning_details =
-          rawMsg.reasoning_details;
+        (
+          assistantMessage as unknown as Record<string, unknown>
+        ).reasoning_details = rawMsg.reasoning_details;
       }
 
       const result: LLMResponse = {
@@ -197,7 +202,10 @@ export function createOpenAIChatCompletionsAdapter(
         // 某些 provider 会在最后一个 chunk 返回 usage，不含 choices
         const chunkRaw = chunk as unknown as { usage?: unknown };
         if (chunkRaw.usage) {
-          acc.usage = extractUsage(chunkRaw.usage as OpenAI.Completions.CompletionUsage | undefined, policy);
+          acc.usage = extractUsage(
+            chunkRaw.usage as OpenAI.Completions.CompletionUsage | undefined,
+            policy,
+          );
         }
         return;
       }
@@ -214,7 +222,9 @@ export function createOpenAIChatCompletionsAdapter(
       if (delta.tool_calls) {
         for (const tc of delta.tool_calls) {
           const idx = tc.index;
-          const existing = acc.toolCallAccumulators.get(idx) ?? { arguments: "" };
+          const existing = acc.toolCallAccumulators.get(idx) ?? {
+            arguments: "",
+          };
 
           if (tc.id) existing.id = tc.id;
           if (tc.type) existing.type = tc.type as "function";
@@ -239,9 +249,13 @@ export function createOpenAIChatCompletionsAdapter(
           if (!acc.reasoningDetails) {
             acc.reasoningDetails = [];
           }
-          (acc.reasoningDetails as unknown[]).push(...deltaRaw.reasoning_details);
+          (acc.reasoningDetails as unknown[]).push(
+            ...deltaRaw.reasoning_details,
+          );
         } else if (typeof deltaRaw.reasoning_details === "string") {
-          acc.reasoningDetails = ((acc.reasoningDetails as string | undefined) ?? "") + deltaRaw.reasoning_details;
+          acc.reasoningDetails =
+            ((acc.reasoningDetails as string | undefined) ?? "") +
+            deltaRaw.reasoning_details;
         } else {
           acc.reasoningDetails = deltaRaw.reasoning_details;
         }
@@ -259,7 +273,8 @@ export function createOpenAIChatCompletionsAdapter(
       }
 
       // 将累积的 tool call 数据转换为标准格式
-      const toolCalls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[] = [];
+      const toolCalls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[] =
+        [];
       const sortedIndices = Array.from(acc.toolCallAccumulators.keys()).sort(
         (a, b) => a - b,
       );
@@ -286,12 +301,14 @@ export function createOpenAIChatCompletionsAdapter(
 
       // 如果有 reasoning content 或 reasoning details，加入 assistant message
       if (acc.reasoningContent) {
-        (assistantMessage as unknown as Record<string, unknown>).reasoning_content =
-          acc.reasoningContent;
+        (
+          assistantMessage as unknown as Record<string, unknown>
+        ).reasoning_content = acc.reasoningContent;
       }
       if (acc.reasoningDetails !== undefined) {
-        (assistantMessage as unknown as Record<string, unknown>).reasoning_details =
-          acc.reasoningDetails;
+        (
+          assistantMessage as unknown as Record<string, unknown>
+        ).reasoning_details = acc.reasoningDetails;
       }
 
       const result: LLMResponse = {
@@ -300,7 +317,11 @@ export function createOpenAIChatCompletionsAdapter(
         finishReason: acc.finishReason,
         assistantMessage,
       };
-      if (acc.reasoningContent || acc.reasoningDetails !== undefined || policy.reasoning.returned) {
+      if (
+        acc.reasoningContent ||
+        acc.reasoningDetails !== undefined ||
+        policy.reasoning.returned
+      ) {
         if (acc.reasoningDetails !== undefined) {
           result.reasoning = {
             content: null,
@@ -388,7 +409,10 @@ function extractUsage(
 
   // 提取 reasoning tokens（OpenAI 格式）
   const raw = usage as unknown as Record<string, unknown>;
-  if (typeof raw.completion_tokens_details === "object" && raw.completion_tokens_details !== null) {
+  if (
+    typeof raw.completion_tokens_details === "object" &&
+    raw.completion_tokens_details !== null
+  ) {
     const details = raw.completion_tokens_details as Record<string, unknown>;
     if (typeof details.reasoning_tokens === "number") {
       telemetry.reasoningTokens = details.reasoning_tokens;
@@ -398,13 +422,22 @@ function extractUsage(
   // 提取 cache tokens（根据 profile 配置的字段名）
   if (policy.cache.supported && policy.cache.exposeUsage) {
     const usageFields = policy.cache.usageFields;
-    if (usageFields.hitTokens && typeof raw[usageFields.hitTokens] === "number") {
+    if (
+      usageFields.hitTokens &&
+      typeof raw[usageFields.hitTokens] === "number"
+    ) {
       telemetry.cacheHitTokens = raw[usageFields.hitTokens] as number;
     }
-    if (usageFields.missTokens && typeof raw[usageFields.missTokens] === "number") {
+    if (
+      usageFields.missTokens &&
+      typeof raw[usageFields.missTokens] === "number"
+    ) {
       telemetry.cacheMissTokens = raw[usageFields.missTokens] as number;
     }
-    if (usageFields.cachedTokens && typeof raw[usageFields.cachedTokens] === "number") {
+    if (
+      usageFields.cachedTokens &&
+      typeof raw[usageFields.cachedTokens] === "number"
+    ) {
       telemetry.cachedTokens = raw[usageFields.cachedTokens] as number;
     }
   }

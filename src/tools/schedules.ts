@@ -20,10 +20,7 @@
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import type { ToolResult } from "./types.js";
-import type {
-  ScheduleManager,
-  CreateScheduleInput,
-} from "../schedules.js";
+import type { ScheduleManager, CreateScheduleInput } from "../schedules.js";
 
 /**
  * ScheduleToolProvider — schedule 工具提供者接口
@@ -85,19 +82,23 @@ const runScheduleCreateDefinition: ChatCompletionTool = {
             type: {
               type: "string",
               enum: ["once", "recurring"],
-              description: "'once' for single trigger, 'recurring' for repeated triggers",
+              description:
+                "'once' for single trigger, 'recurring' for repeated triggers",
             },
             run_at: {
               type: "string",
-              description: "ISO 8601 timestamp for one-time schedules (required when type='once')",
+              description:
+                "ISO 8601 timestamp for one-time schedules (required when type='once')",
             },
             starts_at: {
               type: "string",
-              description: "ISO 8601 timestamp for recurring schedules start time",
+              description:
+                "ISO 8601 timestamp for recurring schedules start time",
             },
             ends_at: {
               type: "string",
-              description: "Optional ISO 8601 timestamp for recurring schedules end time",
+              description:
+                "Optional ISO 8601 timestamp for recurring schedules end time",
             },
             rule: {
               type: "object",
@@ -250,7 +251,8 @@ const runScheduleReadDefinition: ChatCompletionTool = {
   type: "function",
   function: {
     name: "run_schedule_read",
-    description: "Read a schedule by ID, including its details and recent occurrences.",
+    description:
+      "Read a schedule by ID, including its details and recent occurrences.",
     parameters: {
       type: "object",
       properties: {
@@ -273,7 +275,8 @@ const runScheduleCancelDefinition: ChatCompletionTool = {
   type: "function",
   function: {
     name: "run_schedule_cancel",
-    description: "Cancel a schedule. Cancelled schedules no longer produce future occurrences.",
+    description:
+      "Cancel a schedule. Cancelled schedules no longer produce future occurrences.",
     parameters: {
       type: "object",
       properties: {
@@ -453,7 +456,8 @@ function parseTiming(args: Record<string, unknown>): ScheduleTimingInput {
   // 重复性 schedule：必须提供 starts_at，ends_at 为可选
   // starts_at 是重复规则的锚点：hourly/daily/weekly 等规则都从这个时间往未来推。
   const startsAt = String(t["starts_at"] ?? "");
-  if (!startsAt) throw new Error("timing.starts_at is required for recurring schedules");
+  if (!startsAt)
+    throw new Error("timing.starts_at is required for recurring schedules");
   const endsAt = t["ends_at"] ? String(t["ends_at"]) : undefined;
 
   // 重复性 schedule 必须携带 rule 对象，用于描述重复规则
@@ -476,7 +480,10 @@ function parseTiming(args: Record<string, unknown>): ScheduleTimingInput {
   return result;
 }
 
-function parseRecurrenceRule(kind: string, r: Record<string, unknown>): import("../schedule-store.js").RecurrenceRule {
+function parseRecurrenceRule(
+  kind: string,
+  r: Record<string, unknown>,
+): import("../schedule-store.js").RecurrenceRule {
   // 每种 recurrence rule 都返回一个带 kind 的对象。
   // 这种结构的好处是：后续 computeNextRunAt 只需要 switch(rule.kind)，
   // 就能获得 TypeScript 的类型缩窄和清晰的规则分支。
@@ -505,7 +512,11 @@ function parseRecurrenceRule(kind: string, r: Record<string, unknown>): import("
       return {
         kind: "weekly",
         intervalWeeks: Number(r["interval_weeks"] ?? 1),
-        daysOfWeek: Array.isArray(r["days_of_week"]) ? r["days_of_week"].map(String) as import("../schedule-store.js").Weekday[] : ["mon"],
+        daysOfWeek: Array.isArray(r["days_of_week"])
+          ? (r["days_of_week"].map(
+              String,
+            ) as import("../schedule-store.js").Weekday[])
+          : ["mon"],
         timeOfDay: String(r["time_of_day"] ?? "00:00:00"),
       };
     case "monthly":
@@ -570,7 +581,11 @@ export function createScheduleToolProvider(
 
     // 提取并校验 intent 对象，必须为 object 类型且包含非空 prompt
     const intentRaw = args["intent"];
-    if (!intentRaw || typeof intentRaw !== "object" || Array.isArray(intentRaw)) {
+    if (
+      !intentRaw ||
+      typeof intentRaw !== "object" ||
+      Array.isArray(intentRaw)
+    ) {
       return { output: "Error: intent must be an object", error: true };
     }
     const intent = intentRaw as Record<string, unknown>;
@@ -592,46 +607,75 @@ export function createScheduleToolProvider(
 
     // 提取并校验 execution 对象，executor 只能是 subagent 或 command
     const executionRaw = args["execution"];
-    if (!executionRaw || typeof executionRaw !== "object" || Array.isArray(executionRaw)) {
+    if (
+      !executionRaw ||
+      typeof executionRaw !== "object" ||
+      Array.isArray(executionRaw)
+    ) {
       return { output: "Error: execution must be an object", error: true };
     }
     const execution = executionRaw as Record<string, unknown>;
     const executor = String(execution["executor"] ?? "");
     if (executor !== "subagent" && executor !== "command") {
-      return { output: "Error: execution.executor must be 'subagent' or 'command'", error: true };
+      return {
+        output: "Error: execution.executor must be 'subagent' or 'command'",
+        error: true,
+      };
     }
 
     // 当 executor 为 command 时，必须提供 command 字符串
-    const command = execution["command"] ? String(execution["command"]) : undefined;
+    const command = execution["command"]
+      ? String(execution["command"])
+      : undefined;
     if (executor === "command" && !command) {
-      return { output: "Error: execution.command is required when executor='command'", error: true };
+      return {
+        output: "Error: execution.command is required when executor='command'",
+        error: true,
+      };
     }
 
     // 提取 resources 对象，分别处理 read_paths 和 write_paths 的默认值
     const resourcesRaw = execution["resources"];
-    if (!resourcesRaw || typeof resourcesRaw !== "object" || Array.isArray(resourcesRaw)) {
-      return { output: "Error: execution.resources must be an object", error: true };
+    if (
+      !resourcesRaw ||
+      typeof resourcesRaw !== "object" ||
+      Array.isArray(resourcesRaw)
+    ) {
+      return {
+        output: "Error: execution.resources must be an object",
+        error: true,
+      };
     }
     const resources = resourcesRaw as Record<string, unknown>;
     // read_paths 默认 "."，表示 schedule 触发时可以读取当前项目。
     // write_paths 默认 []，因为当前 permissionProfile 固定 readonly。
-    const readPaths = Array.isArray(resources["read_paths"]) ? resources["read_paths"].map(String) : ["."];
-    const writePaths = Array.isArray(resources["write_paths"]) ? resources["write_paths"].map(String) : [];
+    const readPaths = Array.isArray(resources["read_paths"])
+      ? resources["read_paths"].map(String)
+      : ["."];
+    const writePaths = Array.isArray(resources["write_paths"])
+      ? resources["write_paths"].map(String)
+      : [];
 
     // 提取超时、重叠策略等可选参数，未传入时使用默认值
-    const timeoutSeconds = execution["timeout_seconds"] !== undefined
-      ? Number(execution["timeout_seconds"])
-      : 300;
-    const overlapPolicy = String(execution["overlap_policy"] ?? "skip") as "allow" | "skip";
+    const timeoutSeconds =
+      execution["timeout_seconds"] !== undefined
+        ? Number(execution["timeout_seconds"])
+        : 300;
+    const overlapPolicy = String(execution["overlap_policy"] ?? "skip") as
+      | "allow"
+      | "skip";
     const permissionProfile = "readonly";
     // 第一版工具 schema 不暴露 ci/workspace_write。
     // 这是有意裁剪：学生先理解 readonly 定时执行，再在后续课程扩展写能力。
 
     // 解析 output_policy 对象，若未传入或类型不符则视为空对象
     const outputPolicyRaw = args["output_policy"];
-    const outputPolicy = outputPolicyRaw && typeof outputPolicyRaw === "object" && !Array.isArray(outputPolicyRaw)
-      ? (outputPolicyRaw as Record<string, unknown>)
-      : {};
+    const outputPolicy =
+      outputPolicyRaw &&
+      typeof outputPolicyRaw === "object" &&
+      !Array.isArray(outputPolicyRaw)
+        ? (outputPolicyRaw as Record<string, unknown>)
+        : {};
 
     // 组装 CreateScheduleInput，将前端参数映射为内部数据结构
     const input: CreateScheduleInput = {
@@ -731,14 +775,21 @@ export function createScheduleToolProvider(
     // 通过 manager 读取 schedule 详情，若不存在则返回错误
     const schedule = manager.read(scheduleId);
     if (!schedule) {
-      return { output: `Error: Schedule not found: ${scheduleId}`, error: true };
+      return {
+        output: `Error: Schedule not found: ${scheduleId}`,
+        error: true,
+      };
     }
 
     // 解析 recent_occurrences 参数，默认返回最近 5 条 occurrence
-    const recentOccurrences = args["recent_occurrences"] !== undefined
-      ? Number(args["recent_occurrences"])
-      : 5;
-    const occurrences = manager.listOccurrences({ scheduleId, limit: recentOccurrences });
+    const recentOccurrences =
+      args["recent_occurrences"] !== undefined
+        ? Number(args["recent_occurrences"])
+        : 5;
+    const occurrences = manager.listOccurrences({
+      scheduleId,
+      limit: recentOccurrences,
+    });
     return {
       output: formatScheduleView(schedule, occurrences),
       error: false,
@@ -756,7 +807,10 @@ export function createScheduleToolProvider(
 
     try {
       // 调用 manager 取消 schedule，reason 为可选参数
-      const schedule = manager.cancel(scheduleId, args["reason"] ? String(args["reason"]) : undefined);
+      const schedule = manager.cancel(
+        scheduleId,
+        args["reason"] ? String(args["reason"]) : undefined,
+      );
       return {
         output: JSON.stringify(
           {
@@ -828,7 +882,10 @@ export function createScheduleToolProvider(
       { definition: runScheduleReadDefinition, execute: executeRead },
       { definition: runScheduleCancelDefinition, execute: executeCancel },
       { definition: runScheduleDeleteDefinition, execute: executeDelete },
-      { definition: runScheduleOccurrenceListDefinition, execute: executeOccurrenceList },
+      {
+        definition: runScheduleOccurrenceListDefinition,
+        execute: executeOccurrenceList,
+      },
     ],
   };
 }

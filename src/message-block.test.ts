@@ -113,7 +113,11 @@ describe("groupToBlocks", () => {
         role: "assistant",
         content: null,
         tool_calls: [
-          { id: "tc1", type: "function", function: { name: "run_bash", arguments: '{"command":"ls"}' } },
+          {
+            id: "tc1",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"ls"}' },
+          },
         ],
       } as ChatCompletionMessageParam,
       {
@@ -136,12 +140,28 @@ describe("groupToBlocks", () => {
         role: "assistant",
         content: null,
         tool_calls: [
-          { id: "tc1", type: "function", function: { name: "run_bash", arguments: '{"command":"ls"}' } },
-          { id: "tc2", type: "function", function: { name: "run_read", arguments: '{"path":"f.txt"}' } },
+          {
+            id: "tc1",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"ls"}' },
+          },
+          {
+            id: "tc2",
+            type: "function",
+            function: { name: "run_read", arguments: '{"path":"f.txt"}' },
+          },
         ],
       } as ChatCompletionMessageParam,
-      { role: "tool", tool_call_id: "tc1", content: "file1.txt" } as ChatCompletionMessageParam,
-      { role: "tool", tool_call_id: "tc2", content: "file content" } as ChatCompletionMessageParam,
+      {
+        role: "tool",
+        tool_call_id: "tc1",
+        content: "file1.txt",
+      } as ChatCompletionMessageParam,
+      {
+        role: "tool",
+        tool_call_id: "tc2",
+        content: "file content",
+      } as ChatCompletionMessageParam,
     ];
     const blocks = groupToBlocks(messages);
     expect(blocks).toHaveLength(1);
@@ -158,10 +178,18 @@ describe("groupToBlocks", () => {
         role: "assistant",
         content: null,
         tool_calls: [
-          { id: "tc1", type: "function", function: { name: "run_bash", arguments: '{"command":"ls"}' } },
+          {
+            id: "tc1",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"ls"}' },
+          },
         ],
       } as ChatCompletionMessageParam,
-      { role: "tool", tool_call_id: "tc1", content: "file1.txt" } as ChatCompletionMessageParam,
+      {
+        role: "tool",
+        tool_call_id: "tc1",
+        content: "file1.txt",
+      } as ChatCompletionMessageParam,
       { role: "assistant", content: "Here are the files." },
     ];
     const blocks = groupToBlocks(messages);
@@ -229,7 +257,11 @@ describe("groupToBlocks", () => {
         content: null,
         _round: 3,
         tool_calls: [
-          { id: "tc1", type: "function", function: { name: "run_bash", arguments: "{}" } },
+          {
+            id: "tc1",
+            type: "function",
+            function: { name: "run_bash", arguments: "{}" },
+          },
         ],
       } as ChatCompletionMessageParam,
       {
@@ -312,10 +344,18 @@ describe("flattenToMessages", () => {
         role: "assistant",
         content: null,
         tool_calls: [
-          { id: "tc1", type: "function", function: { name: "run_bash", arguments: "{}" } },
+          {
+            id: "tc1",
+            type: "function",
+            function: { name: "run_bash", arguments: "{}" },
+          },
         ],
       } as ChatCompletionMessageParam,
-      { role: "tool", tool_call_id: "tc1", content: "output" } as ChatCompletionMessageParam,
+      {
+        role: "tool",
+        tool_call_id: "tc1",
+        content: "output",
+      } as ChatCompletionMessageParam,
     ];
     const blocks = groupToBlocks(original);
     const result = flattenToMessages(blocks);
@@ -362,7 +402,11 @@ describe("flattenToMessages", () => {
         _loopIndex: 8,
         _messageSequence: 2,
         tool_calls: [
-          { id: "tc1", type: "function", function: { name: "run_bash", arguments: "{}" } },
+          {
+            id: "tc1",
+            type: "function",
+            function: { name: "run_bash", arguments: "{}" },
+          },
         ],
       },
       {
@@ -390,17 +434,27 @@ describe("flattenToMessages", () => {
         role: "assistant",
         content: null,
         tool_calls: [
-          { id: "call_abc123", type: "function", function: { name: "run_bash", arguments: '{"command":"pwd"}' } },
+          {
+            id: "call_abc123",
+            type: "function",
+            function: { name: "run_bash", arguments: '{"command":"pwd"}' },
+          },
         ],
       } as ChatCompletionMessageParam,
-      { role: "tool", tool_call_id: "call_abc123", content: "/home/user" } as ChatCompletionMessageParam,
+      {
+        role: "tool",
+        tool_call_id: "call_abc123",
+        content: "/home/user",
+      } as ChatCompletionMessageParam,
     ];
     const blocks = groupToBlocks(original);
     const result = flattenToMessages(blocks);
     // 找到 tool 消息
     const toolMsg = result.find((m) => m.role === "tool");
     expect(toolMsg).toBeDefined();
-    expect((toolMsg as { tool_call_id: string }).tool_call_id).toBe("call_abc123");
+    expect((toolMsg as { tool_call_id: string }).tool_call_id).toBe(
+      "call_abc123",
+    );
   });
 
   it("handles summary block", () => {
@@ -414,7 +468,9 @@ describe("flattenToMessages", () => {
     const result = flattenToMessages(blocks);
     expect(result).toHaveLength(1);
     expect(result[0]!.role).toBe("user");
-    expect((result[0]! as { content: string }).content).toContain("[Context Summary]");
+    expect((result[0]! as { content: string }).content).toContain(
+      "[Context Summary]",
+    );
   });
 
   it("preserves trailing user message (latest query)", () => {
@@ -429,7 +485,9 @@ describe("flattenToMessages", () => {
     expect(blocks).toHaveLength(2);
     expect(blocks[0]!.type).toBe("text");
     expect(blocks[1]!.type).toBe("text");
-    expect((blocks[1]! as { user?: { content?: string } }).user?.content).toBe("Latest query");
+    expect((blocks[1]! as { user?: { content?: string } }).user?.content).toBe(
+      "Latest query",
+    );
 
     // round-trip 也应该保留末尾的 user 消息
     const result = flattenToMessages(blocks);
@@ -456,14 +514,10 @@ describe("flattenToMessages", () => {
 
     const result = flattenToMessages(groupToBlocks(normalized));
 
-    expect(result.map((m) => m.role)).toEqual([
-      "assistant",
-      "tool",
-      "user",
-    ]);
-    expect((result[1] as unknown as { tool_call_id: string }).tool_call_id).toBe(
-      "tc_roundtrip",
-    );
+    expect(result.map((m) => m.role)).toEqual(["assistant", "tool", "user"]);
+    expect(
+      (result[1] as unknown as { tool_call_id: string }).tool_call_id,
+    ).toBe("tc_roundtrip");
   });
 });
 
@@ -489,11 +543,19 @@ describe("estimateBlockTokens", () => {
         role: "assistant" as const,
         content: null,
         tool_calls: [
-          { id: "tc1", type: "function" as const, function: { name: "run_bash", arguments: '{"command":"ls -la"}' } },
+          {
+            id: "tc1",
+            type: "function" as const,
+            function: { name: "run_bash", arguments: '{"command":"ls -la"}' },
+          },
         ],
       },
       toolResults: [
-        { role: "tool" as const, tool_call_id: "tc1", content: "file1.txt\nfile2.txt" },
+        {
+          role: "tool" as const,
+          tool_call_id: "tc1",
+          content: "file1.txt\nfile2.txt",
+        },
       ],
     };
     const tokens = estimateBlockTokens(block);

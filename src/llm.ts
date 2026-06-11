@@ -160,11 +160,19 @@ export function createLLMClient(
 
       // 4. 根据策略选择 streaming 或 non-streaming 路径
       if (prepared.stream) {
-        const result = await chatStreaming(client, baseParams, adapter, llmLogger, startTime);
+        const result = await chatStreaming(
+          client,
+          baseParams,
+          adapter,
+          llmLogger,
+          startTime,
+        );
         return result;
       }
 
-      const response = await client.chat.completions.create(baseParams as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParams);
+      const response = await client.chat.completions.create(
+        baseParams as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParams,
+      );
       const durationMs = Date.now() - startTime;
 
       const result = adapter.parseNonStreamingResponse(response);
@@ -232,7 +240,9 @@ function buildLegacyPolicy(config: ResolvedLLMConfig): RuntimePolicy {
       prefersStreaming: config.capabilities.prefersStreaming,
       maxOutputTokens: 4096,
       maxTokensField: "max_tokens",
-      thinkingMode: config.capabilities.supportsThinking ? "adaptive" : "disabled",
+      thinkingMode: config.capabilities.supportsThinking
+        ? "adaptive"
+        : "disabled",
       extraBody: {},
     },
     reasoning: {
@@ -244,7 +254,8 @@ function buildLegacyPolicy(config: ResolvedLLMConfig): RuntimePolicy {
     },
     tools: {
       supportsTools: config.capabilities.supportsTools,
-      supportsToolChoiceRequired: config.capabilities.supportsToolChoiceRequired,
+      supportsToolChoiceRequired:
+        config.capabilities.supportsToolChoiceRequired,
       allowedToolChoiceModes: ["auto", "none"],
       streamingArguments: config.capabilities.prefersStreaming,
       multimodalToolResults: false,

@@ -39,8 +39,17 @@ interface BlockTiming {
 }
 
 export type MessageBlock =
-  | ({ type: "text"; user?: ChatCompletionMessageParam; assistant?: ChatCompletionMessageParam } & BlockTiming)
-  | ({ type: "tool_use"; user?: ChatCompletionMessageParam; assistant: ChatCompletionMessageParam; toolResults: ChatCompletionMessageParam[] } & BlockTiming)
+  | ({
+      type: "text";
+      user?: ChatCompletionMessageParam;
+      assistant?: ChatCompletionMessageParam;
+    } & BlockTiming)
+  | ({
+      type: "tool_use";
+      user?: ChatCompletionMessageParam;
+      assistant: ChatCompletionMessageParam;
+      toolResults: ChatCompletionMessageParam[];
+    } & BlockTiming)
   | ({ type: "summary"; user: ChatCompletionMessageParam } & BlockTiming);
 
 /**
@@ -81,7 +90,8 @@ export function estimateTokens(text: string): number {
   if (!text) return 0;
 
   // 统计中文字符数（CJK 统一汉字范围）
-  const chineseCount = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) ?? []).length;
+  const chineseCount = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) ?? [])
+    .length;
   const totalChars = text.length;
 
   // 取两种估算的较大值，避免纯中文文本被低估
@@ -116,7 +126,10 @@ export function estimateBlockTokens(block: MessageBlock): number {
     total += estimateTokens(extractContent(block.assistant));
     // tool_calls 的参数也计入
     // 将 assistant 中每个 tool_call 的 function arguments 也计入 token
-    if ("tool_calls" in block.assistant && Array.isArray(block.assistant.tool_calls)) {
+    if (
+      "tool_calls" in block.assistant &&
+      Array.isArray(block.assistant.tool_calls)
+    ) {
       for (const tc of block.assistant.tool_calls) {
         total += estimateTokens(tc.function.arguments ?? "");
       }
@@ -194,9 +207,12 @@ function readTiming(msg: ChatCompletionMessageParam): BlockTiming {
   const annotated = msg as AnnotatedMessage;
   // 逐个检查内部字段，存在则写入 timing 对象
   const timing: BlockTiming = {};
-  if (annotated._turnIndex !== undefined) timing.turnIndex = annotated._turnIndex;
-  if (annotated._loopRound !== undefined) timing.loopRound = annotated._loopRound;
-  if (annotated._loopIndex !== undefined) timing.loopIndex = annotated._loopIndex;
+  if (annotated._turnIndex !== undefined)
+    timing.turnIndex = annotated._turnIndex;
+  if (annotated._loopRound !== undefined)
+    timing.loopRound = annotated._loopRound;
+  if (annotated._loopIndex !== undefined)
+    timing.loopIndex = annotated._loopIndex;
   if (annotated._messageSequence !== undefined) {
     timing.messageSequence = annotated._messageSequence;
   }
@@ -229,7 +245,9 @@ function mergeTiming(messages: ChatCompletionMessageParam[]): BlockTiming {
 
 function minNumber(values: Array<number | undefined>): number | undefined {
   // 过滤掉 undefined 后取最小值，无有效值则返回 undefined
-  const defined = values.filter((value): value is number => value !== undefined);
+  const defined = values.filter(
+    (value): value is number => value !== undefined,
+  );
   return defined.length > 0 ? Math.min(...defined) : undefined;
 }
 
@@ -469,14 +487,17 @@ function extractContent(msg: ChatCompletionMessageParam): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     // 只保留带有 text 字段的 block（过滤掉图片等非文本内容）
-    return content
-      .filter((b): b is { type: "text"; text: string } =>
-        typeof b === "object" && b !== null && "text" in b,
-      )
-      // 提取每个文本块的 text 字段
-      .map((b) => b.text)
-      // 用换行符连接多段文本
-      .join("\n");
+    return (
+      content
+        .filter(
+          (b): b is { type: "text"; text: string } =>
+            typeof b === "object" && b !== null && "text" in b,
+        )
+        // 提取每个文本块的 text 字段
+        .map((b) => b.text)
+        // 用换行符连接多段文本
+        .join("\n")
+    );
   }
   return "";
 }

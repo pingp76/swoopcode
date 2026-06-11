@@ -624,7 +624,11 @@ describe("cleanup", () => {
       outputDir,
       outputStore,
     });
-    compressor.compressToolResult("run_bash", "tc_cleanup_store", "x".repeat(500));
+    compressor.compressToolResult(
+      "run_bash",
+      "tc_cleanup_store",
+      "x".repeat(500),
+    );
 
     compressor.cleanup();
     expect(existsSync(outputDir)).toBe(true);

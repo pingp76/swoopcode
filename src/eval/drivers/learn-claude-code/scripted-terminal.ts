@@ -12,7 +12,10 @@
  */
 
 import type { Terminal } from "../../../terminal.js";
-import type { EvalTerminalPlan, AgentRuntimeEvent } from "../../core/case-schema.js";
+import type {
+  EvalTerminalPlan,
+  AgentRuntimeEvent,
+} from "../../core/case-schema.js";
 
 /**
  * createScriptedTerminal — 创建脚本化终端
@@ -27,7 +30,9 @@ export function createScriptedTerminal(
   // question 队列：按顺序消耗
   const questions = plan?.questions ? [...plan.questions] : [];
   // permission 队列：按顺序消耗
-  const permissionAnswers = plan?.permissionAnswers ? [...plan.permissionAnswers] : [];
+  const permissionAnswers = plan?.permissionAnswers
+    ? [...plan.permissionAnswers]
+    : [];
   // permission 队列耗尽后的默认值
   const defaultPermissionAnswer = plan?.defaultPermissionAnswer ?? true;
   // 关闭标记

@@ -76,10 +76,7 @@ describe("executeRead", () => {
   });
 
   it("reads existing file successfully", async () => {
-    const result = await executeRead(
-      join(testDir, "hello.txt"),
-      testDir,
-    );
+    const result = await executeRead(join(testDir, "hello.txt"), testDir);
     expect(result.error).toBe(false);
     expect(result.output).toBe("hello world");
   });
@@ -168,12 +165,7 @@ describe("executeEdit", () => {
     const filePath = join(testDir, "edit.txt");
     await executeWrite(filePath, "hello world", testDir);
 
-    const result = await executeEdit(
-      filePath,
-      "world",
-      "TypeScript",
-      testDir,
-    );
+    const result = await executeEdit(filePath, "world", "TypeScript", testDir);
     expect(result.error).toBe(false);
     expect(result.output).toContain("Successfully edited");
 

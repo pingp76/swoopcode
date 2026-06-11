@@ -163,9 +163,17 @@ export function createAgent(deps: {
   const recentFileActivity: string[] = [];
   const FILE_ACTIVITY_LIMIT = 50;
 
-  function trackFileActivity(toolName: string, args: Record<string, unknown>): void {
+  function trackFileActivity(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): void {
     // 只追踪文件操作工具
-    const fileTools = new Set(["run_read", "run_write", "run_edit", "run_edit_exact"]);
+    const fileTools = new Set([
+      "run_read",
+      "run_write",
+      "run_edit",
+      "run_edit_exact",
+    ]);
     if (!fileTools.has(toolName)) return;
 
     const filePath = typeof args["path"] === "string" ? args["path"] : null;
@@ -183,7 +191,9 @@ export function createAgent(deps: {
     // 如果命中 pinned path 则 invalidate stable snapshot
     if (
       stableContextManager &&
-      (toolName === "run_write" || toolName === "run_edit" || toolName === "run_edit_exact")
+      (toolName === "run_write" ||
+        toolName === "run_edit" ||
+        toolName === "run_edit_exact")
     ) {
       stableContextManager.notifyFileChanged(filePath);
     }
@@ -227,20 +237,23 @@ export function createAgent(deps: {
     }
   }
 
-   /**
-    * prepareMessages — 消息处理管道
-    *
-    * 完整流程：从 history 读取带 timing 的条目 → 标注内部字段 → normalize → group → decay → [compact] → flatten。
-    * 如果压缩过程中任何环节出错，降级使用标准化后的消息。
-    *
-    * system prompt 独立于压缩管道：在最后拼接到消息列表头部。
-    * 因为 groupToBlocks 会跳过 system 消息，放入管道会导致丢失。
-    *
-    * @param currentLoopIndex - 当前 Agent 实例内全局 LLM loop 序号，用于衰减压缩判断
-    * @param currentQuery - 当前用户查询（用于 ContextRanker 排序 working set）
-    * @returns 最终给 LLM 的消息列表
-    */
-   function prepareMessages(currentLoopIndex: number, currentQuery: string = ""): ChatCompletionMessageParam[] {
+  /**
+   * prepareMessages — 消息处理管道
+   *
+   * 完整流程：从 history 读取带 timing 的条目 → 标注内部字段 → normalize → group → decay → [compact] → flatten。
+   * 如果压缩过程中任何环节出错，降级使用标准化后的消息。
+   *
+   * system prompt 独立于压缩管道：在最后拼接到消息列表头部。
+   * 因为 groupToBlocks 会跳过 system 消息，放入管道会导致丢失。
+   *
+   * @param currentLoopIndex - 当前 Agent 实例内全局 LLM loop 序号，用于衰减压缩判断
+   * @param currentQuery - 当前用户查询（用于 ContextRanker 排序 working set）
+   * @returns 最终给 LLM 的消息列表
+   */
+  function prepareMessages(
+    currentLoopIndex: number,
+    currentQuery: string = "",
+  ): ChatCompletionMessageParam[] {
     // 从 history 获取带 timing 元信息的条目（不含 system prompt）
     const entries = history.getEntries();
 
@@ -294,7 +307,10 @@ export function createAgent(deps: {
         if (stableContextManager) {
           const stableMsgs = stableContextManager.buildMessages({
             currentQuery,
-            recentFiles: [...recentFileActivity, ...compressor.getState().recentFiles],
+            recentFiles: [
+              ...recentFileActivity,
+              ...compressor.getState().recentFiles,
+            ],
           });
           if (systemMsg) {
             fallback.splice(1, 0, ...stableMsgs);
@@ -313,7 +329,10 @@ export function createAgent(deps: {
       const stableMsgs = stableContextManager
         ? stableContextManager.buildMessages({
             currentQuery,
-            recentFiles: [...recentFileActivity, ...compressor.getState().recentFiles],
+            recentFiles: [
+              ...recentFileActivity,
+              ...compressor.getState().recentFiles,
+            ],
           })
         : [];
 
@@ -356,9 +375,15 @@ export function createAgent(deps: {
     for (const entry of entries) {
       result.push({
         ...entry.message,
-        ...(entry.turnIndex !== undefined ? { _turnIndex: entry.turnIndex } : {}),
-        ...(entry.loopRound !== undefined ? { _loopRound: entry.loopRound } : {}),
-        ...(entry.loopIndex !== undefined ? { _loopIndex: entry.loopIndex } : {}),
+        ...(entry.turnIndex !== undefined
+          ? { _turnIndex: entry.turnIndex }
+          : {}),
+        ...(entry.loopRound !== undefined
+          ? { _loopRound: entry.loopRound }
+          : {}),
+        ...(entry.loopIndex !== undefined
+          ? { _loopIndex: entry.loopIndex }
+          : {}),
         _messageSequence: entry.messageSequence,
         ...(entry.round !== undefined ? { _round: entry.round } : {}),
       } as unknown as ChatCompletionMessageParam);
@@ -739,8 +764,7 @@ export function createAgent(deps: {
     const turnIndex = annotated._turnIndex ?? block.turnIndex;
     const loopRound = annotated._loopRound ?? block.loopRound;
     const loopIndex = annotated._loopIndex ?? block.loopIndex;
-    const messageSequence =
-      annotated._messageSequence ?? block.messageSequence;
+    const messageSequence = annotated._messageSequence ?? block.messageSequence;
     const round = annotated._round ?? block.round ?? loopRound;
 
     if (messageSequence !== undefined) entry.messageSequence = messageSequence;

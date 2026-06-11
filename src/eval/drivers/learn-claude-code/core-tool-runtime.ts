@@ -50,7 +50,10 @@ export function createCoreEvalToolRegistry(options: {
 }): ToolRegistry {
   // 使用数组保持工具注册顺序，与 LLM 看到的定义顺序一致
   const definitions: ChatCompletionTool[] = [];
-  const executors = new Map<string, (args: Record<string, unknown>) => Promise<ToolResult>>();
+  const executors = new Map<
+    string,
+    (args: Record<string, unknown>) => Promise<ToolResult>
+  >();
 
   /**
    * register — 将单个工具注册到内部集合
@@ -110,7 +113,13 @@ export function createCoreEvalToolRegistry(options: {
       const oldString = String(args["old_string"] ?? "");
       const newString = String(args["new_string"] ?? "");
       const expectedOccurrences = Number(args["expected_occurrences"] ?? 0);
-      return executeEditExact(path, oldString, newString, expectedOccurrences, options.projectRoot);
+      return executeEditExact(
+        path,
+        oldString,
+        newString,
+        expectedOccurrences,
+        options.projectRoot,
+      );
     });
   }
 

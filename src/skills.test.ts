@@ -12,7 +12,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync, existsSync } from "node:fs";
+import {
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  mkdtempSync,
+  existsSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -44,7 +50,9 @@ Use run_read to read files.
     expect(result).not.toBeNull();
     expect(result!.meta["name"]).toBe("code-review");
     expect(result!.meta["description"]).toBe("Review code for quality issues.");
-    expect(result!.body).toBe("# Code Review Skill\n\nUse run_read to read files.\n");
+    expect(result!.body).toBe(
+      "# Code Review Skill\n\nUse run_read to read files.\n",
+    );
   });
 
   it("没有 --- 分隔符时应返回 null", () => {
@@ -100,7 +108,9 @@ Body.
     const result = parseFrontmatter(content);
 
     expect(result).not.toBeNull();
-    expect(result!.meta["description"]).toBe("Use this when: code review is needed.");
+    expect(result!.meta["description"]).toBe(
+      "Use this when: code review is needed.",
+    );
   });
 });
 
@@ -122,7 +132,11 @@ describe("createSkillManager", () => {
   });
 
   // 辅助函数：在临时目录下创建一个 skill
-  function createSkill(name: string, description: string, body: string): string {
+  function createSkill(
+    name: string,
+    description: string,
+    body: string,
+  ): string {
     const skillDir = join(tempDir, name);
     mkdirSync(skillDir, { recursive: true });
     const content = `---\nname: ${name}\ndescription: ${description}\n---\n\n${body}`;
@@ -358,7 +372,9 @@ describe("createSkillToolProvider", () => {
     const provider = createSkillToolProvider(manager);
 
     expect(provider.toolEntries).toHaveLength(1);
-    expect(provider.toolEntries[0]!.definition.function?.name).toBe("run_skill");
+    expect(provider.toolEntries[0]!.definition.function?.name).toBe(
+      "run_skill",
+    );
     expect(typeof provider.toolEntries[0]!.execute).toBe("function");
   });
 
@@ -375,7 +391,9 @@ describe("createSkillToolProvider", () => {
     manager.scan();
     const provider = createSkillToolProvider(manager);
 
-    const result = await provider.toolEntries[0]!.execute({ name: "test-skill" });
+    const result = await provider.toolEntries[0]!.execute({
+      name: "test-skill",
+    });
 
     expect(result.error).toBe(false);
     expect(result.output).toContain("Base Path:");
@@ -387,7 +405,9 @@ describe("createSkillToolProvider", () => {
     manager.scan();
     const provider = createSkillToolProvider(manager);
 
-    const result = await provider.toolEntries[0]!.execute({ name: "nonexistent" });
+    const result = await provider.toolEntries[0]!.execute({
+      name: "nonexistent",
+    });
 
     expect(result.error).toBe(true);
     expect(result.output).toContain("[Skill Error]");

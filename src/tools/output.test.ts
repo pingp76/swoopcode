@@ -48,7 +48,9 @@ describe("OutputToolProvider", () => {
 
     expect(result.error).toBe(false);
     expect(result.output).toContain('"type": "output_read"');
-    expect(result.output).toContain('"output_id": "out_20260528_153000_abc123"');
+    expect(result.output).toContain(
+      '"output_id": "out_20260528_153000_abc123"',
+    );
     expect(result.output).toContain("hello from output store");
   });
 

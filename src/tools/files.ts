@@ -388,10 +388,7 @@ export async function executeEditExact(
   }
 
   // 校验 expectedOccurrences 必须是正整数，确保调用方明确知道预期匹配次数
-  if (
-    !Number.isInteger(expectedOccurrences) ||
-    expectedOccurrences <= 0
-  ) {
+  if (!Number.isInteger(expectedOccurrences) || expectedOccurrences <= 0) {
     return {
       output:
         "Error: expected_occurrences must be a positive integer. No changes made.",

@@ -254,11 +254,17 @@ function localToUtc(
   return new Date(t);
 }
 
-function parseTimeOfDay(timeOfDay: string): { hour: number; minute: number; second: number } {
+function parseTimeOfDay(timeOfDay: string): {
+  hour: number;
+  minute: number;
+  second: number;
+} {
   // timeOfDay 来自已通过 ScheduleStore 校验的规则，正常应是 HH:mm:ss。
   // 这里仍然给缺失字段默认 0，是为了让计算函数保持宽容；
   // 严格格式错误应该在 validateRecurrenceRule 阶段被拦住。
-  const [hour, minute, second] = timeOfDay.split(":").map((s) => parseInt(s, 10));
+  const [hour, minute, second] = timeOfDay
+    .split(":")
+    .map((s) => parseInt(s, 10));
   return { hour: hour ?? 0, minute: minute ?? 0, second: second ?? 0 };
 }
 
@@ -376,8 +382,12 @@ function findNextHourly(
 
   // 从 startsAt 所在小时开始锚定
   let candidate = localToUtc(
-    parts.year, parts.month, parts.day,
-    parts.hour, minute, second,
+    parts.year,
+    parts.month,
+    parts.day,
+    parts.hour,
+    minute,
+    second,
     timeZone,
   );
 
@@ -405,8 +415,12 @@ function findNextDaily(
 
   // 从 startsAt 当天开始锚定
   let candidate = localToUtc(
-    parts.year, parts.month, parts.day,
-    hour, minute, second,
+    parts.year,
+    parts.month,
+    parts.day,
+    hour,
+    minute,
+    second,
     timeZone,
   );
 
@@ -448,17 +462,32 @@ function findNextWeekly(
   for (let dayOffset = 0; dayOffset < maxSearchDays; dayOffset++) {
     const parts = getPartsInTimeZone(search, timeZone);
     const candidate = localToUtc(
-      parts.year, parts.month, parts.day,
-      hour, minute, second,
+      parts.year,
+      parts.month,
+      parts.day,
+      hour,
+      minute,
+      second,
       timeZone,
     );
 
     // 检查 candidate 是否落在正确的星期几（使用目标时区）
     const localDay = (() => {
       const d = new Date(candidate.getTime());
-      const f = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" });
+      const f = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        weekday: "short",
+      });
       const wd = f.formatToParts(d).find((p) => p.type === "weekday")!.value;
-      const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+      const map: Record<string, number> = {
+        Sun: 0,
+        Mon: 1,
+        Tue: 2,
+        Wed: 3,
+        Thu: 4,
+        Fri: 5,
+        Sat: 6,
+      };
       return map[wd] ?? 0;
     })();
 
@@ -503,7 +532,15 @@ function findNextMonthly(
   // 120 个月约等于 10 年，足够教学场景使用。
   for (let i = 0; i < 120; i++) {
     const day = Math.min(rule.dayOfMonth, daysInMonth(year, month));
-    const candidate = localToUtc(year, month, day, hour, minute, second, timeZone);
+    const candidate = localToUtc(
+      year,
+      month,
+      day,
+      hour,
+      minute,
+      second,
+      timeZone,
+    );
 
     if (candidate.getTime() > after.getTime()) {
       return candidate;
@@ -537,7 +574,15 @@ function findNextYearly(
   // 50 次上限避免无限循环，也提醒学生：任何规则搜索都应该有停止条件。
   for (let i = 0; i < 50; i++) {
     const day = Math.min(rule.dayOfMonth, daysInMonth(year, rule.month));
-    const candidate = localToUtc(year, rule.month, day, hour, minute, second, timeZone);
+    const candidate = localToUtc(
+      year,
+      rule.month,
+      day,
+      hour,
+      minute,
+      second,
+      timeZone,
+    );
 
     if (candidate.getTime() > after.getTime()) {
       return candidate;
@@ -627,7 +672,11 @@ export function createScheduleManager(deps: {
     // 再重新计算每个 active schedule 的 nextRunAt
     for (const schedule of activeSchedules) {
       if (schedule.status !== "active") continue;
-      const nextRunAt = computeNextRunAt(schedule.timing, schedule.timezone, now());
+      const nextRunAt = computeNextRunAt(
+        schedule.timing,
+        schedule.timezone,
+        now(),
+      );
       if (nextRunAt) {
         schedule.nextRunAt = nextRunAt.toISOString();
       } else {
@@ -651,9 +700,7 @@ export function createScheduleManager(deps: {
     scheduleId: string,
   ): void {
     if (!isCurrentProjectSchedule(schedule)) {
-      throw new Error(
-        `Schedule not found in current project: ${scheduleId}`,
-      );
+      throw new Error(`Schedule not found in current project: ${scheduleId}`);
     }
   }
 
@@ -698,7 +745,7 @@ export function createScheduleManager(deps: {
     const currentNow = now();
     for (const schedule of activeSchedules) {
       if (schedule.status !== "active") continue;
-        // 找到 lastScheduledAt 之后、currentNow 之前是否有 missed occurrence
+      // 找到 lastScheduledAt 之后、currentNow 之前是否有 missed occurrence
       // 简化：如果 nextRunAt 存在但已经过期，说明 missed 了
       if (schedule.nextRunAt) {
         const nextRun = new Date(schedule.nextRunAt);
@@ -725,12 +772,16 @@ export function createScheduleManager(deps: {
             schedule.lastScheduledAt = nextRun.toISOString();
             // 重新计算 nextRunAt
             // 当前教学实现不回补 missed run，只记录审计并推进到未来下一次。
-            const next = computeNextRunAt(schedule.timing, schedule.timezone, currentNow);
+            const next = computeNextRunAt(
+              schedule.timing,
+              schedule.timezone,
+              currentNow,
+            );
             if (next) {
-        schedule.nextRunAt = next.toISOString();
-      } else {
-        schedule.nextRunAt = undefined;
-      }
+              schedule.nextRunAt = next.toISOString();
+            } else {
+              schedule.nextRunAt = undefined;
+            }
             store.save(schedule);
 
             if (schedule.outputPolicy.notifyLlm) {
@@ -759,7 +810,9 @@ export function createScheduleManager(deps: {
     for (const schedule of activeSchedules) {
       if (schedule.status !== "active") continue;
 
-      const nextRunAt = schedule.nextRunAt ? new Date(schedule.nextRunAt) : null;
+      const nextRunAt = schedule.nextRunAt
+        ? new Date(schedule.nextRunAt)
+        : null;
       if (!nextRunAt || nextRunAt.getTime() > currentNow.getTime()) {
         continue; // 还没到时间
       }
@@ -881,10 +934,12 @@ export function createScheduleManager(deps: {
         },
       };
       if (schedule.execution.command) {
-        ((asyncRunInput as unknown) as Record<string, unknown>).command = schedule.execution.command;
+        (asyncRunInput as unknown as Record<string, unknown>).command =
+          schedule.execution.command;
       }
       if (schedule.execution.executor === "subagent") {
-        ((asyncRunInput as unknown) as Record<string, unknown>).prompt = buildSubagentPrompt(schedule, occurrenceId, nextRunAt);
+        (asyncRunInput as unknown as Record<string, unknown>).prompt =
+          buildSubagentPrompt(schedule, occurrenceId, nextRunAt);
       }
 
       try {
@@ -953,7 +1008,11 @@ export function createScheduleManager(deps: {
       return;
     }
 
-    const next = computeNextRunAt(schedule.timing, schedule.timezone, currentNow);
+    const next = computeNextRunAt(
+      schedule.timing,
+      schedule.timezone,
+      currentNow,
+    );
     // 递归规则每次触发后都从 currentNow 往未来找下一次。
     // 这样不会因为进程暂停很久而尝试补跑历史所有 occurrence。
     if (next) {
@@ -986,13 +1045,17 @@ export function createScheduleManager(deps: {
     }
     lines.push(`Permission profile: ${schedule.execution.permissionProfile}`);
     if (schedule.linkedTask) {
-      lines.push(`Linked persistent task: groupId=${schedule.linkedTask.groupId}${schedule.linkedTask.taskId ? `, taskId=${schedule.linkedTask.taskId}` : ""}`);
+      lines.push(
+        `Linked persistent task: groupId=${schedule.linkedTask.groupId}${schedule.linkedTask.taskId ? `, taskId=${schedule.linkedTask.taskId}` : ""}`,
+      );
     }
     lines.push("</schedule-context>");
     lines.push("");
     lines.push("This run was triggered by a persisted schedule.");
     lines.push("Follow the schedule intent and output policy.");
-    lines.push("Do not update the persistent Task Group directly unless the parent Agent later chooses to do so through task tools.");
+    lines.push(
+      "Do not update the persistent Task Group directly unless the parent Agent later chooses to do so through task tools.",
+    );
     return lines.join("\n");
   }
 
@@ -1052,7 +1115,12 @@ export function createScheduleManager(deps: {
         id: `finish_${scheduleId}_${occurrenceId}_${currentNow.getTime()}`,
         scheduleId,
         occurrenceId,
-        type: nextStatus === "completed" ? "completed" : nextStatus === "timeout" ? "timeout" : "failed",
+        type:
+          nextStatus === "completed"
+            ? "completed"
+            : nextStatus === "timeout"
+              ? "timeout"
+              : "failed",
         message: `Schedule "${schedule.title}" completed occurrence ${occurrenceId}. Async run: ${record.id}. Status: ${record.status}. Output: ${outputHint}.`,
         timestamp: currentNow.toISOString(),
         asyncRunId: record.id,
@@ -1100,7 +1168,10 @@ export function createScheduleManager(deps: {
       createdAt: currentNow.toISOString(),
       updatedAt: currentNow.toISOString(),
       projectRoot,
-      cwd: path.resolve(projectRoot, input.execution.resources.readPaths[0] ?? "."),
+      cwd: path.resolve(
+        projectRoot,
+        input.execution.resources.readPaths[0] ?? ".",
+      ),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       intent: input.intent,
       timing: input.timing,
@@ -1144,11 +1215,17 @@ export function createScheduleManager(deps: {
       profile: schedule.execution.permissionProfile,
     });
     if (!resourceValidation.allowed) {
-      throw new Error(resourceValidation.reason ?? "Invalid schedule resources");
+      throw new Error(
+        resourceValidation.reason ?? "Invalid schedule resources",
+      );
     }
 
     // 计算初始 nextRunAt
-    const nextRunAt = computeNextRunAt(schedule.timing, schedule.timezone, currentNow);
+    const nextRunAt = computeNextRunAt(
+      schedule.timing,
+      schedule.timezone,
+      currentNow,
+    );
     if (nextRunAt) {
       schedule.nextRunAt = nextRunAt.toISOString();
     }
@@ -1171,12 +1248,18 @@ export function createScheduleManager(deps: {
     });
   }
 
-  function read(scheduleId: string, options?: ScheduleReadOptions): ScheduleView | null {
+  function read(
+    scheduleId: string,
+    options?: ScheduleReadOptions,
+  ): ScheduleView | null {
     const schedule = store.read(scheduleId);
     if (!schedule) return null;
     if (!isCurrentProjectSchedule(schedule)) return null;
 
-    if (options?.recentOccurrences !== undefined && options.recentOccurrences > 0) {
+    if (
+      options?.recentOccurrences !== undefined &&
+      options.recentOccurrences > 0
+    ) {
       // occurrence 不嵌入 ScheduleView，调用方通过 listOccurrences 获取
     }
     return schedule;
@@ -1236,7 +1319,9 @@ export function createScheduleManager(deps: {
     logger.info("Schedule deleted: %s", scheduleId);
   }
 
-  function listOccurrences(input: ListOccurrencesInput): ScheduleOccurrenceFile[] {
+  function listOccurrences(
+    input: ListOccurrencesInput,
+  ): ScheduleOccurrenceFile[] {
     const schedule = store.read(input.scheduleId);
     if (!schedule || !isCurrentProjectSchedule(schedule)) return [];
     return store.listOccurrences(input.scheduleId, input.limit);

@@ -48,7 +48,9 @@ export async function writeEvalTrace(
 
   // 决定输出目录：优先级为 options.outputDir > EVAL_TRACE_DIR > 系统临时目录
   const outputDir =
-    options.outputDir ?? process.env["EVAL_TRACE_DIR"] ?? join(tmpdir(), "eval-traces");
+    options.outputDir ??
+    process.env["EVAL_TRACE_DIR"] ??
+    join(tmpdir(), "eval-traces");
 
   // 创建目录（递归，不报错）
   await mkdir(outputDir, { recursive: true });

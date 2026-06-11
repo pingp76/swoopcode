@@ -14,13 +14,20 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-async function createDriver(plan: EvalCase["driver"]): Promise<CodingAgentDriver> {
+async function createDriver(
+  plan: EvalCase["driver"],
+): Promise<CodingAgentDriver> {
   if (plan.kind === "learn-claude-code-in-process") {
     return createLearnClaudeCodeInProcessDriver(
-      plan as Extract<EvalCase["driver"], { kind: "learn-claude-code-in-process" }>,
+      plan as Extract<
+        EvalCase["driver"],
+        { kind: "learn-claude-code-in-process" }
+      >,
     );
   }
-  throw new Error(`Unsupported driver kind: ${(plan as unknown as Record<string, unknown>).kind}`);
+  throw new Error(
+    `Unsupported driver kind: ${(plan as unknown as Record<string, unknown>).kind}`,
+  );
 }
 
 describe("Replay Suite", () => {

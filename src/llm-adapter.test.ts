@@ -26,7 +26,17 @@ describe("OpenAI Chat Completions Adapter", () => {
       const adapter = createAdapter("generic-openai-compatible");
       const messages = [
         { role: "user", content: "hello" },
-        { role: "assistant", content: "hi", tool_calls: [{ id: "call_1", type: "function", function: { name: "run_bash", arguments: "{}" } }] },
+        {
+          role: "assistant",
+          content: "hi",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "run_bash", arguments: "{}" },
+            },
+          ],
+        },
       ] as import("openai/resources/chat/completions").ChatCompletionMessageParam[];
       const result = adapter.prepareMessages(messages);
       expect(result).toEqual(messages);
@@ -35,7 +45,17 @@ describe("OpenAI Chat Completions Adapter", () => {
     it("adds reasoning_content placeholder for assistant with tool_calls when required", () => {
       const adapter = createAdapter("kimi-k2.6", "kimi_platform_cn");
       const messages = [
-        { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "run_bash", arguments: "{}" } }] },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "run_bash", arguments: "{}" },
+            },
+          ],
+        },
       ] as import("openai/resources/chat/completions").ChatCompletionMessageParam[];
       const result = adapter.prepareMessages(messages);
       const msg = result[0] as unknown as Record<string, unknown>;
@@ -45,7 +65,18 @@ describe("OpenAI Chat Completions Adapter", () => {
     it("does not add reasoning_content when assistant already has it", () => {
       const adapter = createAdapter("kimi-k2.6", "kimi_platform_cn");
       const messages = [
-        { role: "assistant", content: "hi", reasoning_content: "thinking...", tool_calls: [{ id: "call_1", type: "function", function: { name: "run_bash", arguments: "{}" } }] },
+        {
+          role: "assistant",
+          content: "hi",
+          reasoning_content: "thinking...",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "run_bash", arguments: "{}" },
+            },
+          ],
+        },
       ] as unknown as import("openai/resources/chat/completions").ChatCompletionMessageParam[];
       const result = adapter.prepareMessages(messages);
       const msg = result[0] as unknown as Record<string, unknown>;
@@ -56,7 +87,18 @@ describe("OpenAI Chat Completions Adapter", () => {
       // MiniMax M3 返回 reasoning_details 而非 reasoning_content
       const adapter = createAdapter("minimax-m3", "minimax_cn");
       const messages = [
-        { role: "assistant", content: null, reasoning_details: [{ type: "thinking", text: "..." }], tool_calls: [{ id: "call_1", type: "function", function: { name: "run_bash", arguments: "{}" } }] },
+        {
+          role: "assistant",
+          content: null,
+          reasoning_details: [{ type: "thinking", text: "..." }],
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "run_bash", arguments: "{}" },
+            },
+          ],
+        },
       ] as unknown as import("openai/resources/chat/completions").ChatCompletionMessageParam[];
       const result = adapter.prepareMessages(messages);
       const msg = result[0] as unknown as Record<string, unknown>;
@@ -99,7 +141,11 @@ describe("OpenAI Chat Completions Adapter", () => {
             message: {
               content: "Hello",
               tool_calls: [
-                { id: "call_1", type: "function", function: { name: "run_bash", arguments: "{}" } },
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "run_bash", arguments: "{}" },
+                },
               ],
             },
             finish_reason: "stop",
@@ -200,7 +246,12 @@ describe("OpenAI Chat Completions Adapter", () => {
             {
               delta: {
                 tool_calls: [
-                  { index: 0, id: "call_1", type: "function", function: { name: "run_bash", arguments: "" } },
+                  {
+                    index: 0,
+                    id: "call_1",
+                    type: "function",
+                    function: { name: "run_bash", arguments: "" },
+                  },
                 ],
               },
               finish_reason: null,
@@ -213,7 +264,11 @@ describe("OpenAI Chat Completions Adapter", () => {
         {
           choices: [
             {
-              delta: { tool_calls: [{ index: 0, function: { arguments: '{"cmd":"ls"}' } }] },
+              delta: {
+                tool_calls: [
+                  { index: 0, function: { arguments: '{"cmd":"ls"}' } },
+                ],
+              },
               finish_reason: "tool_calls",
             },
           ],
@@ -231,11 +286,25 @@ describe("OpenAI Chat Completions Adapter", () => {
       const acc = createStreamingAccumulator();
 
       adapter.parseStreamingChunk(
-        { choices: [{ delta: { content: null, reasoning_content: "Step 1: " }, finish_reason: null }] },
+        {
+          choices: [
+            {
+              delta: { content: null, reasoning_content: "Step 1: " },
+              finish_reason: null,
+            },
+          ],
+        },
         acc,
       );
       adapter.parseStreamingChunk(
-        { choices: [{ delta: { content: null, reasoning_content: "analyze" }, finish_reason: "stop" }] },
+        {
+          choices: [
+            {
+              delta: { content: null, reasoning_content: "analyze" },
+              finish_reason: "stop",
+            },
+          ],
+        },
         acc,
       );
 
@@ -250,11 +319,31 @@ describe("OpenAI Chat Completions Adapter", () => {
       const acc = createStreamingAccumulator();
 
       adapter.parseStreamingChunk(
-        { choices: [{ delta: { content: null, reasoning_details: [{ type: "thinking", text: "Step 1" }] }, finish_reason: null }] },
+        {
+          choices: [
+            {
+              delta: {
+                content: null,
+                reasoning_details: [{ type: "thinking", text: "Step 1" }],
+              },
+              finish_reason: null,
+            },
+          ],
+        },
         acc,
       );
       adapter.parseStreamingChunk(
-        { choices: [{ delta: { content: null, reasoning_details: [{ type: "thinking", text: "Step 2" }] }, finish_reason: "stop" }] },
+        {
+          choices: [
+            {
+              delta: {
+                content: null,
+                reasoning_details: [{ type: "thinking", text: "Step 2" }],
+              },
+              finish_reason: "stop",
+            },
+          ],
+        },
         acc,
       );
 
@@ -269,7 +358,9 @@ describe("OpenAI Chat Completions Adapter", () => {
     it("throws on empty stream", () => {
       const adapter = createAdapter("generic-openai-compatible");
       const acc = createStreamingAccumulator();
-      expect(() => adapter.finishStreaming(acc)).toThrow("No response from LLM");
+      expect(() => adapter.finishStreaming(acc)).toThrow(
+        "No response from LLM",
+      );
     });
   });
 });

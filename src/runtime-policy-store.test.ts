@@ -6,7 +6,11 @@ import { describe, expect, it } from "vitest";
 import { createRuntimePolicyStore } from "./runtime-policy-store.js";
 import { resolveFoundationModelProfile } from "./foundation-models.js";
 
-function createStore(profileId: string, provider = "openai_compatible", model?: string) {
+function createStore(
+  profileId: string,
+  provider = "openai_compatible",
+  model?: string,
+) {
   const profile = resolveFoundationModelProfile({
     provider: provider as import("./llm-providers.js").LLMProviderId,
     model: model ?? profileId,

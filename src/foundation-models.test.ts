@@ -61,7 +61,9 @@ describe("resolveFoundationModelProfile", () => {
     });
     expect(result.id).toBe("deepseek-v4");
     expect(result.limits.contextWindowTokens).toBe(1000000);
-    expect(result.optimizationHints.defaultCompressionMode).toBe("long_context");
+    expect(result.optimizationHints.defaultCompressionMode).toBe(
+      "long_context",
+    );
   });
 
   it("matches deepseek-chat by prefix", () => {
@@ -98,7 +100,9 @@ describe("resolveFoundationModelProfile", () => {
         model: "MiniMax-M2.7",
         explicitProfileId: "kimi-k2.6",
       }),
-    ).toThrow(/provider "kimi_platform_cn".*but current provider is "minimax_cn"/);
+    ).toThrow(
+      /provider "kimi_platform_cn".*but current provider is "minimax_cn"/,
+    );
   });
 
   it("returns provider default before generic for known provider", () => {

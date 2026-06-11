@@ -253,7 +253,8 @@ export function resolveRuntimePolicy(
       longContextThresholdTokens:
         profile.limits.longContextThresholdTokens ?? contextBudget,
       compressionMode,
-      toolOutputCompressionThresholdTokens: compressionDefaults.thresholdToolOutput,
+      toolOutputCompressionThresholdTokens:
+        compressionDefaults.thresholdToolOutput,
       decayThresholdLoops: compressionDefaults.decayThreshold,
       decayPreviewTokens: compressionDefaults.decayPreview,
       compactKeepRecentBlocks: compressionDefaults.compactKeepRecent,
@@ -275,7 +276,8 @@ export function resolveRuntimePolicy(
 
     reasoning: {
       returned: profile.reasoning.returned,
-      preserveRawAssistantMessage: profile.reasoning.preserveRawAssistantMessage,
+      preserveRawAssistantMessage:
+        profile.reasoning.preserveRawAssistantMessage,
       mustReplayWithToolCalls: profile.reasoning.mustReplayWithToolCalls,
       responseFields: profile.reasoning.responseFields,
       streamingDeltaFields: profile.reasoning.streamingDeltaFields,
@@ -302,7 +304,9 @@ export function resolveRuntimePolicy(
       recordEffectiveContextBudget: true,
     },
 
-    ...(contextBudgetPlan !== undefined ? { contextLoading: contextBudgetPlan } : {}),
+    ...(contextBudgetPlan !== undefined
+      ? { contextLoading: contextBudgetPlan }
+      : {}),
   };
 }
 
@@ -491,7 +495,9 @@ export function buildExtraBody(
 
   switch (shape) {
     case "extra_body_thinking": {
-      extraBody["thinking"] = { type: thinkingMode === "enabled" ? "enabled" : "auto" };
+      extraBody["thinking"] = {
+        type: thinkingMode === "enabled" ? "enabled" : "auto",
+      };
       break;
     }
     case "enable_thinking": {

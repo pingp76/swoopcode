@@ -244,7 +244,9 @@ function applyTiming(
   if (timing.loopIndex !== undefined) event.loopIndex = timing.loopIndex;
 }
 
-function timingFromRound(round: number | undefined): MessageTimingInput | undefined {
+function timingFromRound(
+  round: number | undefined,
+): MessageTimingInput | undefined {
   // 仅在 round 有效时构造 timing 对象，否则返回 undefined 以允许上层忽略
   return round !== undefined ? { round } : undefined;
 }

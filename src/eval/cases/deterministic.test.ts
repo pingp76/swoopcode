@@ -20,16 +20,23 @@ import { createCliDriver } from "../drivers/cli/cli-driver.js";
 // Driver 工厂
 // ---------------------------------------------------------------------------
 
-async function createDriver(plan: EvalCase["driver"]): Promise<CodingAgentDriver> {
+async function createDriver(
+  plan: EvalCase["driver"],
+): Promise<CodingAgentDriver> {
   if (plan.kind === "learn-claude-code-in-process") {
     return createLearnClaudeCodeInProcessDriver(
-      plan as Extract<EvalCase["driver"], { kind: "learn-claude-code-in-process" }>,
+      plan as Extract<
+        EvalCase["driver"],
+        { kind: "learn-claude-code-in-process" }
+      >,
     );
   }
   if (plan.kind === "cli") {
     return createCliDriver(plan as CliDriverPlan);
   }
-  throw new Error(`Unsupported driver kind: ${(plan as unknown as Record<string, unknown>).kind}`);
+  throw new Error(
+    `Unsupported driver kind: ${(plan as unknown as Record<string, unknown>).kind}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -82,10 +89,14 @@ describe("Deterministic Suite — Core Tools", () => {
     expect(result.status).toBe("passed");
 
     // 验证 instrumented assertions
-    const fileExistsResult = result.assertions.find((a) => a.kind === "fileExists");
+    const fileExistsResult = result.assertions.find(
+      (a) => a.kind === "fileExists",
+    );
     expect(fileExistsResult?.passed).toBe(true);
 
-    const allToolsSucceededResult = result.assertions.find((a) => a.kind === "allToolsSucceeded");
+    const allToolsSucceededResult = result.assertions.find(
+      (a) => a.kind === "allToolsSucceeded",
+    );
     expect(allToolsSucceededResult?.passed).toBe(true);
   });
 
@@ -135,7 +146,9 @@ describe("Deterministic Suite — Core Tools", () => {
     expect(result.passed).toBe(true);
     expect(result.status).toBe("passed");
 
-    const toolCalledResult = result.assertions.find((a) => a.kind === "toolCalled");
+    const toolCalledResult = result.assertions.find(
+      (a) => a.kind === "toolCalled",
+    );
     expect(toolCalledResult?.passed).toBe(true);
   });
 
@@ -234,7 +247,9 @@ describe("Deterministic Suite — Core Tools", () => {
     expect(result.passed).toBe(true);
     expect(result.status).toBe("passed");
 
-    const toolCallCountResult = result.assertions.find((a) => a.kind === "toolCallCount");
+    const toolCallCountResult = result.assertions.find(
+      (a) => a.kind === "toolCallCount",
+    );
     expect(toolCallCountResult?.passed).toBe(true);
   });
 
@@ -283,7 +298,9 @@ describe("Deterministic Suite — Core Tools", () => {
     expect(result.passed).toBe(true);
     expect(result.status).toBe("passed");
 
-    const permissionResult = result.assertions.find((a) => a.kind === "permissionPromptShown");
+    const permissionResult = result.assertions.find(
+      (a) => a.kind === "permissionPromptShown",
+    );
     expect(permissionResult?.passed).toBe(true);
   });
 });

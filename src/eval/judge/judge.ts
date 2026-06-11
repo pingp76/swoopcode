@@ -12,10 +12,7 @@
  */
 
 import type { LLMClient } from "../../llm.js";
-import type {
-  EvalJudgeInput,
-  EvalJudgeResult,
-} from "../core/case-schema.js";
+import type { EvalJudgeInput, EvalJudgeResult } from "../core/case-schema.js";
 
 /**
  * buildJudgePrompt — 构建 judge 的完整 prompt
@@ -56,9 +53,15 @@ Rules:
         preview = `: ${(e as { text: string }).text.slice(0, 100)}`;
       } else if (e.kind === "llm_response" && "contentPreview" in e) {
         preview = `: ${(e as { contentPreview?: string }).contentPreview ?? ""}`;
-      } else if ((e.kind === "tool_call" || e.kind === "tool_result") && "toolName" in e) {
+      } else if (
+        (e.kind === "tool_call" || e.kind === "tool_result") &&
+        "toolName" in e
+      ) {
         const toolName = (e as { toolName: string }).toolName;
-        const result = "result" in e ? `: ${String((e as { result?: unknown }).result).slice(0, 100)}` : "";
+        const result =
+          "result" in e
+            ? `: ${String((e as { result?: unknown }).result).slice(0, 100)}`
+            : "";
         preview = ` (${toolName})${result}`;
       }
       return `- [${e.source}] ${e.kind}${preview}`;
@@ -66,9 +69,10 @@ Rules:
     .join("\n");
 
   // 列出所有 hard assertions 及其结果，让 judge 看到完整 picture
-  const assertionsSummary = input.hardAssertionResults
-    .map((r) => `- [${r.passed ? "PASS" : "FAIL"}] ${r.kind}: ${r.message}`)
-    .join("\n") || "None";
+  const assertionsSummary =
+    input.hardAssertionResults
+      .map((r) => `- [${r.passed ? "PASS" : "FAIL"}] ${r.kind}: ${r.message}`)
+      .join("\n") || "None";
 
   const userParts: string[] = [
     `## Case: ${input.caseId}`,
@@ -222,10 +226,16 @@ function validateJudgeResult(raw: unknown): EvalJudgeResult | null {
             typeof (e as Record<string, unknown>).kind === "string" &&
             typeof (e as Record<string, unknown>).ref === "string" &&
             typeof (e as Record<string, unknown>).note === "string" &&
-            VALID_EVIDENCE_KINDS.has((e as Record<string, unknown>).kind as string),
+            VALID_EVIDENCE_KINDS.has(
+              (e as Record<string, unknown>).kind as string,
+            ),
         )
         .map((e) => ({
-          kind: e.kind as "runtime_event" | "final_output" | "assertion" | "workspace",
+          kind: e.kind as
+            | "runtime_event"
+            | "final_output"
+            | "assertion"
+            | "workspace",
           ref: e.ref,
           note: e.note,
         }))
@@ -239,7 +249,8 @@ function validateJudgeResult(raw: unknown): EvalJudgeResult | null {
     strengths,
     problems,
     evidence,
-    needsHumanReview: typeof obj.needsHumanReview === "boolean" ? obj.needsHumanReview : false,
+    needsHumanReview:
+      typeof obj.needsHumanReview === "boolean" ? obj.needsHumanReview : false,
   };
 }
 

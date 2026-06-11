@@ -59,7 +59,9 @@ export function createOutputToolProvider(
   // 常见错误是把完整 outputPath 暴露给模型，再让模型用 run_read 读取。
   // 那会绕开 OutputStore index 校验，也会让不同项目/不同 run 的输出边界变模糊。
 
-  async function executeRead(args: Record<string, unknown>): Promise<ToolResult> {
+  async function executeRead(
+    args: Record<string, unknown>,
+  ): Promise<ToolResult> {
     // 从参数中提取 output_id，并去除首尾空白
     const outputId = String(args["output_id"] ?? "").trim();
     // 校验 output_id 不能为空，否则直接返回错误
@@ -68,7 +70,10 @@ export function createOutputToolProvider(
     }
 
     // 解析可选的 max_bytes 参数，校验其是否为非负数
-    const maxBytes = parseOptionalNonNegativeNumber(args["max_bytes"], "max_bytes");
+    const maxBytes = parseOptionalNonNegativeNumber(
+      args["max_bytes"],
+      "max_bytes",
+    );
     if (maxBytes instanceof Error) {
       return { output: `Error: ${maxBytes.message}`, error: true };
     }

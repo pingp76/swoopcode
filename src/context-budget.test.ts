@@ -125,7 +125,8 @@ describe("resolveContextBudgets", () => {
       compressionMode: "balanced",
       maxOutputTokens: 32768,
       overrides: {
-        evidenceBudgetTokens: baseline.evidenceBudgetTokens + baseline.workingSetBudgetTokens,
+        evidenceBudgetTokens:
+          baseline.evidenceBudgetTokens + baseline.workingSetBudgetTokens,
       },
     });
 

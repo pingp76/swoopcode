@@ -50,24 +50,28 @@ function createMockManager(
   overrides?: Partial<ScheduleManager>,
 ): ScheduleManager {
   return {
-    create: vi.fn().mockImplementation((input) => createMockSchedule({
-      title: input.title,
-      intent: input.intent,
-      timing: input.timing,
-      execution: {
-        mode: "async",
-        executor: input.execution.executor,
-        command: input.execution.command,
-        timeoutSeconds: input.execution.timeoutSeconds,
-        overlapPolicy: input.execution.overlapPolicy,
-        permissionProfile: input.execution.permissionProfile,
-        resources: input.execution.resources,
-      },
-      outputPolicy: input.outputPolicy,
-    })),
+    create: vi.fn().mockImplementation((input) =>
+      createMockSchedule({
+        title: input.title,
+        intent: input.intent,
+        timing: input.timing,
+        execution: {
+          mode: "async",
+          executor: input.execution.executor,
+          command: input.execution.command,
+          timeoutSeconds: input.execution.timeoutSeconds,
+          overlapPolicy: input.execution.overlapPolicy,
+          permissionProfile: input.execution.permissionProfile,
+          resources: input.execution.resources,
+        },
+        outputPolicy: input.outputPolicy,
+      }),
+    ),
     list: vi.fn().mockReturnValue([] satisfies ScheduleSummary[]),
     read: vi.fn().mockReturnValue(createMockSchedule()),
-    cancel: vi.fn().mockReturnValue(createMockSchedule({ status: "cancelled" })),
+    cancel: vi
+      .fn()
+      .mockReturnValue(createMockSchedule({ status: "cancelled" })),
     delete: vi.fn(),
     listOccurrences: vi.fn().mockReturnValue([]),
     start: vi.fn(),
@@ -82,15 +86,16 @@ describe("ScheduleToolProvider", () => {
   it("has six stable tool entries", () => {
     const provider = createScheduleToolProvider(createMockManager());
 
-    expect(provider.toolEntries.map((entry) => entry.definition.function.name))
-      .toEqual([
-        "run_schedule_create",
-        "run_schedule_list",
-        "run_schedule_read",
-        "run_schedule_cancel",
-        "run_schedule_delete",
-        "run_schedule_occurrence_list",
-      ]);
+    expect(
+      provider.toolEntries.map((entry) => entry.definition.function.name),
+    ).toEqual([
+      "run_schedule_create",
+      "run_schedule_list",
+      "run_schedule_read",
+      "run_schedule_cancel",
+      "run_schedule_delete",
+      "run_schedule_occurrence_list",
+    ]);
   });
 
   it("does not expose unimplemented output policy fields", () => {

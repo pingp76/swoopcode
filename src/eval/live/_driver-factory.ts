@@ -48,10 +48,15 @@ export function createJudgeLLM(): LLMClient | undefined {
   }
 }
 
-export async function createLiveDriver(plan: EvalCase["driver"]): Promise<CodingAgentDriver> {
+export async function createLiveDriver(
+  plan: EvalCase["driver"],
+): Promise<CodingAgentDriver> {
   if (plan.kind === "learn-claude-code-in-process") {
     return createLearnClaudeCodeInProcessDriver(
-      plan as Extract<EvalCase["driver"], { kind: "learn-claude-code-in-process" }>,
+      plan as Extract<
+        EvalCase["driver"],
+        { kind: "learn-claude-code-in-process" }
+      >,
     );
   }
   throw new Error(

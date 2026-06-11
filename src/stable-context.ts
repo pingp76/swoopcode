@@ -21,7 +21,12 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { ContextBudgetPlan } from "./context-budget.js";
-import type { ContextRanker, RankedFile, RepoClassification, TaskContext } from "./context-ranking.js";
+import type {
+  ContextRanker,
+  RankedFile,
+  RepoClassification,
+  TaskContext,
+} from "./context-ranking.js";
 
 // ---------------------------------------------------------------------------
 // 类型定义
@@ -96,7 +101,9 @@ export interface StableContextManager {
   rebuildRepoMap(): StableContextPack;
   pinPath(filePath: string): void;
   unpinPath(filePath: string): void;
-  buildMessages(input: string | BuildMessagesInput): ChatCompletionMessageParam[];
+  buildMessages(
+    input: string | BuildMessagesInput,
+  ): ChatCompletionMessageParam[];
   getRankedFiles(maxResults?: number): RankedFile[];
   getRepoClassification(): RepoClassification | null;
   explainFile(filePath: string): RankedFile | null;
@@ -117,7 +124,8 @@ function sha256Short(input: string): string {
 /** 基于字符数估算 token 数（与 message-block.ts 保持一致） */
 function estimateTokens(text: string): number {
   if (!text) return 0;
-  const chineseCount = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) ?? []).length;
+  const chineseCount = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) ?? [])
+    .length;
   return Math.max(chineseCount * 1.5, text.length * 0.25);
 }
 
@@ -187,12 +195,7 @@ function buildRepoMap(projectRoot: string): string {
   const lines: string[] = ["<repo-map>", `projectRoot: ${projectRoot}`, ""];
 
   // 关键配置文件
-  const keyFiles = [
-    "package.json",
-    "tsconfig.json",
-    "AGENTS.md",
-    "CLAUDE.md",
-  ];
+  const keyFiles = ["package.json", "tsconfig.json", "AGENTS.md", "CLAUDE.md"];
   const foundKeyFiles: string[] = [];
   for (const f of keyFiles) {
     const fp = path.join(projectRoot, f);
@@ -286,9 +289,13 @@ function buildStablePack(params: {
   for (const asset of assets) {
     if (usedTokens + asset.tokenEstimate > budgetTokens) {
       // 超预算：如果当前资产是文件，尝试只保留头部摘要
-      if (asset.kind === "source_file" && asset.tokenEstimate > budgetTokens - usedTokens) {
+      if (
+        asset.kind === "source_file" &&
+        asset.tokenEstimate > budgetTokens - usedTokens
+      ) {
         const maxChars = Math.floor((budgetTokens - usedTokens) / 0.25);
-        const truncated = asset.content.slice(0, maxChars) + "\n... (truncated)";
+        const truncated =
+          asset.content.slice(0, maxChars) + "\n... (truncated)";
         keptAssets.push({
           ...asset,
           content: truncated,
@@ -308,7 +315,8 @@ function buildStablePack(params: {
     `  tokens: ${usedTokens}`,
     `  budget: ${budgetTokens}`,
     ...keptAssets.map(
-      (a) => `  - ${a.source.label} (${a.kind}, ${a.tokenEstimate}t, hash=${a.contentHash})`,
+      (a) =>
+        `  - ${a.source.label} (${a.kind}, ${a.tokenEstimate}t, hash=${a.contentHash})`,
     ),
     `</context-manifest>`,
   ].join("\n");
@@ -333,13 +341,26 @@ function buildWorkingSetPack(params: {
   cachedFiles?: import("./context-ranking.js").FileFacts[];
   stablePackPaths?: Set<string>;
 }): StableContextPack {
-  const { projectRoot, budgetTokens, ranker, task, repo, cachedFiles, stablePackPaths } = params;
+  const {
+    projectRoot,
+    budgetTokens,
+    ranker,
+    task,
+    repo,
+    cachedFiles,
+    stablePackPaths,
+  } = params;
   const assets: ContextAsset[] = [];
 
   if (ranker && task && repo && cachedFiles) {
     // PDD21-1: 使用 ContextRanker 选择 working set
     // 使用已缓存的文件事实，不重复扫描磁盘
-    const ranked = ranker.rankFiles({ files: cachedFiles, repo, task, maxResults: 20 });
+    const ranked = ranker.rankFiles({
+      files: cachedFiles,
+      repo,
+      task,
+      maxResults: 20,
+    });
 
     let usedTokens = 0;
 
@@ -368,7 +389,8 @@ function buildWorkingSetPack(params: {
       // 如果实际 token 超预算，截断而非整体丢弃
       if (actualTokens > remainingBudget && remainingBudget >= 200) {
         // 预留 truncation marker 的 token 预算，避免截断后仍超预算
-        const truncationMarker = "\n... (truncated, exceeded working set budget)";
+        const truncationMarker =
+          "\n... (truncated, exceeded working set budget)";
         const markerTokens = estimateTokens(truncationMarker);
         const availableForContent = Math.max(0, remainingBudget - markerTokens);
         const maxChars = Math.floor(availableForContent / 0.25);
@@ -376,7 +398,10 @@ function buildWorkingSetPack(params: {
         actualTokens = estimateTokens(content);
         // 安全兜底：如果仍超预算，进一步收缩
         if (actualTokens > remainingBudget) {
-          const safeMaxChars = Math.max(0, Math.floor((remainingBudget - markerTokens) / 0.3));
+          const safeMaxChars = Math.max(
+            0,
+            Math.floor((remainingBudget - markerTokens) / 0.3),
+          );
           content = content.slice(0, safeMaxChars) + truncationMarker;
           actualTokens = estimateTokens(content);
         }
@@ -453,7 +478,8 @@ function buildWorkingSetPack(params: {
     `  repo: ${repoLabel}`,
     `  task: ${taskLabel}`,
     ...keptAssets.map(
-      (a) => `  - ${a.source.label} score=${a.priority} (${a.kind}, ${a.tokenEstimate}t)`,
+      (a) =>
+        `  - ${a.source.label} score=${a.priority} (${a.kind}, ${a.tokenEstimate}t)`,
     ),
     `</working-set-manifest>`,
   ].join("\n");
@@ -536,7 +562,10 @@ export function createStableContextManager(
     return cachedRepoMap;
   }
 
-  function getRepoAndFiles(): { repo: RepoClassification; files: import("./context-ranking.js").FileFacts[] } | null {
+  function getRepoAndFiles(): {
+    repo: RepoClassification;
+    files: import("./context-ranking.js").FileFacts[];
+  } | null {
     if (!ranker) return null;
     if (cachedFiles === null) {
       cachedFiles = ranker.scanFileFacts();
@@ -565,10 +594,16 @@ export function createStableContextManager(
    * 如果缓存存在且预算兼容，直接返回缓存。
    * 如果预算缩小导致放不下，触发重建。
    */
-  function getOrBuildStableSnapshot(budgetTokens: number): { pack: StableContextPack; message: string } {
+  function getOrBuildStableSnapshot(budgetTokens: number): {
+    pack: StableContextPack;
+    message: string;
+  } {
     // 缓存命中：预算未缩小，或缩小后仍放得下
     if (cachedStableMessage !== null && cachedStablePack !== null) {
-      if (budgetTokens >= stableBudgetLocked || cachedStablePack.tokenEstimate <= budgetTokens) {
+      if (
+        budgetTokens >= stableBudgetLocked ||
+        cachedStablePack.tokenEstimate <= budgetTokens
+      ) {
         return { pack: cachedStablePack, message: cachedStableMessage };
       }
       // 预算缩小且放不下，需要重建
@@ -582,9 +617,10 @@ export function createStableContextManager(
       budgetTokens,
     });
 
-    const message = pack.assets.length > 0
-      ? `<stable-context-pack>\n${pack.manifest}\n\n${pack.assets.map((a) => a.content).join("\n\n")}\n</stable-context-pack>`
-      : "";
+    const message =
+      pack.assets.length > 0
+        ? `<stable-context-pack>\n${pack.manifest}\n\n${pack.assets.map((a) => a.content).join("\n\n")}\n</stable-context-pack>`
+        : "";
 
     cachedStablePack = pack;
     cachedStableMessage = message;
@@ -596,14 +632,20 @@ export function createStableContextManager(
   return {
     getState(): StableContextState {
       // getState 使用 MAX 预算查看完整 stable 内容（不裁剪）
-      const stable = cachedStablePack ?? buildStablePack({
-        projectRoot,
-        repoMap: getRepoMap(),
-        pinnedPaths,
-        budgetTokens: Number.MAX_SAFE_INTEGER,
-      });
+      const stable =
+        cachedStablePack ??
+        buildStablePack({
+          projectRoot,
+          repoMap: getRepoMap(),
+          pinnedPaths,
+          budgetTokens: Number.MAX_SAFE_INTEGER,
+        });
       const repoAndFiles = getRepoAndFiles();
-      const stablePaths = new Set(stable.assets.map((a) => a.source.path).filter((p): p is string => p !== undefined));
+      const stablePaths = new Set(
+        stable.assets
+          .map((a) => a.source.path)
+          .filter((p): p is string => p !== undefined),
+      );
       const workingParams: Parameters<typeof buildWorkingSetPack>[0] = {
         projectRoot,
         budgetTokens: Number.MAX_SAFE_INTEGER,
@@ -625,7 +667,8 @@ export function createStableContextManager(
         stablePack: stable,
         workingSetPack: working,
         evidencePack: evidence,
-        totalTokens: stable.tokenEstimate + working.tokenEstimate + evidence.tokenEstimate,
+        totalTokens:
+          stable.tokenEstimate + working.tokenEstimate + evidence.tokenEstimate,
       };
     },
 
@@ -679,15 +722,16 @@ export function createStableContextManager(
       }
     },
 
-    buildMessages(input: string | BuildMessagesInput): ChatCompletionMessageParam[] {
+    buildMessages(
+      input: string | BuildMessagesInput,
+    ): ChatCompletionMessageParam[] {
       if (!enabled) {
         return [];
       }
 
       // 兼容旧 API：string 参数转为 BuildMessagesInput
-      const params: BuildMessagesInput = typeof input === "string"
-        ? { currentQuery: input }
-        : input;
+      const params: BuildMessagesInput =
+        typeof input === "string" ? { currentQuery: input } : input;
 
       const budget: ContextBudgetPlan = getBudget?.() ?? {
         effectiveBudgetTokens: 80000,
@@ -717,7 +761,9 @@ export function createStableContextManager(
       }
 
       const stablePaths = new Set(
-        stable.pack.assets.map((a) => a.source.path).filter((p): p is string => p !== undefined),
+        stable.pack.assets
+          .map((a) => a.source.path)
+          .filter((p): p is string => p !== undefined),
       );
       const workingParams: Parameters<typeof buildWorkingSetPack>[0] = {
         projectRoot,
@@ -806,7 +852,9 @@ export function createStableContextManager(
         task,
       });
       const normalized = path.normalize(filePath);
-      return ranked.find((r) => r.path === normalized || r.path === filePath) ?? null;
+      return (
+        ranked.find((r) => r.path === normalized || r.path === filePath) ?? null
+      );
     },
   };
 }

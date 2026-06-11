@@ -892,7 +892,9 @@ export function resolveFoundationModelProfile(
 
   // 1. 显式指定 profile
   if (input.explicitProfileId) {
-    const explicit = modelProfiles.find((p) => p.id === input.explicitProfileId);
+    const explicit = modelProfiles.find(
+      (p) => p.id === input.explicitProfileId,
+    );
     if (!explicit) {
       throw new Error(
         `Unknown model profile "${input.explicitProfileId}". ` +
@@ -926,9 +928,7 @@ export function resolveFoundationModelProfile(
   const prefixMatch = modelProfiles.find(
     (p) =>
       p.provider === input.provider &&
-      p.match.modelIdPrefixes?.some((prefix) =>
-        input.model.startsWith(prefix),
-      ),
+      p.match.modelIdPrefixes?.some((prefix) => input.model.startsWith(prefix)),
   );
   if (prefixMatch) {
     warnIfStale(prefixMatch);
@@ -956,7 +956,9 @@ export function resolveFoundationModelProfile(
   );
   // generic 必定存在，但为了 TypeScript 严格性仍做断言
   if (!generic) {
-    throw new Error("Internal error: generic-openai-compatible profile missing");
+    throw new Error(
+      "Internal error: generic-openai-compatible profile missing",
+    );
   }
   warnIfStale(generic);
   return generic;
@@ -969,7 +971,9 @@ export function resolveFoundationModelProfile(
 /**
  * 根据 verifiedAt 和 updateRisk 计算 stale 阈值（天数）
  */
-function staleThresholdDays(updateRisk: FoundationModelProfile["documentation"]["updateRisk"]): number {
+function staleThresholdDays(
+  updateRisk: FoundationModelProfile["documentation"]["updateRisk"],
+): number {
   switch (updateRisk) {
     case "high":
       return 30;

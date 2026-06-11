@@ -383,7 +383,8 @@ export function createScheduleCliCommand(
           }
           console.log(`Schedule: ${view.id}`);
           console.log(`  Title: ${view.title}`);
-          if (view.description) console.log(`  Description: ${view.description}`);
+          if (view.description)
+            console.log(`  Description: ${view.description}`);
           console.log(`  Status: ${view.status}`);
           console.log(`  Executor: ${view.execution.executor}`);
           console.log(`  Overlap: ${view.execution.overlapPolicy}`);
@@ -392,7 +393,9 @@ export function createScheduleCliCommand(
           if (occurrences.length > 0) {
             console.log("  Recent occurrences:");
             for (const occ of occurrences) {
-              console.log(`    - ${occ.id}: ${occ.status} at ${occ.scheduledAt}`);
+              console.log(
+                `    - ${occ.id}: ${occ.status} at ${occ.scheduledAt}`,
+              );
             }
           }
           break;
@@ -406,7 +409,9 @@ export function createScheduleCliCommand(
           try {
             const view = manager.cancel(scheduleId);
             logger.info("Schedule cancelled: %s", scheduleId);
-            console.log(`Schedule "${scheduleId}" cancelled. Status: ${view.status}`);
+            console.log(
+              `Schedule "${scheduleId}" cancelled. Status: ${view.status}`,
+            );
           } catch (error) {
             console.log(
               `Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -443,7 +448,9 @@ export function createScheduleCliCommand(
           } else {
             console.log(`Occurrences for "${scheduleId}":`);
             for (const occ of occurrences) {
-              console.log(`  - ${occ.id}: ${occ.status} (scheduled: ${occ.scheduledAt})`);
+              console.log(
+                `  - ${occ.id}: ${occ.status} (scheduled: ${occ.scheduledAt})`,
+              );
             }
           }
           break;
@@ -582,9 +589,7 @@ export function createModelPolicyCliCommand(
         );
         lines.push(`  compression: ${policy.context.compressionMode}`);
         lines.push(`  thinking: ${policy.request.thinkingMode}`);
-        lines.push(
-          `  effort: ${policy.request.reasoningEffort ?? "default"}`,
-        );
+        lines.push(`  effort: ${policy.request.reasoningEffort ?? "default"}`);
         lines.push(
           `  reasoning replay: ${policy.reasoning.mustReplayWithToolCalls ? "required for tool calls" : "not required"}`,
         );
@@ -651,7 +656,9 @@ export function createModelPolicyCliCommand(
       if (subcommand === "out" || subcommand === "output") {
         const value = parseTokenCount(args[1]);
         if (value === undefined) {
-          console.log("Usage: /m out <tokens> (e.g., /m out 32k or /m out 32000)");
+          console.log(
+            "Usage: /m out <tokens> (e.g., /m out 32k or /m out 32000)",
+          );
           return;
         }
         try {
@@ -666,9 +673,7 @@ export function createModelPolicyCliCommand(
         return;
       }
 
-      console.log(
-        "Usage: /m [c <tokens>|out <tokens>|r]",
-      );
+      console.log("Usage: /m [c <tokens>|out <tokens>|r]");
     },
   };
 }
@@ -751,9 +756,7 @@ export function createThinkingCliCommand(
 
       const parsed = parseThinkingArg(subcommand);
       if (!parsed) {
-        console.log(
-          "Usage: /t [开|关|自|高|最强|默认]",
-        );
+        console.log("Usage: /t [开|关|自|高|最强|默认]");
         return;
       }
 
@@ -768,7 +771,10 @@ export function createThinkingCliCommand(
             logger.info("Reasoning effort override cleared");
             console.log("Reasoning effort override cleared.");
           } else {
-            logger.info("Reasoning effort updated to %s", parsed.reasoningEffort);
+            logger.info(
+              "Reasoning effort updated to %s",
+              parsed.reasoningEffort,
+            );
             console.log(`Reasoning effort set to ${parsed.reasoningEffort}.`);
           }
         }
@@ -822,9 +828,15 @@ export function createStableContextCliCommand(
             lines.push(`    - ${p}`);
           }
         }
-        lines.push(`  stable pack: ${state.stablePack?.tokenEstimate ?? 0} tokens`);
-        lines.push(`  working set: ${state.workingSetPack?.tokenEstimate ?? 0} tokens`);
-        lines.push(`  evidence: ${state.evidencePack?.tokenEstimate ?? 0} tokens`);
+        lines.push(
+          `  stable pack: ${state.stablePack?.tokenEstimate ?? 0} tokens`,
+        );
+        lines.push(
+          `  working set: ${state.workingSetPack?.tokenEstimate ?? 0} tokens`,
+        );
+        lines.push(
+          `  evidence: ${state.evidencePack?.tokenEstimate ?? 0} tokens`,
+        );
         lines.push(`  total: ${state.totalTokens} tokens`);
         console.log(lines.join("\n"));
         return;
@@ -853,8 +865,12 @@ export function createStableContextCliCommand(
 
       if (subcommand === "刷" || subcommand === "refresh") {
         manager.invalidateStableSnapshot();
-        logger.info("Stable snapshot invalidated, will rebuild on next LLM call");
-        console.log("Stable snapshot invalidated. Will rebuild on next LLM call.");
+        logger.info(
+          "Stable snapshot invalidated, will rebuild on next LLM call",
+        );
+        console.log(
+          "Stable snapshot invalidated. Will rebuild on next LLM call.",
+        );
         return;
       }
 
@@ -870,7 +886,11 @@ export function createStableContextCliCommand(
         return;
       }
 
-      if (subcommand === "删" || subcommand === "remove" || subcommand === "unpin") {
+      if (
+        subcommand === "删" ||
+        subcommand === "remove" ||
+        subcommand === "unpin"
+      ) {
         const filePath = args[1];
         if (!filePath) {
           console.log("Usage: /c 删 <path|id>");
@@ -891,7 +911,9 @@ export function createStableContextCliCommand(
         }
         const lines = ["Loaded assets:"];
         for (const a of assets) {
-          lines.push(`  - ${a.source.label} (${a.kind}, ${a.tokenEstimate}t, hash=${a.contentHash})`);
+          lines.push(
+            `  - ${a.source.label} (${a.kind}, ${a.tokenEstimate}t, hash=${a.contentHash})`,
+          );
         }
         console.log(lines.join("\n"));
         return;
@@ -901,13 +923,17 @@ export function createStableContextCliCommand(
       if (subcommand === "排" || subcommand === "rank") {
         const ranked = manager.getRankedFiles(15);
         if (ranked.length === 0) {
-          console.log("No ranked files available (ContextRanker not configured).");
+          console.log(
+            "No ranked files available (ContextRanker not configured).",
+          );
           return;
         }
         const repo = manager.getRepoClassification();
         const lines: string[] = ["Top ranked files:"];
         if (repo) {
-          lines.push(`  repo: ${repo.primary}${repo.primary === "mixed" ? ` (${repo.all.join(", ")})` : ""}`);
+          lines.push(
+            `  repo: ${repo.primary}${repo.primary === "mixed" ? ` (${repo.all.join(", ")})` : ""}`,
+          );
           lines.push(`  confidence: ${repo.confidence.toFixed(2)}`);
         }
         lines.push("");
@@ -924,7 +950,11 @@ export function createStableContextCliCommand(
       }
 
       // PDD21-1: /c why <path> / /c 因 <path> — 显示某个文件的重要性分数和原因
-      if (subcommand === "why" || subcommand === "因" || subcommand === "为什么") {
+      if (
+        subcommand === "why" ||
+        subcommand === "因" ||
+        subcommand === "为什么"
+      ) {
         const filePath = args[1];
         if (!filePath) {
           console.log("Usage: /c why <path>  or  /c 因 <path>");
@@ -932,14 +962,18 @@ export function createStableContextCliCommand(
         }
         const result = manager.explainFile(filePath);
         if (!result) {
-          console.log(`File "${filePath}" not found in ranking (may be excluded or not scanned).`);
+          console.log(
+            `File "${filePath}" not found in ranking (may be excluded or not scanned).`,
+          );
           return;
         }
         const lines: string[] = [`Context rank: ${result.path}`];
         lines.push(`  score: ${result.score}`);
         for (const reason of result.reasons) {
           const sign = reason.points >= 0 ? "+" : "";
-          lines.push(`  ${reason.signal}: ${reason.note} ${sign}${reason.points}`);
+          lines.push(
+            `  ${reason.signal}: ${reason.note} ${sign}${reason.points}`,
+          );
         }
         console.log(lines.join("\n"));
         return;

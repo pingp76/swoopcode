@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createScheduleManager, type ScheduleManager } from "./schedules.js";
 import { type ScheduleFile, type ScheduleStore } from "./schedule-store.js";
 import { createLogger } from "./logger.js";
-import type { AsyncRunManager, AsyncRunRecord, AsyncRunExecutor, AsyncRunTrigger } from "./async-runs.js";
+import type {
+  AsyncRunManager,
+  AsyncRunRecord,
+  AsyncRunExecutor,
+  AsyncRunTrigger,
+} from "./async-runs.js";
 
 const NOW = new Date("2026-05-26T12:00:00Z");
 
@@ -20,7 +25,15 @@ function makeMockAsyncRunManager(): {
     setOnFinishCalls: number;
   } & AsyncRunManager = {
     records,
-    start(input: { trigger?: AsyncRunTrigger; title: string; executor: AsyncRunExecutor; command?: string; prompt?: string; resources?: { read_paths?: string[]; write_paths?: string[] }; timeoutMs?: number; }): AsyncRunRecord {
+    start(input: {
+      trigger?: AsyncRunTrigger;
+      title: string;
+      executor: AsyncRunExecutor;
+      command?: string;
+      prompt?: string;
+      resources?: { read_paths?: string[]; write_paths?: string[] };
+      timeoutMs?: number;
+    }): AsyncRunRecord {
       const id = `ar_${Date.now()}_${Math.random().toString(36).slice(2)}`;
       const startedAt = new Date();
       const record: AsyncRunRecord = {
@@ -28,10 +41,15 @@ function makeMockAsyncRunManager(): {
         status: "running",
         title: input.title,
         executor: input.executor,
-        resourceClaim: { readPaths: input.resources?.read_paths ?? [], writePaths: input.resources?.write_paths ?? [] },
+        resourceClaim: {
+          readPaths: input.resources?.read_paths ?? [],
+          writePaths: input.resources?.write_paths ?? [],
+        },
         trigger: input.trigger ?? { kind: "manual" },
         startedAt: startedAt.toISOString(),
-        timeoutAt: new Date(startedAt.getTime() + (input.timeoutMs ?? 300_000)).toISOString(),
+        timeoutAt: new Date(
+          startedAt.getTime() + (input.timeoutMs ?? 300_000),
+        ).toISOString(),
         preview: "",
       };
       if (input.command !== undefined) record.command = input.command;
@@ -59,8 +77,14 @@ function makeMockAsyncRunManager(): {
 }
 
 function createInMemoryStore(): ScheduleStore {
-  const schedules = new Map<string, import("./schedule-store.js").ScheduleFile>();
-  const occurrences = new Map<string, import("./schedule-store.js").ScheduleOccurrenceFile>();
+  const schedules = new Map<
+    string,
+    import("./schedule-store.js").ScheduleFile
+  >();
+  const occurrences = new Map<
+    string,
+    import("./schedule-store.js").ScheduleOccurrenceFile
+  >();
   const currentProjectRoot = "/tmp/project";
   function toSummary(s: import("./schedule-store.js").ScheduleFile) {
     return {
@@ -86,7 +110,12 @@ function createInMemoryStore(): ScheduleStore {
       .map(toSummary);
   }
   return {
-    scan: () => list({ includeArchived: true, includeCancelled: true, currentProjectOnly: false }),
+    scan: () =>
+      list({
+        includeArchived: true,
+        includeCancelled: true,
+        currentProjectOnly: false,
+      }),
     list,
     read: (id) => schedules.get(id) ?? null,
     save: (s) => {
@@ -96,7 +125,8 @@ function createInMemoryStore(): ScheduleStore {
       schedules.delete(id);
       occurrences.delete(id);
     },
-    readOccurrence: (_scheduleId, occurrenceId) => occurrences.get(occurrenceId) ?? null,
+    readOccurrence: (_scheduleId, occurrenceId) =>
+      occurrences.get(occurrenceId) ?? null,
     saveOccurrence: (o) => {
       occurrences.set(o.id, o);
     },
@@ -202,7 +232,9 @@ describe("ScheduleManager", () => {
     expect(schedule.id).toMatch(/^sch_\d{8}_\d{6}_[a-z0-9_-]+$/);
     expect(schedule.status).toBe("active");
     expect(schedule.nextRunAt).toBeDefined();
-    expect(new Date(schedule.nextRunAt!).getTime()).toBe(new Date("2026-05-26T13:00:00Z").getTime());
+    expect(new Date(schedule.nextRunAt!).getTime()).toBe(
+      new Date("2026-05-26T13:00:00Z").getTime(),
+    );
   });
 
   it("tick triggers a due once schedule", () => {
@@ -279,19 +311,23 @@ describe("ScheduleManager", () => {
   });
 
   it("fails readonly schedule command rejected by execution policy", () => {
-    const schedule = makeStoredSchedule("sch_20260526_110000_command", "/tmp/project", {
-      timing: { type: "once", runAt: "2026-05-26T12:01:00Z" },
-      nextRunAt: "2026-05-26T12:01:00.000Z",
-      execution: {
-        mode: "async",
-        executor: "command",
-        command: "npm run lint -- --fix",
-        timeoutSeconds: 300,
-        overlapPolicy: "skip",
-        permissionProfile: "readonly",
-        resources: { readPaths: ["."], writePaths: [] },
+    const schedule = makeStoredSchedule(
+      "sch_20260526_110000_command",
+      "/tmp/project",
+      {
+        timing: { type: "once", runAt: "2026-05-26T12:01:00Z" },
+        nextRunAt: "2026-05-26T12:01:00.000Z",
+        execution: {
+          mode: "async",
+          executor: "command",
+          command: "npm run lint -- --fix",
+          timeoutSeconds: 300,
+          overlapPolicy: "skip",
+          permissionProfile: "readonly",
+          resources: { readPaths: ["."], writePaths: [] },
+        },
       },
-    });
+    );
     store.save(schedule);
 
     manager.start();
@@ -304,19 +340,23 @@ describe("ScheduleManager", () => {
   });
 
   it("allows legacy ci schedule command through execution policy", () => {
-    const schedule = makeStoredSchedule("sch_20260526_110000_ci", "/tmp/project", {
-      timing: { type: "once", runAt: "2026-05-26T12:01:00Z" },
-      nextRunAt: "2026-05-26T12:01:00.000Z",
-      execution: {
-        mode: "async",
-        executor: "command",
-        command: "npm run build",
-        timeoutSeconds: 300,
-        overlapPolicy: "skip",
-        permissionProfile: "ci",
-        resources: { readPaths: ["."], writePaths: [] },
+    const schedule = makeStoredSchedule(
+      "sch_20260526_110000_ci",
+      "/tmp/project",
+      {
+        timing: { type: "once", runAt: "2026-05-26T12:01:00Z" },
+        nextRunAt: "2026-05-26T12:01:00.000Z",
+        execution: {
+          mode: "async",
+          executor: "command",
+          command: "npm run build",
+          timeoutSeconds: 300,
+          overlapPolicy: "skip",
+          permissionProfile: "ci",
+          resources: { readPaths: ["."], writePaths: [] },
+        },
       },
-    });
+    );
     store.save(schedule);
 
     manager.start();
@@ -328,19 +368,23 @@ describe("ScheduleManager", () => {
   });
 
   it("fails legacy workspace_write schedule because profile is reserved", () => {
-    const schedule = makeStoredSchedule("sch_20260526_110000_write", "/tmp/project", {
-      timing: { type: "once", runAt: "2026-05-26T12:01:00Z" },
-      nextRunAt: "2026-05-26T12:01:00.000Z",
-      execution: {
-        mode: "async",
-        executor: "command",
-        command: "npm run typecheck",
-        timeoutSeconds: 300,
-        overlapPolicy: "skip",
-        permissionProfile: "workspace_write",
-        resources: { readPaths: ["."], writePaths: [] },
+    const schedule = makeStoredSchedule(
+      "sch_20260526_110000_write",
+      "/tmp/project",
+      {
+        timing: { type: "once", runAt: "2026-05-26T12:01:00Z" },
+        nextRunAt: "2026-05-26T12:01:00.000Z",
+        execution: {
+          mode: "async",
+          executor: "command",
+          command: "npm run typecheck",
+          timeoutSeconds: 300,
+          overlapPolicy: "skip",
+          permissionProfile: "workspace_write",
+          resources: { readPaths: ["."], writePaths: [] },
+        },
       },
-    });
+    );
     store.save(schedule);
 
     manager.start();
@@ -374,7 +418,10 @@ describe("ScheduleManager", () => {
 
     manager.tick(new Date("2026-05-26T12:00:00Z"));
 
-    const occurrencesBefore = store.listOccurrences(asyncRunManager.records[0]!.trigger.scheduleId!, 10);
+    const occurrencesBefore = store.listOccurrences(
+      asyncRunManager.records[0]!.trigger.scheduleId!,
+      10,
+    );
     const runningOcc = occurrencesBefore.find((o) => o.status === "running");
     expect(runningOcc).toBeDefined();
   });
@@ -402,7 +449,9 @@ describe("ScheduleManager", () => {
 
     manager.tick(new Date("2026-05-26T12:00:00Z"));
 
-    expect(() => manager.delete(schedule.id)).toThrow("Use cancel instead of delete");
+    expect(() => manager.delete(schedule.id)).toThrow(
+      "Use cancel instead of delete",
+    );
   });
 
   it("allows deleting an untriggered schedule", () => {
@@ -479,9 +528,13 @@ describe("ScheduleManager", () => {
   });
 
   it("marks persisted running occurrences as orphaned on startup", () => {
-    const schedule = makeStoredSchedule("sch_20260526_130000_curr", "/tmp/project", {
-      status: "completed",
-    });
+    const schedule = makeStoredSchedule(
+      "sch_20260526_130000_curr",
+      "/tmp/project",
+      {
+        status: "completed",
+      },
+    );
     store.save(schedule);
     store.saveOccurrence({
       version: 1,
@@ -506,13 +559,17 @@ describe("ScheduleManager", () => {
   });
 
   it("does not notify when orphaning if schedule notifications are disabled", () => {
-    const schedule = makeStoredSchedule("sch_20260526_130000_curr", "/tmp/project", {
-      outputPolicy: {
-        saveRawOutput: true,
-        notifyLlm: false,
-        linkedTaskUpdate: "never",
+    const schedule = makeStoredSchedule(
+      "sch_20260526_130000_curr",
+      "/tmp/project",
+      {
+        outputPolicy: {
+          saveRawOutput: true,
+          notifyLlm: false,
+          linkedTaskUpdate: "never",
+        },
       },
-    });
+    );
     store.save(schedule);
     store.saveOccurrence({
       version: 1,
@@ -609,7 +666,11 @@ import { computeNextRunAt } from "./schedules.js";
 describe("computeNextRunAt", () => {
   it("returns runAt for once timing regardless of after", () => {
     const timing = { type: "once" as const, runAt: "2026-05-26T11:00:00Z" };
-    const result = computeNextRunAt(timing, "UTC", new Date("2026-05-26T12:00:00Z"));
+    const result = computeNextRunAt(
+      timing,
+      "UTC",
+      new Date("2026-05-26T12:00:00Z"),
+    );
     expect(result?.toISOString()).toBe("2026-05-26T11:00:00.000Z");
   });
 
@@ -621,7 +682,11 @@ describe("computeNextRunAt", () => {
     };
     // after = 12:00:30, startsAt = 12:00:05, interval = 60s
     // steps = floor(25000/60000) + 1 = 1 → result = 12:01:05
-    const result = computeNextRunAt(timing, "UTC", new Date("2026-05-26T12:00:30Z"));
+    const result = computeNextRunAt(
+      timing,
+      "UTC",
+      new Date("2026-05-26T12:00:30Z"),
+    );
     expect(result?.toISOString()).toBe("2026-05-26T12:01:05.000Z");
   });
 
@@ -633,7 +698,11 @@ describe("computeNextRunAt", () => {
     };
     // after = 12:02:06, elapsed = 121000ms, steps = floor(121000/60000)+1 = 3
     // result = 12:00:05 + 180s = 12:03:05
-    const result = computeNextRunAt(timing, "UTC", new Date("2026-05-26T12:02:06Z"));
+    const result = computeNextRunAt(
+      timing,
+      "UTC",
+      new Date("2026-05-26T12:02:06Z"),
+    );
     expect(result?.toISOString()).toBe("2026-05-26T12:03:05.000Z");
   });
 
@@ -643,7 +712,11 @@ describe("computeNextRunAt", () => {
       startsAt: "2026-05-26T14:00:00Z",
       rule: { kind: "hourly" as const, intervalHours: 1 },
     };
-    const result = computeNextRunAt(timing, "UTC", new Date("2026-05-26T12:00:00Z"));
+    const result = computeNextRunAt(
+      timing,
+      "UTC",
+      new Date("2026-05-26T12:00:00Z"),
+    );
     expect(result?.toISOString()).toBe("2026-05-26T14:00:00.000Z");
   });
 
@@ -661,7 +734,11 @@ describe("computeNextRunAt", () => {
     };
     // after = Tue May 26 11:00 → next should be Mon Jun 8 (skip May 25 weekIndex=0 passed,
     // May 25+7=Jun 1 weekIndex=1 skipped because 1%2=1)
-    const result = computeNextRunAt(timing, "UTC", new Date("2026-05-26T11:00:00Z"));
+    const result = computeNextRunAt(
+      timing,
+      "UTC",
+      new Date("2026-05-26T11:00:00Z"),
+    );
     expect(result?.toISOString()).toBe("2026-06-08T10:00:00.000Z");
   });
 
@@ -672,7 +749,11 @@ describe("computeNextRunAt", () => {
       endsAt: "2026-05-26T11:00:00Z",
       rule: { kind: "hourly" as const, intervalHours: 1 },
     };
-    const result = computeNextRunAt(timing, "UTC", new Date("2026-05-26T12:00:00Z"));
+    const result = computeNextRunAt(
+      timing,
+      "UTC",
+      new Date("2026-05-26T12:00:00Z"),
+    );
     expect(result).toBeNull();
   });
 });
@@ -729,7 +810,11 @@ describe("ScheduleManager listOccurrences limit", () => {
     }
 
     expect(manager.listOccurrences({ scheduleId: schedule.id }).length).toBe(5);
-    expect(manager.listOccurrences({ scheduleId: schedule.id, limit: 3 }).length).toBe(3);
-    expect(manager.listOccurrences({ scheduleId: schedule.id, limit: 10 }).length).toBe(5);
+    expect(
+      manager.listOccurrences({ scheduleId: schedule.id, limit: 3 }).length,
+    ).toBe(3);
+    expect(
+      manager.listOccurrences({ scheduleId: schedule.id, limit: 10 }).length,
+    ).toBe(5);
   });
 });

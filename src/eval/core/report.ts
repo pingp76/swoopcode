@@ -11,7 +11,11 @@
 
 import { writeFile } from "node:fs/promises";
 import type { LLMClient } from "../../llm.js";
-import type { EvalCase, EvalSuiteReport, EvalRunResult } from "./case-schema.js";
+import type {
+  EvalCase,
+  EvalSuiteReport,
+  EvalRunResult,
+} from "./case-schema.js";
 import type { CodingAgentDriver } from "./driver.js";
 import { runEvalCase } from "./runner.js";
 
@@ -49,7 +53,9 @@ export async function runEvalSuite(
   }
 
   const passed = results.filter((r) => r.passed).length;
-  const failed = results.filter((r) => !r.passed && r.status !== "skipped").length;
+  const failed = results.filter(
+    (r) => !r.passed && r.status !== "skipped",
+  ).length;
   const skipped = results.filter((r) => r.status === "skipped").length;
 
   const reportCases = results.map((r) => {
@@ -98,7 +104,10 @@ export async function runEvalSuite(
  * @param report - suite report
  * @param filePath - 目标文件路径
  */
-export async function writeJsonReport(report: EvalSuiteReport, filePath: string): Promise<void> {
+export async function writeJsonReport(
+  report: EvalSuiteReport,
+  filePath: string,
+): Promise<void> {
   await writeFile(filePath, JSON.stringify(report, null, 2), "utf-8");
 }
 
