@@ -1,363 +1,552 @@
 <p class="article__eyebrow">第 15 章 · 长期运行的卫生系统</p>
-<h1 class="article__title">长期运行不会把系统跑坏：Runtime Hardening</h1>
+<h1 class="article__title">Runtime Hardening: 长期运行不会把系统跑坏</h1>
 <p class="article__lede">
-  教学项目也会长时间运行。日志、输出、occurrence、task archive 和 eval trace
-  如果无限增长，最后会把 agentHome 变成垃圾场。
+  前面十四章让 harness 拥有完整能力, 但 schedule / async run / memory / task /
+  output store 这些持久化数据在长期运行下会无限增长, 日志、 transcript、output
+  handle 也会累积。某天启动变慢、磁盘占满、某个 JSON 因为中断写坏。这一章给
+  harness 加 Runtime Hardening, 覆盖所有 读写边界: 原子写、日志轮转、output
+  handle 引用计数、清理 dry-run、 时间语义统一, 让 harness
+  在真实使用中慢慢腐烂时不至于崩溃。
 </p>
 
 <nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
 
 <hr class="rule" />
 
-<h2 id="known-and-unknown">你已经知道什么，还不知道什么</h2>
+<h2 id="delta-from-14">在第 14 章基础上改了什么</h2>
 <p>
-  你已经有 Memory、Task、Async Run、Schedule、OutputStore
-  和日志。它们都可能落盘，也都可能长期增长。
+  这一章不新增业务模块, 而是基于已有的 schedule (第 14 章) / async run (第 13
+  章) / memory (第 09 章) / task (第 12 章) / output store (第 06 章 P1) /
+  transcript (第 08 章) 重新组织所有持久化 IO, 加上 原子写、日志轮转、output
+  handle 引用计数、清理 dry-run、时间语义 统一五个卫生系统。 对应到代码,
+  改动集中在 5 个文件: <code>src/atomic-write.ts</code> (新)、
+  <code>src/log-rotation.ts</code> (新)、<code>src/output-store.ts</code>
+  (改加引用计数)、<code>src/cleanup.ts</code> (新)、<code>src/timeline.ts</code>
+  (改时间语义统一)。
 </p>
-<p>
-  读这一章时请把注意力放在 agent loop
-  的接入点：持久化边界和运行时维护层，确保长期运行后数据仍可读、可清理、可解释。代码片段只服务于理解架构边界，不要求你逐行背实现。
-</p>
-
-<h2 id="study-path">本章怎么学</h2>
-<p>
-  先把自己放进一个真实 query：没有 Runtime Hardening 时，当前 agent
-  会在哪里卡住。
-</p>
-<p>
-  再故意设计一个朴素方案，观察它如何破坏
-  loop、状态或安全边界。这个失败比“正确答案”更重要，因为它能帮你写出更好的重建
-  prompt。
-</p>
-<p>
-  最后才看实现：先看图和数据流，再看少量接口、源码入口和验证方法。读完后，你应该能用自己的话描述
-  Runtime Hardening 的职责，而不是只记住文件名。
-</p>
-
-<h2 id="scene">本章场景</h2>
-<p>
-  用户连续几周使用 agent：每天 schedule 跑报告，后台任务输出测试日志，LLM
-  通信日志持续追加。某天启动变慢，磁盘空间变小，某个 JSON 还因为中断写坏了。
-</p>
-<p>
-  Runtime Hardening
-  不是炫技优化，而是避免系统在真实使用中慢慢腐烂：原子写、日志轮转、output
-  handle、清理 dry-run、时间语义统一。
-</p>
-
-<h2 id="naive">先试一个朴素方案</h2>
-<p>
-  朴素方案是“先不管，等文件太多再 rm -rf
-  logs”。这会让重要审计记录、用户长期记忆和可删除缓存混在一起。
-</p>
-<p>
-  这个朴素方案的问题在于：它把 Runtime Hardening 当成普通实现细节，而不是 agent
-  harness 的一条稳定边界。
-</p>
-<pre class="code-block"><code>// 危险：不知道哪些数据可删，哪些是长期事实。
-rm -rf ~/.learn-claude-code-ts/*</code></pre>
-
-<h2 id="why-naive-fails">朴素方案为什么不够</h2>
-<dl class="defs">
-  <dt>半截 JSON</dt>
-  <dd>写入中断会留下损坏文件，下次启动解析失败。</dd>
-
-  <dt>无限增长</dt>
-  <dd>日志、outputs、occurrences、eval traces 都会累积。</dd>
-
-  <dt>误删长期事实</dt>
-  <dd>清理策略如果不分类，可能删掉用户 Memory 或长期 Task。</dd>
-</dl>
-
-<h2 id="loop">回到 Agent Loop</h2>
-<p>
-  Runtime Hardening 接入 loop
-  的位置是：持久化边界和运行时维护层，确保长期运行后数据仍可读、可清理、可解释。理解这个位置，比记住具体函数名更重要。
-</p>
-<p>
-  Hardening 不只在 agent loop
-  内，它覆盖所有读写边界：写文件时原子替换，写日志时轮转，暴露大输出时用
-  output_id，清理时先 dry-run。
-</p>
-
-<h2 id="architecture">架构图解</h2>
-<figure class="figure">
-  <div class="flow-map" role="img" aria-label="Runtime Hardening 数据边界">
-    <div class="flow-row">
-      <span class="flow-node flow-node--accent">Atomic Write</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">valid JSON</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">recoverable startup</span>
-    </div>
-    <div class="flow-row">
-      <span class="flow-node flow-node--accent">Log Rotation</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">bounded logs</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">agentHome hygiene</span>
-    </div>
-    <div class="flow-row">
-      <span class="flow-node flow-node--accent">Cleanup Dry-run</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">typed retention</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">safe delete</span>
-    </div>
-  </div>
-  <figcaption>图 15-1 · 长期运行的关键是分类治理，不是一刀切删除。</figcaption>
-</figure>
-
-<h2 id="from-principle-to-code">从原理落到代码</h2>
-<p>
-  到这里我们已经知道 Runtime Hardening 为什么存在、插在 loop
-  的哪里，以及朴素方案会怎样失败。下面才进入实现层：只抓住能固定架构的接口、状态边界和接线路径。
-</p>
-<p>
-  读源码时不要从文件顶部一路啃到底。更有效的顺序是：先找入口函数，再找它读写的状态，最后看测试如何证明这些状态变化是真的发生了。
-</p>
-
-<h2 id="walkthrough">一次真实运行 walkthrough</h2>
-<ol>
-  <li>TaskStore 写 group.json 时先写同目录临时文件。</li>
-  <li>写完后校验 JSON，再 rename 覆盖正式文件。</li>
-  <li>LLM logger 追加日志前检查大小，超过阈值执行轮转。</li>
-  <li>大工具输出先登记到 OutputStore，LLM 只拿到 output_id。</li>
-  <li>清理命令先 dry-run，列出将删除的日志、旧 output、旧 occurrence。</li>
-  <li>用户确认后按类别执行清理，Memory 和 active Task 默认不删。</li>
-  <li>
-    时间字段使用 turnIndex/loopRound/messageSequence 等明确语义，避免 round
-    混用。
-  </li>
-</ol>
-
-<h2 id="interfaces">关键接口和伪码</h2>
-<p>
-  下面的接口和伪码只保留本章最关键的形状。真正写代码时，可以让 coding agent
-  参考源码地图中的文件补齐细节。
-</p>
-<pre class="code-block"><code>interface CleanupPlan {
-  dryRun: boolean;
-  categories: Array&lt;&quot;logs&quot; | &quot;outputs&quot; | &quot;occurrences&quot; | &quot;eval_traces&quot;&gt;;
-  olderThanDays: number;
-}
-
-async function atomicWriteJson(path: string, value: unknown) {
-  const temp = path + &quot;.tmp&quot;;
-  await writeFile(temp, JSON.stringify(value, null, 2));
-  JSON.parse(await readFile(temp, &quot;utf8&quot;));
-  await rename(temp, path);
-}</code></pre>
-
-<h2 id="source-map">源码地图</h2>
-<p>
-  源码阅读建议从第一个文件开始，按数据流往后看。当前项目源码已经包含后续章节能力，所以读本章时只聚焦这里列出的入口。
-</p>
-<div class="source-links" aria-label="15 章源码阅读路线">
+<div class="source-links" aria-label="本章 GitHub 永久链接">
   <a
     class="source-link"
     href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/atomic-write.ts"
     target="_blank"
     rel="noreferrer"
+    >1. src/atomic-write.ts: 原子写工具 (新)</a
   >
-    <code>src/atomic-write.ts</code> · 原子写入
-  </a>
   <a
     class="source-link"
     href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/log-rotation.ts"
     target="_blank"
     rel="noreferrer"
+    >2. src/log-rotation.ts: 日志轮转 (新)</a
   >
-    <code>src/log-rotation.ts</code> · 日志轮转
-  </a>
   <a
     class="source-link"
     href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/output-store.ts"
     target="_blank"
     rel="noreferrer"
+    >3. src/output-store.ts: 引用计数 + 过期清理 (改)</a
   >
-    <code>src/output-store.ts</code> · 大输出句柄
-  </a>
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/cleanup.ts"
+    target="_blank"
+    rel="noreferrer"
+    >4. src/cleanup.ts: 干跑清理 (新)</a
+  >
   <a
     class="source-link"
     href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/timeline.ts"
     target="_blank"
     rel="noreferrer"
+    >5. src/timeline.ts: 时间语义统一 (改)</a
   >
-    <code>src/timeline.ts</code> · 时间语义类型
-  </a>
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/llm-logger.ts"
-    target="_blank"
-    rel="noreferrer"
-  >
-    <code>src/llm-logger.ts</code> · LLM 日志记录和轮转
-  </a>
-</div>
-<div class="note">
-  <p class="note__title">读源码时的提醒</p>
-  <p>
-    GitHub 链接指向当前主干实现，可能已经包含后续章节能力。学习本章时，请只沿着
-    Runtime Hardening 相关的数据流阅读，暂时忽略旁边更复杂的分支。
-  </p>
 </div>
 
-<h2 id="design">设计直觉</h2>
-<p>
-  鲁棒性设计的核心不是“多加
-  try/catch”，而是让每类数据都有生命周期：什么是事实，什么是派生索引，什么是缓存，什么可以清理。
-</p>
-<p>
-  清理机制必须保守，尤其不能默认删除 Memory、active Task 和仍有关联的 outputs。
-</p>
-
-<h2 id="split">架构拆分</h2>
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
 <dl class="defs">
-  <dt>写入安全</dt>
-  <dd>原子写、读写对称校验、id 一致性检查。</dd>
-
-  <dt>增长控制</dt>
-  <dd>日志轮转、output TTL、occurrence 保留策略。</dd>
-
-  <dt>可解释清理</dt>
-  <dd>dry-run 先告诉用户将删除什么，再执行。</dd>
-</dl>
-
-<h2 id="state-boundary">状态与边界</h2>
-<dl class="defs">
-  <dt>长期事实</dt>
-  <dd>Memory、TaskGroup、Schedule 规则，默认不自动删除。</dd>
-
-  <dt>审计与缓存</dt>
-  <dd>logs、outputs、old occurrences、eval traces，可按策略清理。</dd>
-
-  <dt>时间语义</dt>
+  <dt>想清楚现象</dt>
   <dd>
-    turnIndex、loopRound、loopIndex、messageSequence、transcript sequence
-    各有含义。
+    harness 跑了一个月, 用户突然发现启动变慢、磁盘占满、schedule 触发时间错位
+    (以为本地时区实际 UTC)。现象是"卫生系统缺失, 长期运行下慢慢腐烂"。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"先不管, 等文件太多再 rm -rf"。这有两个问题:
+    一是不知道哪些数据可删 (memory / task 是用户长期事实, 删了 用户损失),
+    二是粗暴删除破坏原子性, 写到一半的文件会留垃圾。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口:
+    <code
+      >interface AtomicWrite { write(path, content) }, interface Cleanup {
+      dryRun(), run() }</code
+    >。 不变量五条: (1) 所有持久化 IO 走 atomic write, 不直接 fs.writeFile, (2)
+    日志按大小或时间轮转, 不无限增长, (3) output store 引用计数, 没人引用的
+    output_id 可清理, (4) 清理先 dry-run 给用户看, 用户 确认后才真删, (5) 时间用
+    epoch ms (number) 不用 Date 字符串。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake atomic write 中断 (模拟断电), 跑完后原文件仍然存在, tmp 文件可能被留
+    (不破坏), 重新启动 harness 后能正常解析; fake cleanup dry-run 返回 5
+    个待删文件, run() 之前文件仍在, run() 之后文件不在。
   </dd>
 </dl>
 
-<h2 id="prompt">Prompt Card</h2>
-<div class="card card--prompt">
-  <div class="card__head">
-    <span class="card__tag">Prompt Card</span>
-    <button class="card__copy" data-copy-card>复制</button>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>目标：</strong>为 agentHome 持久化数据补 Runtime
-      Hardening：原子写、日志轮转、output handle 和清理 dry-run。
-    </p>
-    <p>
-      <strong>场景：</strong>agent
-      长期运行后，数据增长仍可控，坏文件不会破坏启动，清理不会误删长期事实。
-    </p>
-    <p>
-      <strong>模块：</strong
-      >atomic-write.ts、log-rotation.ts、output-store.ts、timeline.ts、相关
-      store 和 tests。
-    </p>
-    <p>
-      <strong>接线：</strong>持久化 store 使用 atomic write；logger 使用
-      rotation；清理命令按类别扫描。
-    </p>
-    <p>
-      <strong>边界：</strong>不要默认删除 Memory/active Task；不要把裸路径暴露给
-      LLM；清理先 dry-run。
-    </p>
-    <p>
-      <strong>例外和 corner case：</strong>写入中断、坏
-      JSON、日志超限、output_id 越权读取、旧 occurrence 清理。
-    </p>
-    <p>
-      <strong>验证：</strong>测试原子写、日志轮转、output_id
-      读取边界和清理计划。
-    </p>
-    <p>
-      <strong>源码入口：</strong
-      >src/atomic-write.ts、src/log-rotation.ts、src/output-store.ts、src/timeline.ts。
-    </p>
-    <p>
-      <strong>文档同步：</strong>说明鲁棒性是长期运行卫生系统，不是生产化大改。
-    </p>
-  </div>
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
+<div class="note">
+  <p class="note__title">观察 1 · 直接 fs.writeFile, 断电留半截</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+// 错误: 直接写, 断电会留半截
+import fs from "node:fs/promises";
+async function saveMemory(path: string, content: string) {
+  await fs.writeFile(path, content);
+}</code></pre>
+  <p><strong>问:</strong>为什么不直接 writeFile?</p>
+  <p>
+    <strong>答:</strong>三件事同时坏掉 —— 原子性: 写到一半断电, 文件 是半截
+    JSON, 下次启动解析失败, 用户的偏好丢失; 不可恢复: 解析失败后没有 backup,
+    用户只能从头开始; 可观测: 写失败时 fs.writeFile
+    抛错但不告诉用户"为什么失败", 调试困难。
+  </p>
 </div>
 
-<h2 id="trap">容易踩坑</h2>
+<div class="note">
+  <p class="note__title">观察 2 · cleanup 实际跑, 不 dry-run</p>
+  <pre class="code-block"><code>// 教学简化版
+// 错误: 不先 dry-run 给用户看
+async function cleanup() {
+  const oldFiles = await glob(".claude/cache/*.tmp");
+  for (const f of oldFiles) await fs.unlink(f);
+}</code></pre>
+  <p><strong>问:</strong>为什么不直接删?</p>
+  <p>
+    <strong>答:</strong>三件事同时坏掉 —— 误删: 用户可能有临时调研 文件在 tmp
+    里, 删了用户丢失; 不可逆: 删了之后用户说"等等, 那个文件我有用的", 没了;
+    不可信: 用户不敢用清理功能, 担心 删错, harness 的卫生功能形同虚设。
+  </p>
+</div>
+
+<h2 id="atomic-write">原子写: write tmp + fsync + rename</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export async function atomicWriteFile(path: string, content: string | Buffer): Promise&lt;void&gt; {
+  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
+  const fh = await fs.open(tmpPath, "w");
+  try {
+    await fh.writeFile(content);
+    await fh.sync();  // fsync 强制刷盘
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmpPath, path);  // rename 在同一文件系统下是原子的
+}</code></pre>
+<p>
+  关键: <code>rename</code> 在同一文件系统下是原子操作。要么 tmp 文件 rename
+  成功, 替换原文件; 要么 rename 失败, 原文件不变。半截写入 不会暴露给后续读取。
+</p>
+
+<h2 id="log-rotation">日志轮转: 按大小 + 按时间</h2>
+<p>
+  harness 日志 (LLM 通信 / hook 决策 / schedule 触发) 持续增长。本章
+  引入日志轮转, 按 <code>maxFileSize</code> (默认 10MB) 或 <code>maxAge</code>
+  (默认 7 天) 切割。轮转策略:
+</p>
+<dl class="defs">
+  <dt>按大小</dt>
+  <dd>
+    日志文件超过 maxFileSize 时, 关闭当前文件, 重命名为
+    <code>app.log.1</code>、<code>app.log.2</code> 等, 启动新的
+    <code>app.log</code>。保留最近 N 个文件, 更老的删除。
+  </dd>
+  <dt>按时间</dt>
+  <dd>每天 0 点自动轮转, 跨天的日志按天归档。保留最近 7 天, 更老的 删除。</dd>
+  <dt>组合</dt>
+  <dd>同时满足时按更严格的策略。本章默认两个都启用, 任一触发即轮转。</dd>
+</dl>
+
+<h2 id="output-handle">output store 引用计数</h2>
+<p>
+  第 06 章 P1 压缩把大工具输出存到
+  <code>~/.cache/run-outputs/&lt;output_id&gt;</code>, history
+  里只剩占位符。问题是: 如果 LLM 之后再没引用这个 output_id, 文件就成孤儿了,
+  永远占磁盘。本章加引用计数:
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export interface OutputHandle {
+  id: string;
+  path: string;
+  size: number;
+  refCount: number;        // 当前被多少 messages 引用
+  createdAt: number;
+  expiresAt: number;        // 引用计数 0 之后, 24h 后可清理
+}</code></pre>
+<p>
+  每次写入 output 时 refCount = 1 (对应的 tool message 引用一次); 之后 compress
+  / replay 删除或合并该 tool message 时, refCount -= 1; refCount 归 0 后, 24
+  小时后可清理。cleanup 走 dry-run 列出待清理 文件, 用户确认后才真删。
+</p>
+
+<h2 id="cleanup">清理: dry-run + run</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export interface CleanupReport {
+  outputOrphans: { id: string; size: number; path: string }[];
+  oldLogs: { path: string; size: number; ageDays: number }[];
+  rotatedBackups: { path: string; size: number }[];
+  totalSize: number;
+}
+
+export interface Cleanup {
+  // 列出待清理内容, 不真删
+  dryRun(): Promise&lt;CleanupReport&gt;;
+  // 用户确认后真删
+  run(report: CleanupReport): Promise&lt;{ deleted: number; freedBytes: number }&gt;;
+}</code></pre>
+<p>
+  dry-run 返回的报告分三类: 孤儿 output (引用计数 0 且超过 24h)、 老日志 (超过
+  maxAge)、轮转备份 (超过保留份数)。用户看完报告, 决定哪些删、哪些保留。
+</p>
+
+<h2 id="timeline">时间语义: 全部用 epoch ms</h2>
+<p>
+  不同模块用不同时间格式 (Date 字符串 / 秒级 timestamp / 毫秒 timestamp)
+  会导致排序错乱、跨时区混乱。本章统一时间语义:
+</p>
+<ul>
+  <li>持久化存储 (memory / task / schedule): 全部用 epoch ms (number)。</li>
+  <li>日志输出: epoch ms 数字 + 格式化为 ISO 8601 字符串 (UTC)。</li>
+  <li>UI 显示: 转用户时区 + 友好格式 ("3 小时前")。</li>
+</ul>
+<p>
+  内部不允许 Date 字符串。string &lt;-&gt; number 转换只发生在 IO 边界 (读 JSON
+  文件时 string -&gt; number, 写 UI 时 number -&gt; 字符串)。
+</p>
+
+<h2 id="trap">反例梯度</h2>
+
 <div class="card card--trap">
   <div class="card__head">
-    <span class="card__tag">Design Trap</span>
+    <span class="card__tag">新手错法 · A</span>
   </div>
   <div class="card__body">
-    <p><strong>常见错误：</strong>清理时一刀切删除 agentHome。</p>
+    <p><strong>常见错误:</strong>持久化用 fs.writeFile, 不走 atomic write。</p>
+    <p><strong>为什么错:</strong>断电留半截 JSON, 解析失败, 用户偏好丢失。</p>
     <p>
-      <strong>为什么错：</strong>agentHome
-      同时包含长期事实、审计日志和缓存，生命周期完全不同。
-    </p>
-    <p>
-      <strong>正确做法：</strong>按类别和 TTL 生成 dry-run
-      计划，默认保护长期事实。
-    </p>
-    <p>
-      <strong>怎么验证：</strong>dry-run 输出应明确分类，且不包含 Memory 和
-      active Task。
+      <strong>正确做法:</strong>所有持久化 IO 走 atomicWriteFile(), write tmp +
+      fsync + rename。
     </p>
   </div>
 </div>
-<ul>
-  <li>原子写临时文件跨目录，rename 不再原子。</li>
-  <li>output path 直接给 LLM。</li>
-  <li>round 同时表示 turn 和 loop，导致压缩年龄判断漂移。</li>
-</ul>
 
-<h2 id="validate">如何验证</h2>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>cleanup 直接删, 不先 dry-run。</p>
+    <p>
+      <strong>为什么错:</strong>误删用户文件, 用户不敢用清理功能,
+      卫生系统形同虚设。
+    </p>
+    <p><strong>正确做法:</strong>dryRun() 返回报告, 用户确认后 run() 真删。</p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>output store 不引用计数, 孤儿文件永久占盘。</p>
+    <p>
+      <strong>为什么错:</strong>用户跑一个月,
+      <code>~/.cache/run-outputs/</code> 撑爆磁盘。
+    </p>
+    <p>
+      <strong>正确做法:</strong>写入时 refCount = 1, compress / replay 删引用时
+      -1, 归 0 24h 后可清理。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>时间用 Date 字符串 ("2024-01-01T00:00:00Z")
+      存盘。
+    </p>
+    <p>
+      <strong>为什么错:</strong>跨时区比较容易出错, 字符串排序不等于时间排序。
+    </p>
+    <p>
+      <strong>正确做法:</strong>内部全部用 epoch ms, IO 边界转 ISO 字符串,
+      内部不允许 Date 字符串。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
 <div class="card card--validation">
   <div class="card__head">
-    <span class="card__tag">Validation</span>
+    <span class="card__tag">Validation · 第 15 章</span>
   </div>
   <div class="card__body">
     <p>
-      <strong>手工 query：</strong>制造大日志和旧 output，运行
-      dry-run，检查计划是否可解释。
+      <strong>原子写不破坏原文件:</strong>fake atomicWriteFile 中断 (rename
+      之前抛错), 跑完后原文件仍然存在且内容完整, tmp 文件可能被 留 (不破坏, 可由
+      cleanup 后续清理)。
     </p>
     <p>
-      <strong>确定性测试：</strong>测试坏 JSON 不污染正式文件，日志超限后轮转。
+      <strong>日志按大小轮转:</strong>fake 写 25MB 日志, 默认 maxFileSize =
+      10MB, 跑完后 <code>app.log</code> 大小 ≤ 10MB, 至少 2 个
+      <code>app.log.N</code> 备份文件存在。
     </p>
     <p>
-      <strong>集成观察：</strong>OutputStore 只能通过 output_id 读取登记输出。
+      <strong>output store 引用计数:</strong>fake 写 3 个 output, refCount
+      分别为 3 / 1 / 0, 跑完 cleanup dryRun, 报告 outputOrphans 含 refCount=0 那
+      1 个, 不含其他。
     </p>
     <p>
-      <strong>失败信号：</strong>清理计划包含长期 Memory，或坏 JSON 让启动崩溃。
+      <strong>cleanup dry-run 不真删:</strong>fake dryRun 返回报告含 5 个文件,
+      run() 之前文件仍在, run(report) 之后文件不在, 报告 标记 deleted 字段 = 5。
+    </p>
+    <p>
+      <strong>时间语义统一为 epoch ms:</strong>memory.set / memory.get updatedAt
+      字段都是 number (不是 string), comparison 用 &lt; / &gt;, 不是
+      localeCompare。
     </p>
   </div>
 </div>
+
+<h2 id="lookback">回望第 00–14 章: 哪些原则在本章兑现了</h2>
 <ul>
-  <li><code>src/atomic-write.test.ts</code> 验证原子写。</li>
-  <li><code>src/llm-logger.test.ts</code> 验证轮转。</li>
-  <li><code>src/output-store.test.ts</code> 验证 output_id。</li>
+  <li>
+    <strong>原子性原则:</strong>所有持久化 IO 走 atomic write, 跨进程安全,
+    断电安全。
+  </li>
+  <li>
+    <strong>不可逆操作必须 dry-run:</strong>cleanup / rotation
+    等会删除数据的操作, 必须先报告, 用户确认后再做。
+  </li>
+  <li>
+    <strong>内部类型稳定:</strong>时间用 epoch ms (number), 字符串只在 IO
+    边界出现, 内部不允许 Date 字符串。
+  </li>
+  <li>
+    <strong>事实与视图分离:</strong>output store 是事实, refCount 是视图,
+    清理是另一个视图, 三者职责清晰分离。
+  </li>
 </ul>
 
-<h2 id="debug">如果实现失败，先查哪里</h2>
-<ul>
-  <li>先分类数据目录。</li>
-  <li>检查 store 读写是否对称。</li>
-  <li>检查清理计划是否 dry-run。</li>
-  <li>检查时间字段是否语义明确。</li>
-</ul>
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>transcript 长期保留</dt>
+  <dd>
+    transcript 数据会随时间累积, 也需要类似的清理策略 (本章不展开, 留给专题章)。
+  </dd>
+  <dt>cleanup 跨进程协调</dt>
+  <dd>多 harness 实例同时跑时, cleanup 需要文件锁防重复删, 留作后续优化。</dd>
+  <dt>output store 跨进程引用</dt>
+  <dd>引用计数在单进程内准确, 跨进程时需要更复杂的分布式锁, 留作后续优化。</dd>
+  <dt>eval 重放的卫生系统</dt>
+  <dd>
+    eval 跑大量 trace 时也会产生大量临时文件, 需要单独的 cleanup 路径,
+    专题章展开。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-15">本次如何 vibe code: 第 15 章的三件套</h2>
+
+<h3 id="vibe-feed-15">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出
+    <code>atomicWriteFile()</code> / <code>logRotation</code> /
+    <code>OutputHandle</code> / <code>Cleanup</code> /
+    <code>timeline</code> 五个模块的 interface。本轮不写实现, 重点钉"原子性 /
+    dry-run / 引用计数 / 时间统一" 四条原则。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 atomic-write / log-rotation /
+    cleanup 三个新模块的 stub, 现有持久化 IO 仍走 fs.writeFile (暂不切换)。本轮
+    review 重点: 新模块工厂化, 现有调用点暂时不破坏。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写五个模块实现 + 把现有持久化 IO
+    切换到 atomic write + output store 加引用计数 + 时间统一为 epoch ms。本轮
+    review 重点: 切换路径走 grep 验证全部持久化 IO 都过 atomic, 时间字段全部
+    number。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写
+    <code>test/hardening.test.ts</code>。本轮 review 重点: "原子写不破坏原文件"
+    和 "cleanup dry-run 不真删" 两条必须有 spy 验证。
+  </li>
+</ol>
+
+<h3 id="vibe-review-15">Review: 第 15 章专属 checklist</h3>
+<ol>
+  <li>
+    <strong>所有持久化 IO 走 atomicWriteFile。</strong>验证:
+    <code>grep -rn 'fs.writeFile\|fs.promises.writeFile' src/</code> 应当 0 行
+    (除 atomic-write.ts 内部)。
+  </li>
+  <li>
+    <strong>cleanup dry-run 不真删。</strong>验证: dryRun() 内部不调 fs.unlink。
+  </li>
+  <li>
+    <strong>output store 引用计数。</strong>验证: refCount 字段在 write /
+    release 路径上变化, dryRun() 过滤 refCount === 0 的孤儿。
+  </li>
+  <li>
+    <strong>时间字段全部 number。</strong>验证:
+    <code>grep -rn 'new Date()' src/</code> 在持久化路径上 (memory / task /
+    schedule 写入) 应当 0 行, timeline.ts 集中转换。
+  </li>
+  <li>
+    <strong>log rotation 不丢日志。</strong>验证: 写日志时先写新文件再 rename
+    旧文件, 不存在"日志写到一半, 旧文件已 rename" 的窗口。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-15">调试: 第 15 章典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · 直接 fs.writeFile 替代 atomicWriteFile。</strong>症状:
+    某次代码提交忘了切路径, 仍然 fs.writeFile。验证:
+    <code>grep -rn 'fs.writeFile' src/</code> 不为 0 行时,
+    跑"原子写不破坏原文件" 测试应当抓到。
+  </li>
+  <li>
+    <strong>伪装 B · cleanup dryRun 内部偷偷 unlink。</strong>症状: dryRun()
+    顺手删了文件, 跑 dryRun 后再 run 找不到文件。验证: Validation 卡片"cleanup
+    dry-run 不真删" 那条测试通过 (run 之前文件存在)。
+  </li>
+  <li>
+    <strong>伪装 C · 时间用 Date 字符串, 不统一。</strong>症状: memory.set 的
+    updatedAt 是 <code>new Date().toISOString()</code>。验证:
+    <code>grep -rn 'toISOString' src/</code> 在持久化写入路径上应当 0 行, 只在
+    UI 渲染路径允许。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-15">迭代: 第 15 章 5 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(ch15): 钉 atomicWriteFile / logRotation / OutputHandle / Cleanup /
+      timeline 五个模块接口</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code
+      >feat(ch15): atomic-write + log-rotation + cleanup 三个模块 stub, 现有 IO
+      不切换</code
+    >
+    —— tsc 通过, stub noop。
+  </li>
+  <li>
+    <code
+      >feat(ch15): 切换所有持久化 IO 到 atomic + output store 引用计数 +
+      时间统一</code
+    >
+    —— 跑通 Validation 卡片前 3 条。
+  </li>
+  <li>
+    <code>feat(ch15): cleanup dry-run + run + 引用计数过滤</code> —— 跑通
+    Validation 卡片后 2 条。
+  </li>
+  <li>
+    <code
+      >test(ch15): 现有持久化路径全部走 atomic (grep 验证) + 时间全部 number
+      (grep 验证)</code
+    >
+    —— 全绿。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 15 章</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>实现 Runtime Hardening, 覆盖原子写、日志轮转、output
+      handle 引用计数、清理 dry-run、时间语义统一五个卫生系统。
+    </p>
+    <p>
+      <strong>场景:</strong>harness 跑一个月, 用户跑 cleanup dryRun, 报告含 5
+      个孤儿 output + 2 个老日志, 用户确认后 run() 删 7 个文件, 释放 50MB。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/atomic-write.ts</code> (新) 暴露
+      <code>atomicWriteFile()</code>; <code>src/log-rotation.ts</code> (新) 暴露
+      <code>createLogRotation(config)</code>;
+      <code>src/output-store.ts</code> (改) 加引用计数 + refCount 字段;
+      <code>src/cleanup.ts</code> (新) 暴露 <code>createCleanup()</code>;
+      <code>src/timeline.ts</code> (改) 统一时间语义为 epoch ms。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>所有持久化 IO 走 atomicWriteFile, 不直接 fs.writeFile</li>
+      <li>cleanup dryRun 不真删, run 之前文件存在</li>
+      <li>output store 引用计数: write 时 refCount = 1, release 时 -1</li>
+      <li>时间字段全部 number (epoch ms), 字符串只在 IO 边界</li>
+      <li>log rotation 不丢日志: 先写新文件再 rename 旧文件</li>
+    </ul>
+    <p><strong>验证 (用 fake IO + spy, 逐条落到 vitest):</strong></p>
+    <ul>
+      <li>fake atomicWriteFile 中断 (rename 前抛错), 原文件仍存在且内容完整</li>
+      <li>
+        fake 写 25MB 日志, 默认 maxFileSize=10MB, app.log ≤ 10MB 且 ≥ 2 个
+        app.log.N 备份
+      </li>
+      <li>
+        fake 写 3 个 output, refCount 3/1/0, dryRun 报告含 refCount=0 那 1 个
+      </li>
+      <li>fake dryRun 返回 5 个文件, run 之前文件存在, run 后文件不存在</li>
+      <li>memory.set / get 的 updatedAt 字段都是 number, 不是 string</li>
+    </ul>
+  </div>
+</div>
 
 <h2 id="practice">本章练习</h2>
-<p>
-  练习：不看 Prompt Card，自己写一段 prompt，让另一个 coding agent 实现本章的
-  Runtime Hardening。写完后对照卡片，看是否遗漏了状态边界、失败模式和测试。
-</p>
+<ol>
+  <li>
+    故意把 memory.set 改回 fs.writeFile (不走 atomic), 跑测试,
+    看"原子写不破坏原文件" 是否抓到。
+  </li>
+  <li>
+    在 dryRun() 内部偷偷 fs.unlink, 跑测试, 看"cleanup dry-run 不真删"
+    是否抓到。
+  </li>
+  <li>
+    把 memory.set 的 updatedAt 改回 <code>new Date().toISOString()</code>,
+    跑测试, 看"时间字段全部 number" 是否抓到 (sort 行为会变)。
+  </li>
+</ol>
 
 <h2 id="summary">本章小结</h2>
 <p>
-  主线教程到这里已经从最小 loop 长成了一个可长期运行的教学
-  agent。接下来两个专题分别讲模型差异和如何测试不确定系统。
+  本章给 harness 加了 Runtime Hardening 卫生系统: 原子写、日志轮转、 output
+  store 引用计数、清理 dry-run、时间语义统一。这五条原则 是 harness
+  长期运行的卫生底线, 任何持久化 IO 都必须遵守。 至此主线教程 16
+  章全部完成。下一专题 (eval) 讨论如何测试一个 不确定的 Coding
+  Agent——构建可重放的 trace 库、判定 LLM 输出 是否"做对"、用 eval 反馈给 prompt
+  优化。
 </p>
 
 <h2 id="next">下一章伏笔</h2>
-<p>专题 A：不同大模型不是只换模型名。</p>
+<p>
+  第 15 章让 harness 在长期运行下保持稳定, 但 LLM 行为是不确定的 —— 同一 prompt
+  跑 10 次, 可能 7 次对、3 次错。专题章 eval 讨论 如何"测试一个不确定的 Coding
+  Agent": 构建可重放的 trace 库 (deterministic LLM stub), 判定 LLM
+  输出是否"做对" (judge prompt), 用 eval 反馈给 prompt 优化 (regression test)。
+</p>

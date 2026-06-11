@@ -1,419 +1,624 @@
 <p class="article__eyebrow">第 02 章 · 让模型提出动作</p>
-<h1 class="article__title">给 Agent 一双手：工具调用</h1>
+<h1 class="article__title">给 Agent 一双手: 工具调用</h1>
 <p class="article__lede">
-  最小 Agent Loop 只能聊天，不能读文件、跑测试或修改代码。这一章把 tool call
-  接进 loop：模型只提出结构化动作请求，真正执行动作的是 harness。
+  第 01 章的 loop 只能聊天。这一章把 tool call 接进 loop: 模型只提出
+  结构化的动作请求, 真正去执行动作的是 harness。这一步是 coding agent 与普通聊天
+  agent 的分水岭: 模型从此可以读文件、跑命令、改代码。
 </p>
 
 <nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
 
 <hr class="rule" />
 
-<h2 id="known-and-unknown">你已经知道什么，还不知道什么</h2>
+<h2 id="delta-from-01">在第 01 章基础上改了什么</h2>
 <p>
-  你已经有了 <code>agent.run(query)</code>、History 和 LLM
-  Client。现在要面对第一个 coding agent
-  的分水岭：模型不能直接碰你的文件系统，它只能通过工具协议说“我想读这个文件”或“我想运行这个命令”。
+  这一章把"LLM 返回文本"扩展为"LLM 可能返回 tool_calls"。loop 主结构不变,
+  只在"调 LLM"和"写 assistant"之间插入"如果 assistant 携带 tool_calls,
+  就执行工具、把 tool result 写回 history, 再回到 loop 头部"这条新分支。
+  对应到代码, 改动集中在 4 个文件: <code>src/llm.ts</code>、
+  <code>src/tools/registry.ts</code>、<code>src/agent.ts</code>、
+  <code>src/history.ts</code>。其他文件不动。
 </p>
-<p>
-  本章不会追求完整工具生态，只实现最小的 bash / read / write / edit / editExact
-  思路。重点是理解 tool schema、tool registry、tool call 和 tool result
-  如何进入同一个 loop。
-</p>
-
-<h2 id="study-path">本章怎么学</h2>
-<p>先从本章场景和朴素方案进入问题，不急着记函数名。</p>
-<p>
-  再用 loop 位置和架构图建立心智模型：新增模块到底改变了哪条数据流或状态流。
-</p>
-<p>
-  最后再看接口、源码地图和验证方法，把概念压缩成能交给 coding agent 的 Prompt
-  Card。
-</p>
-
-<h2 id="scene">本章场景</h2>
-<p>
-  用户输入：“帮我看看 <code>src/agent.ts</code> 里主循环怎么写。”如果 agent
-  只是把这句话交给 LLM，模型只能猜。真正的 coding agent
-  必须先读取文件，再基于观察结果回答。
-</p>
-<p>
-  于是 LLM 返回的不是最终答案，而是一个结构化 tool call：调用
-  <code>run_read</code>，参数是目标路径。Harness 检查权限、执行工具、把 tool
-  result 写回 History，然后再把新 messages 发给 LLM。
-</p>
-
-<h2 id="naive">先试一个朴素方案</h2>
-<p>
-  最朴素的想法是让模型输出一段 shell 命令，然后本地直接执行。比如模型说“cat
-  src/agent.ts”，harness 就调用 shell。这个方案很诱人，因为看起来不需要
-  schema、registry 和参数校验。
-</p>
-<p>
-  但这相当于把你的终端交给了模型。模型生成的文本可能包含危险命令，也可能因为格式不稳定导致解析失败。更糟的是，工具结果没有结构化写回，下一轮模型不知道刚才到底执行了什么。
-</p>
-<pre class="code-block"><code>const answer = await llm.chat(messages);
-const command = extractShell(answer.content);
-const output = await exec(command);
-messages.push({ role: &quot;user&quot;, content: output });</code></pre>
-
-<h2 id="why-naive-fails">朴素方案为什么不够</h2>
-<dl class="defs">
-  <dt>安全边界消失</dt>
-  <dd>
-    自然语言和 shell 字符串混在一起，harness
-    很难稳定判断哪些命令可执行、哪些路径越界、哪些操作需要用户确认。
-  </dd>
-
-  <dt>模型看不到稳定能力菜单</dt>
-  <dd>
-    没有 tool schema 时，模型只能猜工具名字和参数格式。一次叫
-    read_file，下一次叫 cat_file，tool registry 无法可靠匹配。
-  </dd>
-
-  <dt>tool_call / tool_result 无法配对</dt>
-  <dd>
-    LLM 协议要求工具调用和工具结果按顺序成对出现。把输出伪装成普通 user
-    message，会让后续 normalize、compress、replay 都失去事实边界。
-  </dd>
-</dl>
-
-<h2 id="loop">回到 Agent Loop</h2>
-<p>
-  工具调用插在 “LLM 返回后” 和 “下一次 LLM 调用前”。Agent 先把 assistant message
-  写入 History；如果其中包含 tool calls，就逐个查
-  registry、做权限检查、执行工具，再把 tool results 写回 History。
-</p>
-<p>
-  这一步完成后，loop 不结束。Agent 会带着新观察结果再次调用
-  LLM，让模型基于真实文件内容或命令输出生成下一步动作或最终回答。
-</p>
-
-<h2 id="architecture">架构图解</h2>
-<figure class="figure">
-  <div
-    class="flow-map"
-    role="img"
-    aria-label="工具调用接入 Agent Loop 的数据流"
+<div class="source-links" aria-label="本章 GitHub 永久链接">
+  <a
+    class="source-link"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/llm.ts"
+    target="_blank"
+    rel="noreferrer"
+    >1. src/llm.ts: LLM 响应多一个 tool_calls 字段</a
   >
-    <div class="flow-row">
-      <span class="flow-node flow-node--accent">LLM</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">assistant tool_call</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node flow-node--accent">Tool Registry</span>
-    </div>
-    <div class="flow-row">
-      <span class="flow-node flow-node--accent">Permission</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">run_read / run_bash</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">tool_result</span>
-    </div>
-    <div class="flow-row">
-      <span class="flow-node flow-node--accent">History</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">messages with observation</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">LLM</span>
-    </div>
-  </div>
-  <figcaption>
-    图 02-1 · 模型只提出动作，工具执行、权限和结果写回都属于 harness。
-  </figcaption>
-</figure>
-
-<h2 id="from-principle-to-code">从原理落到代码</h2>
-<p>
-  到这里已经有了场景、失败原因和架构图。下面才进入实现层：只抓住接口形状、状态边界和源码入口。
-</p>
-<p>
-  读源码时先找入口函数，再找它读写的状态，最后看测试如何证明这些状态变化是真的发生了。
-</p>
-
-<h2 id="walkthrough">一次真实运行 walkthrough</h2>
-<ol>
-  <li>
-    用户要求解释某个源码文件，REPL 把 query 交给 <code>agent.run()</code>。
-  </li>
-  <li>Agent 写入 user message，并把当前 messages 与工具定义一起发给 LLM。</li>
-  <li>
-    LLM 返回 assistant message，其中包含 <code>run_read</code> 的 tool call。
-  </li>
-  <li>Agent 先把 assistant message 追加到 History，保留模型提出动作的事实。</li>
-  <li>
-    Agent 根据工具名从
-    <code>ToolRegistry</code> 找到实现，并把参数交给对应工具。
-  </li>
-  <li>工具在 projectRoot 边界内读取文件，返回 <code>ToolResult</code>。</li>
-  <li>
-    Agent 把 tool result 追加到 History，形成 tool_call / tool_result 配对。
-  </li>
-  <li>下一轮 LLM 看到文件内容后，才能给出基于事实的解释。</li>
-</ol>
-
-<h2 id="interfaces">关键接口和伪码</h2>
-<p>
-  最关键的接口不是某个具体工具，而是“模型可见 schema”和“harness
-  内部执行函数”的分离。schema 稳定给模型看，handler 稳定给 Agent 调用。
-</p>
-<pre class="code-block"><code>interface ToolDefinition {
-  name: string;
-  description: string;
-  parameters: JsonSchema;
-}
-
-interface ToolHandler {
-  (args: unknown): Promise&lt;ToolResult&gt;;
-}
-
-interface ToolRegistry {
-  definitions(): ToolDefinition[];
-  execute(name: string, args: unknown): Promise&lt;ToolResult&gt;;
-}
-
-while (true) {
-  const assistant = await llm.chat(messages, registry.definitions());
-  history.add(assistant);
-  if (!assistant.toolCalls?.length) return assistant.content;
-
-  for (const call of assistant.toolCalls) {
-    const result = await registry.execute(call.name, call.arguments);
-    history.addToolResult(call.id, result);
-  }
-}</code></pre>
-
-<h2 id="source-map">源码地图</h2>
-<p>
-  读源码时不要先陷进每个文件工具的所有细节。先看 registry 如何稳定注册工具，再看
-  Agent 如何在 tool call 和 tool result 之间保持消息顺序。
-</p>
-<div class="source-links" aria-label="02 章源码阅读路线">
   <a
     class="source-link"
     href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/tools/registry.ts"
     target="_blank"
     rel="noreferrer"
+    >2. src/tools/registry.ts: 工具注册表 (新文件)</a
   >
-    <code>src/tools/registry.ts</code> · 工具注册表和稳定顺序
-  </a>
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/tools/bash.ts"
-    target="_blank"
-    rel="noreferrer"
-  >
-    <code>src/tools/bash.ts</code> · bash 工具与命令安全边界
-  </a>
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/tools/files.ts"
-    target="_blank"
-    rel="noreferrer"
-  >
-    <code>src/tools/files.ts</code> · 文件读写编辑工具与 projectRoot 限制
-  </a>
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/tools/types.ts"
-    target="_blank"
-    rel="noreferrer"
-  >
-    <code>src/tools/types.ts</code> · ToolResult 的共享形状
-  </a>
   <a
     class="source-link"
     href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/agent.ts"
     target="_blank"
     rel="noreferrer"
+    >3. src/agent.ts: 主体循环加 tool call 分支</a
   >
-    <code>src/agent.ts</code> · tool call 执行循环
-  </a>
   <a
     class="source-link"
-    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/tools/registry.test.ts"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/history.ts"
     target="_blank"
     rel="noreferrer"
+    >4. src/history.ts: 新增 tool message 写入</a
   >
-    <code>src/tools/registry.test.ts</code> · 重复注册和过滤测试
-  </a>
 </div>
 
-<h2 id="design">设计直觉</h2>
-<p>
-  Tool Registry 是 agent 的“手册柜台”：模型只知道菜单，Agent
-  只通过柜台执行动作。这个边界让工具名、参数
-  schema、权限检查和执行结果都能被测试。
-</p>
-<p>
-  工具结果不是给用户看的日志，而是下一轮 LLM 的观察材料。它必须进入
-  History，且必须以 tool result
-  的身份进入，否则后续压缩、回放和错误恢复都会失去结构。
-</p>
-
-<h2 id="split">架构拆分</h2>
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
 <dl class="defs">
-  <dt>tools/*</dt>
-  <dd>每个工具模块只关心自己的参数校验、业务执行和 ToolResult 输出。</dd>
-
-  <dt>ToolRegistry</dt>
+  <dt>想清楚现象</dt>
   <dd>
-    集中维护工具名、schema、handler 和过滤规则，保证模型看到的工具顺序稳定。
+    用户问"项目里主循环怎么写", 01 章的 agent 只能回"我看不到你的项目"。 真正的
+    coding agent 必须先读文件, 再把文件内容拼到下一轮 LLM 请求里。 现象是"agent
+    需要在 loop 内中途插入一次外部世界访问"。
   </dd>
-
-  <dt>Agent Loop</dt>
+  <dt>想反例</dt>
   <dd>
-    负责识别 assistant tool calls、执行工具、把 tool results 写回 History
-    并继续下一轮。
+    最朴素的反例是"让模型输出 shell 命令, harness 用 <code>exec()</code> 跑"。
+    这有两个致命问题: 一是模型生成的文本和 shell 语法混在一起, harness
+    无法稳定判断哪些命令安全; 二是工具结果伪装成 user message, 多轮
+    之后模型搞不清"上一轮到底执行了什么"。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口: <code>interface Tool { name, schema, execute(args) }</code>;
+    工具注册表暴露 <code>register(tool)</code> 和 <code>get(name)</code>。
+    不变量三条: (1) tool call 与 tool result 必须配对出现, (2) tool 名称稳定,
+    不会因 LLM 自由发挥改名, (3) tool result 写入 history 时 role 必须是
+    <code>"tool"</code>, 不能伪装成 user。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake LLM 预设返回
+    <code
+      >{ role: "assistant", content: "", tool_calls: [{ id: "1", name:
+      "read_file", args: {path:"a.ts"} }] }</code
+    >, 跑完一轮后断言 history 里出现 role 为 <code>"tool"</code> 的消息, 且
+    <code>tool_call_id</code> 与 assistant 的 tool_calls.id 一一对应。
   </dd>
 </dl>
 
-<h2 id="state-boundary">状态与边界</h2>
-<dl class="defs">
-  <dt>进入 LLM messages</dt>
-  <dd>工具定义、assistant tool_call、tool_result 的可见内容。</dd>
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
 
-  <dt>不直接暴露给 LLM</dt>
-  <dd>本地绝对路径、内部 handler、权限实现细节和未登记的大输出文件。</dd>
-
-  <dt>session-local</dt>
-  <dd>本轮工具调用顺序和临时执行结果；后续 Transcript 会记录审计事实。</dd>
-</dl>
-
-<h2 id="prompt">Prompt Card</h2>
-<div class="card card--prompt">
-  <div class="card__head">
-    <span class="card__tag">Prompt Card</span>
-    <button class="card__copy" data-copy-card>复制</button>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>目标：</strong>实现最小工具调用闭环，让 agent 能通过
-      run_bash/run_read/run_write/run_edit/run_edit_exact 观察和修改项目。
-    </p>
-    <p>
-      <strong>场景：</strong>用户要求读取文件或运行测试时，模型必须先提出结构化
-      tool call，再由 harness 执行并写回 tool result。
-    </p>
-    <p>
-      <strong>模块：</strong>新增
-      tools/registry.ts、tools/types.ts、tools/bash.ts、tools/files.ts，并扩展
-      agent.ts 的 tool call 分支。
-    </p>
-    <p>
-      <strong>接线：</strong>在 composition root 创建一次
-      ToolRegistry，把工具定义传给 LLM，把 registry 注入 Agent。
-    </p>
-    <p>
-      <strong>边界：</strong>不要绕过 registry
-      执行模型生成的自然语言命令；文件工具必须限制在 projectRoot。
-    </p>
-    <p>
-      <strong>例外和 corner case：</strong
-      >未知工具、非法参数、路径越界、工具抛错、大输出都要变成可恢复 ToolResult。
-    </p>
-    <p>
-      <strong>验证：</strong>用 fake LLM 触发 tool call，断言
-      tool_call/tool_result 顺序、路径拒绝和工具不存在错误。
-    </p>
-    <p>
-      <strong>源码入口：</strong
-      >src/agent.ts、src/tools/registry.ts、src/tools/files.ts、src/tools/bash.ts。
-    </p>
-    <p>
-      <strong>文档同步：</strong>更新 summary 和教程章节，说明工具是 harness
-      动作，不是模型自己执行。
-    </p>
-  </div>
+<div class="note">
+  <p class="note__title">观察 1 · 把工具结果伪装成 user 消息</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+const answer = await llm.chat(messages);
+const command = extractShell(answer.content);
+const output = await exec(command);
+messages.push({ role: "user", content: output });</code></pre>
+  <p><strong>问:</strong>看上去比 tool call 简洁, 为什么仍然不行?</p>
+  <p>
+    <strong>答:</strong>三件事同时坏掉 —— 协议层: LLM 协议要求 tool_call 与 tool
+    result 配对, 伪装成 user 之后, 后续 normalize / compress / replay
+    全失事实边界; 安全层: harness 拿不到 tool name, 没法做 permission 检查,
+    危险命令全靠肉眼拦; 体验层: 模型下一次被告知 "刚才执行了 X",
+    它无法判断这是"自己请求的工具"还是"用户塞进来的 文本", 推理时会犹豫。
+  </p>
 </div>
 
-<h2 id="trap">容易踩坑</h2>
+<div class="note">
+  <p class="note__title">观察 2 · 工具表用 if/else 分发</p>
+  <pre class="code-block"><code>// 教学简化版
+if (toolName === "read_file") return readFile(args);
+if (toolName === "bash") return runBash(args);
+if (toolName === "edit") return applyEdit(args);
+// ...</code></pre>
+  <p><strong>问:</strong>为什么不直接写 if/else, 而要单独搞一个 registry?</p>
+  <p>
+    <strong>答:</strong>if/else 在小规模能跑, 一旦工具数到 10+ 就出现 三个问题:
+    (1) 没法在工具描述里统一暴露给 LLM, (2) 测试时无法 mock 单个工具, (3)
+    第三方工具 (例如 MCP server) 没有挂载点。 registry
+    把"工具是什么"和"工具怎么用"解耦, 后续 skill / subagent / permission
+    都要复用它。
+  </p>
+</div>
+
+<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export interface ToolCall {
+  id: string;
+  name: string;
+  args: Record&lt;string, unknown&gt;;
+}
+
+export interface ToolResult {
+  toolCallId: string;
+  content: string;
+  error?: string;
+}
+
+export interface Tool {
+  name: string;
+  description: string;
+  schema: JSONSchema;  // 给 LLM 看的参数形状
+  execute(args: Record&lt;string, unknown&gt;): Promise&lt;ToolResult&gt;;
+}
+
+export interface ToolRegistry {
+  register(tool: Tool): void;
+  get(name: string): Tool | undefined;
+  list(): Tool[];
+}
+
+// LLM 响应增加 tool_calls 字段
+export interface AssistantMessage {
+  role: "assistant";
+  content: string;
+  tool_calls?: ToolCall[];
+}</code></pre>
+
+<h2 id="delta-loop">loop 路径: 与第 01 章的关系</h2>
+<p>
+  第 01 章的 loop 是"调 LLM → 写 assistant → 返回"。这一章把它扩展成 "调 LLM →
+  如果有 tool_calls 就执行工具 → 写 tool result → 回到头部再 调 LLM"。如果
+  assistant 没有 tool_calls, 行为退化为第 01 章。
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+async function run(query: string): Promise&lt;string&gt; {
+  history.add({ role: "user", content: query });
+
+  for (;;) {
+    const messages = history.getMessages();
+    const assistant = await llm.chat(messages);
+    history.add(assistant);
+
+    // 第 02 章新增: 如果 assistant 携带 tool_calls, 执行并继续
+    if (!assistant.tool_calls || assistant.tool_calls.length === 0) {
+      return assistant.content;
+    }
+
+    for (const call of assistant.tool_calls) {
+      const tool = registry.get(call.name);
+      if (!tool) {
+        history.add({ role: "tool", tool_call_id: call.id,
+                       content: `Error: Unknown tool "${call.name}"` });
+        continue;
+      }
+      const result = await tool.execute(call.args);
+      history.add({ role: "tool", tool_call_id: call.id, content: result.content });
+    }
+    // 继续 loop, 让 LLM 看到 tool result
+  }
+}</code></pre>
+<p>
+  注意三点: (1) tool message 永远带 <code>tool_call_id</code>, 协议要求它 与对应
+  assistant.tool_calls[].id 配对; (2) 即使工具抛错, 也要写一条 tool message,
+  不能让 messages 在协议层断裂; (3) loop 终止条件是 "assistant 不再携带
+  tool_calls", 而不是"工具全部成功"。
+</p>
+
+<h2 id="registry">工具注册表: 把"工具是什么"和"工具怎么用"解耦</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export function createToolRegistry(): ToolRegistry {
+  const tools = new Map&lt;string, Tool&gt;();
+  return {
+    register(tool) { tools.set(tool.name, tool); },
+    get(name) { return tools.get(name); },
+    list() { return Array.from(tools.values()); },
+  };
+}
+
+// 注册一个 read_file 工具
+registry.register({
+  name: "read_file",
+  description: "读取项目内文件的文本内容",
+  schema: {
+    type: "object",
+    properties: { path: { type: "string" } },
+    required: ["path"],
+  },
+  async execute(args) {
+    const path = String(args["path"]);
+    const content = await fs.readFile(path, "utf8");
+    return { toolCallId: "", content };
+  },
+});</code></pre>
+<p>
+  这一段把工具的"身份证"集中起来: name 给 LLM 看, schema 给 LLM 校验 参数,
+  execute 给 harness 真正执行。第 07 章 permission 会复用 schema
+  做"参数级权限判断", 第 10 章 prompt cache 会复用 name + description
+  做"工具描述前缀稳定性"。这些都是为什么 registry 不是 if/else 的原因。
+</p>
+
+<h2 id="llm-adapter">LLM 适配: 不同模型的 tool call 协议不一样</h2>
+<p>
+  OpenAI / Anthropic / Google 的 tool call 字段名、参数序列化方式、 tool result
+  写入约定都不完全一致。这一层细节全部收敛在
+  <code>src/llm-adapter.ts</code> 里 (你会在仓库里看到这个文件)。 本教程假设
+  <code>createLlm()</code> 内部已经统一好了, 暴露给 agent 的就是上面的
+  <code>AssistantMessage</code> 形态。
+</p>
+
+<h2 id="trap">反例梯度</h2>
+
 <div class="card card--trap">
   <div class="card__head">
-    <span class="card__tag">Design Trap</span>
+    <span class="card__tag">新手错法 · A</span>
   </div>
   <div class="card__body">
-    <p><strong>常见错误：</strong>把模型输出的 shell 文本直接执行。</p>
+    <p><strong>常见错误:</strong>用 if/else 分发工具, 不写 registry。</p>
     <p>
-      <strong>为什么错：</strong
-      >自然语言不是稳定协议，无法可靠做权限、参数、审计和回放。
+      <strong>为什么错:</strong>小规模能跑, 工具数到 10+
+      后无法测试、无法扩展、无法暴露给 LLM。
     </p>
     <p>
-      <strong>正确做法：</strong>模型只能返回结构化 tool call；所有执行都经过
-      registry 和权限层。
-    </p>
-    <p>
-      <strong>怎么验证：</strong>测试未知工具和路径越界时，Agent 应返回
-      tool_result 错误而不是崩溃或执行危险命令。
+      <strong>正确做法:</strong>本章已示范, registry 是 harness 复用同一份 tool
+      列表的基础设施。
     </p>
   </div>
 </div>
-<ul>
-  <li>工具名随意变化会破坏模型习惯，也会让测试难以稳定。</li>
-  <li>
-    tool_result 不能插入到错误位置，否则后续消息标准化会被迫修复甚至无法修复。
-  </li>
-  <li>文件工具必须先 normalize 路径再检查边界，不能只做字符串前缀判断。</li>
-</ul>
 
-<h2 id="validate">如何验证</h2>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>工具抛错时, 不写 tool message, 直接抛给上层。
+    </p>
+    <p>
+      <strong>为什么错:</strong>messages 序列断裂, LLM 协议拒绝接受。下一次 LLM
+      调用会报 "missing tool_result" 错, 而且无法恢复。
+    </p>
+    <p>
+      <strong>正确做法:</strong>try/catch 包住 execute, 出错时写一条
+      <code>{role:"tool", content:"Error: ..."}</code>。错误也是信息, 必须让 LLM
+      看到。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>tool message 不带 <code>tool_call_id</code>,
+      或者 <code>id</code> 用自增整数生成。
+    </p>
+    <p>
+      <strong>为什么错:</strong>多工具并行调用时, 整数 id 无法对应到具体哪个
+      tool_call, 协议层会拒绝接受。
+    </p>
+    <p>
+      <strong>正确做法:</strong>用 LLM 在 tool_calls 里返回的
+      <code>id</code> 字符串原样回写, 不要重新生成。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>把权限检查写在工具 execute 内部。</p>
+    <p>
+      <strong>为什么错:</strong>权限是 harness 决策, 不是工具职责。写进 execute
+      后, 第 07 章 permission 模块无法统一拦截, 第三方工具 (例如 MCP)
+      也无法复用同一套规则。
+    </p>
+    <p>
+      <strong>正确做法:</strong>权限检查在 agent 主循环里, 工具 execute
+      假定输入已经过校验。本章先放空, 第 07 章会展开。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
 <div class="card card--validation">
   <div class="card__head">
-    <span class="card__tag">Validation</span>
+    <span class="card__tag">Validation · 第 02 章</span>
   </div>
   <div class="card__body">
     <p>
-      <strong>手工 query：</strong>让 agent
-      读取一个存在文件、读取一个不存在文件、尝试读取 ../AGENTS.md 之外路径。
+      <strong>tool_call 触发执行:</strong>fake LLM 返回携带
+      <code>tool_calls: [{name:"read_file", args:{path:"a.ts"}}]</code>
+      的 assistant, 跑完后 history 末尾出现 <code>role: "tool"</code>
+      消息, 且 content 是文件内容。
     </p>
     <p>
-      <strong>确定性测试：</strong>fake LLM 返回固定 tool call，测试 Agent
-      是否执行 registry 并继续下一轮。
+      <strong>tool_call_id 配对:</strong>fake LLM 返回 2 个 tool_calls, 跑完后
+      history 出现 2 条 tool message, 它们的
+      <code>tool_call_id</code> 严格对应到 assistant.tool_calls[0/1].id。
     </p>
     <p>
-      <strong>集成观察：</strong>运行 files/bash/registry/agent
-      相关测试，观察工具错误是否回到 LLM 可见消息。
+      <strong>工具抛错仍写 tool message:</strong>fake registry 在 execute
+      内抛错, 跑完后 history 仍有 <code>role: "tool"</code> 消息, content 以
+      "Error: " 开头。
     </p>
     <p>
-      <strong>失败信号：</strong>模型直接输出命令文本却被执行，或 tool_result
-      没有对应 tool_call。
+      <strong>loop 终止条件:</strong>fake LLM 第一轮带 tool_calls, 第二轮 不带,
+      跑完后 <code>agent.run()</code> 恰好返回第二轮 assistant 的 content,
+      没有第三轮。
+    </p>
+    <p>
+      <strong>未知工具不崩:</strong>fake LLM 返回 <code>name: "不存在"</code>,
+      跑完后 history 末尾有 tool message, content 提示 "Unknown tool", agent
+      不抛异常, 第二轮 LLM 看到错误并改用其他工具。
     </p>
   </div>
 </div>
+
+<h2 id="debug">如果实现失败, 先查哪里</h2>
+<ol>
+  <li>
+    <strong>LLM 报 "missing tool_result":</strong>看 tool execute 抛错时是否写了
+    tool message, 或者是否漏写了 <code>role: "tool"</code>。
+  </li>
+  <li>
+    <strong>工具从未执行:</strong>看
+    <code>assistant.tool_calls</code> 解析是否被丢, fake LLM 返回时是否带
+    <code>tool_calls</code> 字段。
+  </li>
+  <li>
+    <strong>loop 死循环:</strong>看终止条件。fake LLM 永远返回同一个 tool_call,
+    loop 会一直转; 测试时务必预设两轮不同响应。
+  </li>
+  <li>
+    <strong>tool_call_id 对不上:</strong>看是否用了自增整数, 应严格用 LLM
+    返回的字符串 id。
+  </li>
+  <li>
+    <strong>工具 execute 读不到 schema:</strong>registry.get(name) 返回
+    undefined, 检查 name 是否一致, schema 是否完整。
+  </li>
+</ol>
+
+<h2 id="lookback">回望第 00–01 章: 哪些原则在本章兑现了</h2>
 <ul>
   <li>
-    <code>src/tools/files.test.ts</code> 覆盖 read/write/edit/editExact
-    的成功和拒绝路径。
+    <strong>术语锁定:</strong><code>tool call</code> /
+    <code>tool result</code> / <code>tool registry</code> 在第 00 章 6
+    词里没出现, 首次出现于本章, 之后只用英文。
   </li>
-  <li><code>src/tools/bash.test.ts</code> 覆盖危险命令和命令输出。</li>
   <li>
-    <code>src/agent.test.ts</code> 覆盖 tool call 进入 loop 后的消息顺序。
+    <strong>Composition Root 唯一接线:</strong>registry 在
+    <code>index.ts</code> 创建, 通过 deps 注入 agent; agent.ts 内不 new
+    registry。
+  </li>
+  <li>
+    <strong>共享实例:</strong>同一个 registry 实例被 agent 和 permission 共享,
+    不会因为新建两次导致"工具列表不一致"。
+  </li>
+  <li>
+    <strong>fake LLM 顺序断言:</strong>本章所有 Validation 都基于 fake LLM,
+    不依赖真实模型, 跑得快、断言准。
   </li>
 </ul>
 
-<h2 id="debug">如果实现失败，先查哪里</h2>
-<ul>
-  <li>先看 LLM 返回的是不是结构化 tool call，而不是普通文本。</li>
-  <li>再看 registry 是否注册了同名工具，名称大小写是否一致。</li>
-  <li>检查 tool result 是否带着正确 call id 写回 History。</li>
-  <li>路径问题先看 projectRoot 和 normalize 后的绝对路径。</li>
-</ul>
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>工具多到装不下</dt>
+  <dd>第 05 章 Skill 会解决"按需加载工具子集", 本章的 registry 是它的底座。</dd>
+  <dt>危险命令要拦</dt>
+  <dd>
+    第 07 章 Permission 会在 execute 之前同步拦截, 本章把 execute
+    假定为"已校验"是为了让权限模块能复用同一个 registry。
+  </dd>
+  <dt>工具结果太长</dt>
+  <dd>
+    第 06 章 Compress 会处理"tool result 太大撑爆 context" 的问题, tool message
+    是它的主要压缩对象之一。
+  </dd>
+  <dt>工具结果要审计</dt>
+  <dd>
+    第 08 章 Hook 会在 tool execute 前后插入"事实记录", transcript 会单独留底,
+    不与 history 混。
+  </dd>
+  <dt>子智能体用工具</dt>
+  <dd>
+    第 04 章 SubAgent 会让第二个 agent 复用同一份 registry, 但暴露工具子集。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-02">本次如何 vibe code: 第 02 章的三件套</h2>
+
+<h3 id="vibe-feed-02">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。只贴 "目标 + 场景 + 模块", 让 LLM 给出
+    <code>Tool</code> / <code>ToolRegistry</code> / <code>ToolCall</code> /
+    <code>ToolResult</code> 4 个 interface 的草案, 以及
+    <code>AssistantMessage</code> 增加
+    <code>tool_calls</code> 字段的形态。本轮不写实现, 只钉形状与命名。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。贴 "模块 + 接线", 让 LLM 给出
+    <code>index.ts</code> 接线代码, 其中
+    <code>createToolRegistry</code> 是空实现, agent.run 仍然只走第 01
+    章的"返回文本"路径。本轮 review 重点: registry 实例是否在
+    <code>index.ts</code> 只 new 一次。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。贴 "边界 (5 条 checklist)", 让 LLM 按
+    checklist 写 agent 主循环加 tool call 分支、写 read_file 工具、写 tool
+    message 写入 history。本轮 review 重点: tool_call_id 是否原样回写,
+    错误是否仍然写 tool message。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。贴 "验证 (5 条 vitest 断言)", 让 LLM 写
+    <code>test/agent.tool.test.ts</code>。本轮 review 重点: fake LLM
+    是否预设两轮响应 (第一轮带 tool_calls, 第二轮不带), 否则 loop 不会终止。
+  </li>
+</ol>
+
+<h3 id="vibe-review-02">Review: 第 02 章专属 checklist</h3>
+<ol>
+  <li>
+    <strong>tool_call_id 严格来自 LLM。</strong>代码中不得出现
+    <code>const id = String(counter++)</code> 这种自增 id。验证:
+    <code>grep -n 'counter\|nanoid\|uuid' src/agent.ts</code> 应当 0 行。
+  </li>
+  <li>
+    <strong>tool message role 必为 "tool"。</strong>不出现
+    <code>role: "user"</code> 伪装成工具结果。验证:
+    <code>grep -n 'role: "user"' src/agent.ts</code> 在 tool 执行路径上为 0 行
+    (非 tool 路径仍可写 user message)。
+  </li>
+  <li>
+    <strong>未知工具不抛异常。</strong>写一条 tool message 提示 "Unknown tool",
+    继续 loop。验证: Validation 卡片"未知工具不崩"那条断言要落到测试里。
+  </li>
+  <li>
+    <strong>permission 没写在 execute 内。</strong>第 07 章会补, 本章的 execute
+    应当是"裸"实现, 不读 process.env, 不读白名单。验证:
+    <code>grep -n 'process.env\|whitelist' src/tools/read_file.ts</code> 应当 0
+    行。
+  </li>
+  <li>
+    <strong>registry 是工厂不是单例。</strong>复用第 01 章的检查:
+    <code>grep -n 'export const registry' src/</code> 应当 0 行。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-02">调试: 第 02 章典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · 工具执行了但 messages 没增长。</strong>症状: tool execute
+    输出在终端能看到, 但 fake LLM 第二次收到的 messages 不含 tool message。验证:
+    Validation 卡片"tool_call 触发执行"那条断言, 必须断言
+    <code
+      >history.getMessages().filter(m =&gt; m.role === "tool").length ===
+      1</code
+    >, 而不只是断言最终文本。
+  </li>
+  <li>
+    <strong>伪装 B · tool_call_id 用函数参数名伪装。</strong>症状: 代码里写
+    <code>tool_call_id: call.name</code>, 看着对, 实际错。验证: LLM 返回的
+    <code>call.id</code> 应当是字符串 (例如 "call_abc123"), 不是工具函数名。grep
+    一次 <code>tool_call_id:</code> 看取的是哪个字段。
+  </li>
+  <li>
+    <strong>伪装 C · 把权限检查塞进工具 execute。</strong>症状: read_file 工具内
+    <code>if (path.startsWith("/")) throw new Error(...)</code
+    >。这等于把"路径必须项目内"这条硬规则焊在 read_file 里, 后续 edit / write
+    工具又会重复写一遍。验证: 第 07 章会统一收口, 本章的 execute 内禁止出现 if
+    守卫 (除了参数解析)。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-02">迭代: 第 02 章 5 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(ch02): 钉 Tool / ToolRegistry / AssistantMessage.tool_calls
+      接口</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code>feat(ch02): createToolRegistry 工厂 + read_file 工具 stub</code> ——
+    tsc 通过, agent.run 仍未走 tool 分支。
+  </li>
+  <li>
+    <code>feat(ch02): agent.run 加 tool call 分支, 写 tool message</code> ——
+    跑通 Validation 卡片前 3 条 (触发执行 / id 配对 / 错误仍写 tool message)。
+  </li>
+  <li>
+    <code>feat(ch02): loop 终止条件 + 未知工具降级</code> —— 跑通 Validation
+    卡片后 2 条 (终止条件 / 未知工具不崩)。
+  </li>
+  <li>
+    <code>test(ch02): 5 条 Validation 全部 vitest 通过</code> —— 全绿, commit
+    message 引用 5 个 Validation ID。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 02 章</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>把 tool call 接进 agent loop,
+      让模型可以读文件、跑命令、改代码。
+    </p>
+    <p>
+      <strong>场景:</strong>用户输入 "帮我读 src/agent.ts", agent 第一轮让 LLM
+      返回 tool_call=read_file, 跑完工具后第二轮 LLM 基于文件内容回答。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/llm.ts</code> 暴露
+      <code>chat()</code> 解析 tool_calls;
+      <code>src/tools/registry.ts</code> (新) 暴露
+      <code>createToolRegistry()</code>;
+      <code>src/tools/read_file.ts</code> (新) 实现 read_file 工具;
+      <code>src/agent.ts</code> 主循环加 tool call 分支;
+      <code>src/history.ts</code> 接受 role: "tool" 消息。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>
+        tool message 必带 <code>tool_call_id</code>, id 来自 LLM 返回,
+        不重新生成
+      </li>
+      <li>
+        工具 execute 抛错时仍然写一条 <code>role: "tool"</code> 消息, content 以
+        "Error: " 开头
+      </li>
+      <li>未知工具不抛异常, 写一条提示消息后继续 loop</li>
+      <li>execute 内不读 process.env, 不写权限检查 (留给第 07 章)</li>
+      <li>assistant 没有 tool_calls 时, 行为退化为第 01 章 (返回 content)</li>
+    </ul>
+    <p><strong>验证 (用 fake LLM + fake registry, 逐条落到 vitest):</strong></p>
+    <ul>
+      <li>
+        fake LLM 第一轮返回带 tool_calls 的 assistant, 第二轮返回纯文本,
+        agent.run 返回第二轮 content
+      </li>
+      <li>tool_call_id 严格等于 assistant.tool_calls[N].id</li>
+      <li>
+        fake registry.execute 抛错时, history 末尾仍有
+        <code>role: "tool"</code> 消息
+      </li>
+      <li>
+        fake LLM 返回 name: "不存在", history 末尾有提示消息, agent.run 不抛
+      </li>
+      <li>
+        2 个 tool_calls → 2 条 tool message, 顺序按 assistant.tool_calls 顺序
+      </li>
+    </ul>
+  </div>
+</div>
 
 <h2 id="practice">本章练习</h2>
-<p>
-  不看 Prompt Card，自己写一段任务 prompt：只实现 read/write 两个工具，要求
-  agent 能通过 fake LLM
-  读取文件并回答。然后对照本章卡片补齐你遗漏的权限和错误路径。
-</p>
+<ol>
+  <li>故意把 tool_call_id 改写成自增整数, 跑测试, 看哪条 Validation 抓到。</li>
+  <li>
+    在 agent.run 里加
+    <code
+      >if (assistant.tool_calls.length &gt; 0) throw new Error("no tools")</code
+    >, 跑测试, 看是否被 Validation 卡片"未知工具不崩"抓到。
+  </li>
+  <li>
+    把 read_file 工具换成 write_file, 写一段故意不写 tool message 的代码,
+    跑测试, 看是否被"工具抛错仍写 tool message"抓到。
+  </li>
+</ol>
 
 <h2 id="summary">本章小结</h2>
 <p>
-  本章让 agent
-  第一次拥有“手”。但这双手还没有工作节奏：遇到一个多步骤任务时，它可能知道能读写文件，却不知道如何持续维护计划。
+  本章把 loop 从"调 LLM → 返回文本"扩展成"调 LLM → 可能有 tool_calls → 执行工具
+  → 写 tool result → 再调 LLM"。tool call 是 harness 与 LLM 协作的核心协议,
+  一旦接上, coding agent 就能读文件、改代码、跑命令。 下一章 (第 03 章) 我们会在
+  loop 上加一层"计划"——TODO Manager, 让多轮执行有节奏。
 </p>
 
 <h2 id="next">下一章伏笔</h2>
 <p>
-  下一章引入 TODO Manager，让 agent
-  在多轮执行中显式维护短期计划，而不是只靠自然语言说“我接下来会做”。
+  第 02 章的 loop 仍然没有节奏: 模型可以一次调 10 个工具, 也可以
+  一直调下去不结束。第 03 章 TODO Manager 给 loop 加一个"工作清单",
+  模型每轮开始前能看到当前 TODO 状态, 每轮结束后可以更新 TODO。 这是给 harness
+  加"自我规划"能力的第一步。
 </p>

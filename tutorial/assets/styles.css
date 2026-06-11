@@ -655,6 +655,85 @@ mark {
   color: inherit;
 }
 
+/* ============================================================
+   代码块语法高亮 (TS/JS, 暖色调适配)
+   ------------------------------------------------------------
+   6 类 token 的色板针对深色 code-block 调过对比度。
+   不引入 highlight.js, 由 assets/app.js 里的高亮器生成 <span>。
+   ============================================================ */
+
+.code-block .tok-keyword {
+  color: #d99a6b; /* 关键字: 暖橙, 与正文 accent 同色系 */
+  font-weight: 500;
+}
+
+.code-block .tok-string {
+  color: #b5c98d; /* 字符串: 暖绿, 与注释同色系但更亮 */
+}
+
+.code-block .tok-number {
+  color: #d8b26e; /* 数字: 暖琥珀 */
+}
+
+.code-block .tok-comment {
+  color: #8a8275; /* 注释: 暖灰 */
+  font-style: italic;
+}
+
+.code-block .tok-type {
+  color: #d6a4c4; /* 类型 / 接口: 暖粉紫, 与 accent 形成色相平衡 */
+}
+
+/* ============================================================
+   Reference 章术语表 / Validation 速查 表格
+   ------------------------------------------------------------
+   Reference 章把整套教程的术语和 Validation 卡片收束成表格。
+   表格风格遵循暖米主题: 浅色 header、米色行底、左对齐 code 字体。
+   ============================================================ */
+
+.terms {
+  width: 100%;
+  border-collapse: collapse;
+  margin: var(--space-5) 0;
+  font-size: var(--text-sm);
+}
+
+.terms th,
+.terms td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border-soft);
+  text-align: left;
+  vertical-align: top;
+}
+
+.terms th {
+  background: var(--color-bg-soft);
+  color: var(--color-text-muted);
+  font-weight: 600;
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.terms td code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.terms tbody tr:hover {
+  background: var(--color-bg-soft);
+}
+
+@media (max-width: 900px) {
+  .terms {
+    font-size: var(--text-xs);
+  }
+  .terms th,
+  .terms td {
+    padding: var(--space-2);
+  }
+}
+
 .figure {
   margin: var(--space-6) 0;
 }

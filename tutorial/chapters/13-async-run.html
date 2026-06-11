@@ -1,341 +1,580 @@
 <p class="article__eyebrow">第 13 章 · 不阻塞主循环</p>
-<h1 class="article__title">不阻塞主循环：Async Run</h1>
+<h1 class="article__title">后台跑长任务: Async Run</h1>
 <p class="article__lede">
-  有些命令、子任务或分析需要后台执行。Async Run 让 agent
-  启动非阻塞运行实例，同时继续与用户对话。
+  前面十二章让 harness 在单次会话内能聊天、调工具、跑子任务、压缩、拦权限、 留
+  hook、记 memory、cache 友好、recovery、记 task。但 harness 内部如果 要"跑 5
+  分钟测试" 这种长任务, 仍然会阻塞主 loop, 用户只能干等。 这一章给 harness 加
+  Async Run 模块, 让 agent.run() 内部启动后台任务, 主 loop 继续等用户输入,
+  后台任务完成时通过 reminder 通知 LLM。
 </p>
 
 <nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
 
 <hr class="rule" />
 
-<h2 id="known-and-unknown">你已经知道什么，还不知道什么</h2>
+<h2 id="delta-from-12">在第 12 章基础上改了什么</h2>
 <p>
-  你已经有同步工具和 SubAgent。Async Run 不是长期 Task，也不是
-  Schedule，它是当前运行期里的后台执行实例。
+  这一章在 agent.run() 主循环里加 async run 工具 (<code>run_async</code>)。 当
+  LLM 决定要跑长任务时, 调 <code>run_async</code>, harness 把任务 派发到后台
+  worker (不阻塞主 loop), 返回 run_id; 主 loop 继续, 下一次 LLM 调用前, harness
+  把已完成的 async run 输出作为 reminder 注入, LLM 看到结果后决定下一步。
+  对应到代码, 改动集中在 3 个文件: <code>src/async-runs.ts</code> (新)、
+  <code>src/tools/run_async.ts</code> (新)、<code>src/agent.ts</code> (改 每轮
+  LLM 调用前 drain 通知)。
 </p>
-<p>
-  读这一章时请把注意力放在 agent loop 的接入点：工具执行层启动后台实例，结果通过
-  notification/reminder 回到后续
-  turn。代码片段只服务于理解架构边界，不要求你逐行背实现。
-</p>
-
-<h2 id="study-path">本章怎么学</h2>
-<p>先把自己放进一个真实 query：没有 Async Run 时，当前 agent 会在哪里卡住。</p>
-<p>
-  再故意设计一个朴素方案，观察它如何破坏
-  loop、状态或安全边界。这个失败比“正确答案”更重要，因为它能帮你写出更好的重建
-  prompt。
-</p>
-<p>
-  最后才看实现：先看图和数据流，再看少量接口、源码入口和验证方法。读完后，你应该能用自己的话描述
-  Async Run 的职责，而不是只记住文件名。
-</p>
-
-<h2 id="scene">本章场景</h2>
-<p>
-  用户说：“先跑完整测试，期间帮我继续看权限代码。”完整测试可能跑很久，主 agent
-  不应该卡住等待。
-</p>
-<p>
-  Async Run 让 agent 启动一个后台命令或子智能体，返回 run_id；之后可以
-  check/list/readOutput，并在完成时通过 reminder 通知主 loop。
-</p>
-
-<h2 id="naive">先试一个朴素方案</h2>
-<p>朴素方案是直接 await 长命令，直到它结束再回复用户。</p>
-<p>
-  这个朴素方案的问题在于：它把 Async Run 当成普通实现细节，而不是 agent harness
-  的一条稳定边界。
-</p>
-<pre
-  class="code-block"
-><code>const output = await runBash(&quot;npm test&quot;);
-return output; // 用户在测试期间无法继续交互</code></pre>
-
-<h2 id="why-naive-fails">朴素方案为什么不够</h2>
-<dl class="defs">
-  <dt>主循环阻塞</dt>
-  <dd>用户无法继续下达任务，agent 也无法并行分析。</dd>
-
-  <dt>终态竞争</dt>
-  <dd>timeout 后 late result 可能覆盖已经结束的状态。</dd>
-
-  <dt>前后台冲突</dt>
-  <dd>后台正在读取或测试文件时，前台写操作可能让结果无意义。</dd>
-</dl>
-
-<h2 id="loop">回到 Agent Loop</h2>
-<p>
-  Async Run 接入 loop 的位置是：工具执行层启动后台实例，结果通过
-  notification/reminder 回到后续 turn。理解这个位置，比记住具体函数名更重要。
-</p>
-<p>
-  Async Run 启动后立即返回 run_id；后台完成时进入 notification 队列，下一轮构建
-  messages 时以 reminder 注入。
-</p>
-
-<h2 id="architecture">架构图解</h2>
-<figure class="figure">
-  <div class="flow-map" role="img" aria-label="Async Run 非阻塞流程">
-    <div class="flow-row">
-      <span class="flow-node flow-node--accent">Agent Tool</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node flow-node--accent">AsyncRunManager</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">run_id</span>
-    </div>
-    <div class="flow-row">
-      <span class="flow-node flow-node--accent">Background Executor</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">finished/failed/timeout</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">Notification</span>
-    </div>
-    <div class="flow-row">
-      <span class="flow-node flow-node--accent">Next Turn</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">Reminder</span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">User-visible status</span>
-    </div>
-  </div>
-  <figcaption>图 13-1 · Async Run 是运行实例，不是持久化计划。</figcaption>
-</figure>
-
-<h2 id="from-principle-to-code">从原理落到代码</h2>
-<p>
-  到这里我们已经知道 Async Run 为什么存在、插在 loop
-  的哪里，以及朴素方案会怎样失败。下面才进入实现层：只抓住能固定架构的接口、状态边界和接线路径。
-</p>
-<p>
-  读源码时不要从文件顶部一路啃到底。更有效的顺序是：先找入口函数，再找它读写的状态，最后看测试如何证明这些状态变化是真的发生了。
-</p>
-
-<h2 id="walkthrough">一次真实运行 walkthrough</h2>
-<ol>
-  <li>LLM 调用 async_start，要求后台运行测试。</li>
-  <li>AsyncRunManager 创建 run_id 和 running 状态。</li>
-  <li>后台 executor 开始执行 command 或 subagent。</li>
-  <li>Agent 立即回复用户 run_id，并继续主 loop。</li>
-  <li>用户稍后调用 async_check 或 async_list。</li>
-  <li>后台完成后，finishRun 只允许 running 进入终态。</li>
-  <li>completion notification 在下一轮以 reminder 告知模型和用户。</li>
-</ol>
-
-<h2 id="interfaces">关键接口和伪码</h2>
-<p>
-  下面的接口和伪码只保留本章最关键的形状。真正写代码时，可以让 coding agent
-  参考源码地图中的文件补齐细节。
-</p>
-<pre
-  class="code-block"
-><code>type AsyncRunStatus = &quot;running&quot; | &quot;succeeded&quot; | &quot;failed&quot; | &quot;timeout&quot;;
-
-interface AsyncRunManager {
-  start(input: AsyncRunInput): Promise&lt;{ runId: string }&gt;;
-  check(runId: string): AsyncRunSnapshot;
-  list(): AsyncRunSnapshot[];
-  readOutput(runId: string): Promise&lt;string&gt;;
-  drainNotifications(): AsyncRunNotification[];
-}</code></pre>
-
-<h2 id="source-map">源码地图</h2>
-<p>
-  源码阅读建议从第一个文件开始，按数据流往后看。当前项目源码已经包含后续章节能力，所以读本章时只聚焦这里列出的入口。
-</p>
-<div class="source-links" aria-label="13 章源码阅读路线">
+<div class="source-links" aria-label="本章 GitHub 永久链接">
   <a
     class="source-link"
     href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/async-runs.ts"
     target="_blank"
     rel="noreferrer"
+    >1. src/async-runs.ts: Async run 管理器 (新)</a
   >
-    <code>src/async-runs.ts</code> · Async Run 核心状态机
-  </a>
   <a
     class="source-link"
-    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/tools/async-runs.ts"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/agent.ts"
     target="_blank"
     rel="noreferrer"
+    >2. src/agent.ts: 每轮 LLM 调用前 drain 通知</a
   >
-    <code>src/tools/async-runs.ts</code> · Async Run 工具 provider
-  </a>
   <a
     class="source-link"
-    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/async-runs.test.ts"
+    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/output-store.ts"
     target="_blank"
     rel="noreferrer"
+    >3. src/output-store.ts: 大输出存盘 (第 06 章 P1 复用)</a
   >
-    <code>src/async-runs.test.ts</code> · 后台运行状态测试
-  </a>
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/execution-policy.ts"
-    target="_blank"
-    rel="noreferrer"
-  >
-    <code>src/execution-policy.ts</code> · 非交互执行边界
-  </a>
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/learning-claude-code-ts/blob/main/src/session-events.ts"
-    target="_blank"
-    rel="noreferrer"
-  >
-    <code>src/session-events.ts</code> · 完成通知注入
-  </a>
 </div>
+
+<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
+<dl class="defs">
+  <dt>想清楚现象</dt>
+  <dd>
+    用户说"跑测试, 跑完后告诉我", harness 调 run_bash("npm test") 阻塞 5 分钟, 5
+    分钟内用户既不能输入也不能看到中间进度。现象是"长任务 占用主 loop,
+    用户体验差"。
+  </dd>
+  <dt>想反例</dt>
+  <dd>
+    最朴素的反例是"用 setTimeout 包装一下, 不阻塞就行"。这有两个问题:
+    一是后台任务的输出没有持久化, 进程崩了任务丢; 二是 LLM 不知道
+    "任务什么时候完成", 完成时没有任何信号通知主 loop。
+  </dd>
+  <dt>想接口和不变量</dt>
+  <dd>
+    接口:
+    <code
+      >interface AsyncRunManager { start(spec), list(), drainNotifications()
+      }</code
+    >。 不变量三条: (1) async run 的输出走 P1 压缩 (第 06 章), 大输出 存文件 +
+    output_id 占位, (2) 通知队列是 FIFO, 每轮 LLM 调用前 drain 一次,
+    同一通知不会重复注入, (3) run_id 由 harness 生成 (UUID), LLM 通过
+    read_async_output 工具按 id 读输出。
+  </dd>
+  <dt>想怎么验证</dt>
+  <dd>
+    fake asyncRunManager.start 返回固定 run_id, 跑完后 LLM 调 read_async_output
+    拿结果; fake LLM 第二轮收到的 messages 包含 reminder 标签
+    "&lt;system-reminder source='async-run'&gt;", 描述后台任务状态。
+  </dd>
+</dl>
+
+<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+
 <div class="note">
-  <p class="note__title">读源码时的提醒</p>
+  <p class="note__title">观察 1 · setTimeout 包装, 假装不阻塞</p>
+  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+// 错误: 用 setTimeout 包装一下, 没真正异步
+setTimeout(async () =&gt; {
+  const result = await exec("npm test");
+  history.add({ role: "user", content: `Async result: ${result}` });
+}, 0);</code></pre>
+  <p><strong>问:</strong>为什么不直接 setTimeout?</p>
   <p>
-    GitHub 链接指向当前主干实现，可能已经包含后续章节能力。学习本章时，请只沿着
-    Async Run 相关的数据流阅读，暂时忽略旁边更复杂的分支。
+    <strong>答:</strong>三件事同时坏掉 —— 持久化: setTimeout 不进任何 持久层,
+    进程崩了任务丢; 通知: 完成后直接写 history, LLM 在第 5 轮突然看到 "Async
+    result: ..." 一条陌生 user message, 不知道 这是哪来的; 抢占: 没有冲突检测,
+    LLM 跑后台任务的同时调前台工具, 两者可能写同一文件。
   </p>
 </div>
 
-<h2 id="design">设计直觉</h2>
-<p>
-  Async Run 让“等待”变成可管理状态。它不是让 agent
-  无限并发，而是把后台执行的生命周期显式化。
-</p>
-<p>终态只允许从 running 收敛，是为了防止 timeout 后迟到的输出覆盖最终状态。</p>
-
-<h2 id="split">架构拆分</h2>
-<dl class="defs">
-  <dt>AsyncRunManager</dt>
-  <dd>管理 run_id、状态机、输出和通知。</dd>
-
-  <dt>Executor</dt>
-  <dd>实际执行 command 或 subagent，并把结果交回 manager。</dd>
-
-  <dt>Async tools</dt>
-  <dd>提供 start/check/list/output_read 给模型调用。</dd>
-</dl>
-
-<h2 id="state-boundary">状态与边界</h2>
-<dl class="defs">
-  <dt>session-local</dt>
-  <dd>run 实例、running 状态和通知队列。</dd>
-
-  <dt>output store</dt>
-  <dd>长输出可以通过 handle 读取，不直接塞进 messages。</dd>
-
-  <dt>非持久化</dt>
-  <dd>当前 Async Run 不承诺跨重启恢复。</dd>
-</dl>
-
-<h2 id="prompt">Prompt Card</h2>
-<div class="card card--prompt">
-  <div class="card__head">
-    <span class="card__tag">Prompt Card</span>
-    <button class="card__copy" data-copy-card>复制</button>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>目标：</strong>实现 Async Run，让 agent
-      能启动、查询、列出和读取后台运行实例。
-    </p>
-    <p>
-      <strong>场景：</strong>长测试或长分析在后台运行，主 agent 能继续响应用户。
-    </p>
-    <p>
-      <strong>模块：</strong
-      >async-runs.ts、tools/async-runs.ts、execution-policy.ts、session-events.ts。
-    </p>
-    <p>
-      <strong>接线：</strong>composition root 创建 AsyncRunManager，注册 async
-      tools，完成通知进入 reminder。
-    </p>
-    <p>
-      <strong>边界：</strong>Async Run 不是持久化 Task；后台命令使用非交互
-      execution policy；终态不可被 late result 覆盖。
-    </p>
-    <p>
-      <strong>例外和 corner case：</strong>timeout、失败、late
-      success、读取不存在 run、前台写冲突。
-    </p>
-    <p>
-      <strong>验证：</strong>测试 start/check/list/output_read、终态收敛和通知
-      drain。
-    </p>
-    <p>
-      <strong>源码入口：</strong>src/async-runs.ts、src/tools/async-runs.ts。
-    </p>
-    <p><strong>文档同步：</strong>说明 Async Run 是运行实例，不是长期计划。</p>
-  </div>
+<div class="note">
+  <p class="note__title">观察 2 · 通知不 drain, 每轮重复注入</p>
+  <pre class="code-block"><code>// 教学简化版
+async function run(query) {
+  for (;;) {
+    const messages = history.getMessages();
+    // 错误: 不 drain, 每轮 LLM 看到的都是完整通知队列
+    const notifications = asyncRunManager.getAllNotifications();
+    for (const n of notifications) {
+      history.add({ role: "user", content: formatNotification(n) });
+    }
+    /* ... */
+  }
+}</code></pre>
+  <p><strong>问:</strong>为什么不 drain?</p>
+  <p>
+    <strong>答:</strong>不 drain 的话, 同一通知每轮都注入, 10 轮后 history
+    里就有 10 条同样的 "Async run completed: X" 消息, token 浪费, LLM
+    看到重复内容也困惑。drain() 一次性取走, 队列清空, 每条通知 只注入一次。
+  </p>
 </div>
 
-<h2 id="trap">容易踩坑</h2>
+<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export type AsyncRunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+export interface AsyncRunSpec {
+  tool: string;                 // 调哪个工具 (例如 "run_bash")
+  args: Record&lt;string, unknown&gt;;
+  title: string;                // 给用户看的标题
+}
+
+export interface AsyncRun {
+  id: string;                   // harness 生成的 UUID
+  spec: AsyncRunSpec;
+  status: AsyncRunStatus;
+  outputRef?: { outputId: string };  // P1 压缩的 output_id (第 06 章)
+  error?: string;
+  startedAt: number;
+  finishedAt?: number;
+}
+
+export interface AsyncRunNotification {
+  runId: string;
+  title: string;
+  executor: string;
+  status: AsyncRunStatus;
+  preview: string;              // 摘要, LLM 第一时间看到
+  outputRef?: { outputId: string };
+}
+
+export interface AsyncRunManager {
+  start(spec: AsyncRunSpec): Promise&lt;AsyncRun&gt;;
+  get(id: string): AsyncRun | undefined;
+  list(): AsyncRun[];
+  cancel(id: string): boolean;
+  // 取走所有未读通知, 队列清空
+  drainNotifications(): AsyncRunNotification[];
+  // 前台工具是否与 running async run 冲突 (例如两个 run 写同一文件)
+  checkForegroundToolConflict(request: { toolName: string; args: Record&lt;string, unknown&gt; }): { blocked: boolean; reason?: string };
+}</code></pre>
+
+<h2 id="loop-integration">loop 接入: 每轮 drain 通知</h2>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+async function run(query: string) {
+  history.add({ role: "user", content: query });
+
+  for (;;) {
+    // 1. drain async run 通知, 转成 reminder
+    const notifications = asyncRunManager.drainNotifications();
+    for (const n of notifications) {
+      const lines = ["Async run updates:"];
+      lines.push(
+        `- run_id: ${n.runId}`,
+        `  title: ${n.title}`,
+        `  status: ${n.status}`,
+        `  preview: ${n.preview}`,
+        n.outputRef?.outputId
+          ? `  full_output: use run_output_read with output_id ${n.outputRef.outputId}`
+          : `  full_output: use run_async_output_read with run_id ${n.runId}`,
+      );
+      const reminder = `&lt;system-reminder source="async-run"&gt;\n${lines.join("\n")}\n&lt;/system-reminder&gt;`;
+      history.add({ role: "user", content: reminder });
+    }
+
+    const messages = history.getMessages();
+    const assistant = await llm.chat(messages);
+    history.add(assistant);
+
+    if (!assistant.tool_calls) return assistant.content;
+
+    for (const call of assistant.tool_calls) {
+      // run_async 特殊处理: 派发到后台, 不阻塞
+      if (call.name === "run_async") {
+        const spec = call.args as AsyncRunSpec;
+        const run = await asyncRunManager.start(spec);
+        history.add({ role: "tool", tool_call_id: call.id,
+          content: `Started async run ${run.id}: ${spec.title}\nThe run will continue in background. You will be notified when it completes.` });
+        continue;
+      }
+
+      // 前台工具: 检查与 running async run 冲突
+      const conflict = asyncRunManager.checkForegroundToolConflict({
+        toolName: call.name, args: call.args,
+      });
+      if (conflict.blocked) {
+        history.add({ role: "tool", tool_call_id: call.id,
+          content: `Blocked: ${conflict.reason}` });
+        continue;
+      }
+
+      // 正常执行
+      const tool = registry.get(call.name);
+      const result = await tool.execute(call.args);
+      history.add({ role: "tool", tool_call_id: call.id, content: result.content });
+    }
+  }
+}</code></pre>
+
+<h2 id="conflict-detection">前台工具与后台任务冲突检测</h2>
+<p>
+  harness 跑后台任务时, 主 loop 仍然会调前台工具 (例如读其他文件)。
+  两者可能写同一文件、修改同一 git branch、跑同一 service。conflict 检测由
+  <code>checkForegroundToolConflict()</code> 实现, 规则:
+</p>
+<dl class="defs">
+  <dt>写文件冲突</dt>
+  <dd>
+    run_bash / run_write 工具的 args.path 命中 running async run 的 monitored
+    paths, 视为冲突。
+  </dd>
+  <dt>同 tool 并发</dt>
+  <dd>
+    run_bash 同时跑两个, harness 拒绝第二个, 提示 "another run_bash is running
+    in background, wait or cancel first"。
+  </dd>
+  <dt>Git 状态冲突</dt>
+  <dd>
+    async run 在 running 状态下, 前台工具不允许做 git push / git rebase
+    (避免分支状态混乱)。
+  </dd>
+</dl>
+
+<h2 id="trap">反例梯度</h2>
+
 <div class="card card--trap">
   <div class="card__head">
-    <span class="card__tag">Design Trap</span>
+    <span class="card__tag">新手错法 · A</span>
   </div>
   <div class="card__body">
-    <p><strong>常见错误：</strong>timeout 后允许 late result 覆盖状态。</p>
     <p>
-      <strong>为什么错：</strong>用户已经看到
-      timeout，迟到成功会让审计和后续行为矛盾。
+      <strong>常见错误:</strong>用 setTimeout 包装长任务, 完成后直接写 history。
     </p>
     <p>
-      <strong>正确做法：</strong>finishRun 只允许 running 进入终态，终态后忽略
-      late result。
+      <strong>为什么错:</strong>无持久化, 进程崩了任务丢; LLM
+      不知道任务何时完成; 无冲突检测。
     </p>
     <p>
-      <strong>怎么验证：</strong>模拟 timeout 后再 finish success，状态仍为
-      timeout。
+      <strong>正确做法:</strong>async run 走持久化, 完成时进通知队列, 每轮 LLM
+      drain。
     </p>
   </div>
 </div>
-<ul>
-  <li>后台命令绕过 readonly policy。</li>
-  <li>把 run 当作跨重启任务恢复。</li>
-  <li>后台完成通知丢失，模型不知道结果可读。</li>
-</ul>
 
-<h2 id="validate">如何验证</h2>
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>通知不 drain, 每轮重复注入。</p>
+    <p>
+      <strong>为什么错:</strong>同一通知 10 轮后变成 10 条消息, 浪费 token, 误导
+      LLM。
+    </p>
+    <p>
+      <strong>正确做法:</strong>drainNotifications() 一次性取走, 队列清空,
+      每条只注入一次。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>常见错误:</strong>不检测前台 / 后台冲突, 两个 run_bash 同时跑。
+    </p>
+    <p>
+      <strong>为什么错:</strong>可能写同一文件、git 状态混乱、service 端口冲突。
+    </p>
+    <p>
+      <strong>正确做法:</strong>checkForegroundToolConflict() 入口检查,
+      冲突时拒绝并写 tool message。
+    </p>
+  </div>
+</div>
+
+<div class="card card--trap">
+  <div class="card__head">
+    <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+    <p><strong>常见错误:</strong>大输出没走 P1 压缩, 直接塞进 tool message。</p>
+    <p>
+      <strong>为什么错:</strong>第 06 章的 P1 即时压缩不复用, async run
+      完成时直接撑爆 context。
+    </p>
+    <p>
+      <strong>正确做法:</strong>async run 完成时调
+      compressor.compressToolResult(), 大输出存文件 + output_id 占位。
+    </p>
+  </div>
+</div>
+
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
 <div class="card card--validation">
   <div class="card__head">
-    <span class="card__tag">Validation</span>
+    <span class="card__tag">Validation · 第 13 章</span>
   </div>
   <div class="card__body">
     <p>
-      <strong>手工 query：</strong>启动一个 sleep 或测试命令，期间继续对话，再
-      check/readOutput。
+      <strong>run_async 不阻塞主 loop:</strong>fake asyncRunManager.start 内部
+      sleep 5s, fake LLM 同一 run() 内调 run_async 后继续 generate, 主 loop 不等
+      5s。
     </p>
     <p>
-      <strong>确定性测试：</strong>用 fake executor 控制
-      succeeded/failed/timeout。
+      <strong>通知 drain 不重复:</strong>fake asyncRunManager 预设 1 条
+      未读通知, 跑完第 1 轮 LLM 后 spy 验证 drainNotifications 被调用 1 次,
+      history 含 1 条 reminder; 第 2 轮 LLM 跑完时, history 不再追加这条通知 (已
+      drain)。
     </p>
-    <p><strong>集成观察：</strong>完成通知应在下一轮 reminder 中出现。</p>
     <p>
-      <strong>失败信号：</strong>主 loop 被长命令阻塞，或 timeout 被 late
-      success 覆盖。
+      <strong>P1 压缩 output_id:</strong>fake async run 输出 100k 字符串, 跑完后
+      history reminder 的 content 含 "use run_output_read with output_id=xxx",
+      不含完整输出。
+    </p>
+    <p>
+      <strong>前台 / 后台冲突检测:</strong>fake async run 正在跑 run_bash, LLM
+      同一轮调 run_bash 前台, 写 tool message "Blocked: another run_bash is
+      running", spy 验证前台 run_bash 没被执行。
+    </p>
+    <p>
+      <strong>run_async 必写 tool message:</strong>fake asyncRunManager 返回
+      run_id "abc-123", 跑完后 history 末尾有 tool message "Started async run
+      abc-123: ..."。
     </p>
   </div>
 </div>
+
+<h2 id="lookback">回望第 00–12 章: 哪些原则在本章兑现了</h2>
 <ul>
-  <li><code>src/async-runs.test.ts</code> 覆盖核心。</li>
-  <li><code>src/tools/async-runs.test.ts</code> 覆盖工具层。</li>
-  <li>冲突检测测试覆盖前台写与后台 readPaths。</li>
+  <li>
+    <strong>tool call 协议沿用:</strong>run_async 是普通工具, 走 Tool interface,
+    派发后写 role: "tool" 消息。
+  </li>
+  <li>
+    <strong>P1 压缩复用:</strong>async run 输出调
+    compressor.compressToolResult(), 与第 06 章一致。
+  </li>
+  <li>
+    <strong>reminder 标签格式:</strong>通知走 &lt;system-reminder
+    source="async-run"&gt; 标签, 不污染 system prompt。
+  </li>
+  <li>
+    <strong>工厂模式:</strong>asyncRunManager 是工厂, 在 createAgent()
+    闭包内维护当前 run 列表。
+  </li>
 </ul>
 
-<h2 id="debug">如果实现失败，先查哪里</h2>
-<ul>
-  <li>检查 run_id 是否唯一。</li>
-  <li>检查状态转移是否只从 running 到终态。</li>
-  <li>检查 executor 是否使用正确 policy。</li>
-  <li>检查 notifications 是否 drain 后不重复。</li>
-</ul>
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+  <dt>async run 跨进程</dt>
+  <dd>
+    第 14 章 schedule 触发的任务本质上是 async run, scheduleManager 内部复用
+    asyncRunManager。
+  </dd>
+  <dt>async run 输出存档</dt>
+  <dd>第 15 章 transcript 记录 async run 的启动 / 完成 / 失败, 用于审计。</dd>
+  <dt>async run 与 task 协作</dt>
+  <dd>
+    async run 完成时自动更新 task 状态 (例如 run_bash("npm test") 完成后把 task
+    "跑测试" 标 completed)。
+  </dd>
+  <dt>async run 与 permission 协作</dt>
+  <dd>
+    async run 派发时仍然过 permission, 危险命令 deny, 写 tool message,
+    不在后台偷偷跑。
+  </dd>
+</dl>
+
+<h2 id="vibe-coding-13">本次如何 vibe code: 第 13 章的三件套</h2>
+
+<h3 id="vibe-feed-13">拆卡: 4 轮迭代的具体产物</h3>
+<ol>
+  <li>
+    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>AsyncRunSpec</code> /
+    <code>AsyncRun</code> / <code>AsyncRunNotification</code> /
+    <code>AsyncRunManager</code> 四个 interface。本轮不写实现, 重点钉"通知 drain
+    不重复" 和"run_id 由 harness 生成"。
+  </li>
+  <li>
+    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
+    <code>createAsyncRunManager()</code> 是 stub (start 永远返回固定 run),
+    agent.run 不接入 drain。本轮 review 重点: asyncRunManager 实例在
+    <code>index.ts</code> 只 new 一次。
+  </li>
+  <li>
+    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createAsyncRunManager + run_async
+    工具 + agent.run 接入 drain + 冲突检测。本轮 review 重点: drain 一次性取走,
+    冲突检测入口写, P1 压缩复用第 06 章。
+  </li>
+  <li>
+    <strong>第 4 轮 · 验证</strong>。让 LLM 写
+    <code>test/async-runs.test.ts</code>。本轮 review 重点: "通知 drain 不重复"
+    和 "前台 / 后台冲突检测" 两条必须有 spy 验证。
+  </li>
+</ol>
+
+<h3 id="vibe-review-13">Review: 第 13 章专属 checklist</h3>
+<ol>
+  <li>
+    <strong>通知 drain 一次性取走。</strong>验证: drainNotifications()
+    调用后队列清空, 下次调用返回空数组。
+  </li>
+  <li>
+    <strong>run_id 由 harness 生成。</strong>LLM 不允许自创 id。验证:
+    <code>grep -n 'crypto.randomUUID\|uuidv4' src/async-runs.ts</code> ≥ 1 行。
+  </li>
+  <li>
+    <strong>run_async 必写 tool message。</strong>验证: 工具 execute 末尾
+    <code>history.add({role: "tool", ...})</code> 含 "Started async run"。
+  </li>
+  <li>
+    <strong>冲突检测在 execute 之前。</strong>验证: agent.ts 工具执行分支中,
+    conflict 检查在 tool.execute 之前。
+  </li>
+  <li>
+    <strong>P1 压缩复用第 06 章。</strong>验证:
+    <code>grep -n 'compressor.compressToolResult' src/async-runs.ts</code> ≥ 1
+    行。
+  </li>
+</ol>
+
+<h3 id="vibe-debug-13">调试: 第 13 章典型伪装</h3>
+<ol>
+  <li>
+    <strong>伪装 A · 通知不 drain, getAllNotifications 替代。</strong>症状:
+    通知每轮 LLM 都重新注入, history 增长 10 倍。验证: Validation 卡片"通知
+    drain 不重复" 那条测试通过。
+  </li>
+  <li>
+    <strong>伪装 B · run_async 走前台 await, 阻塞主 loop。</strong>症状: start()
+    内部 await exec(...), 主 loop 等待。验证: Validation 卡片"run_async 不阻塞主
+    loop" 那条测试通过 (fake start 内部 sleep 5s, 主 loop 跑通)。
+  </li>
+  <li>
+    <strong>伪装 C · 不检测冲突, 两个 run_bash 同时跑。</strong>症状: agent.run
+    不调 checkForegroundToolConflict。验证: Validation 卡片"前台 / 后台冲突检测"
+    那条测试通过。
+  </li>
+</ol>
+
+<h3 id="vibe-iterate-13">迭代: 第 13 章 4 个 commit 节点</h3>
+<ol>
+  <li>
+    <code
+      >feat(ch13): 钉 AsyncRunSpec / AsyncRun / AsyncRunNotification /
+      AsyncRunManager 接口</code
+    >
+    —— tsc 通过, 无实现。
+  </li>
+  <li>
+    <code>feat(ch13): createAsyncRunManager 工厂 + run_async 工具 stub</code> ——
+    tsc 通过, start 永远同步返回。
+  </li>
+  <li>
+    <code>feat(ch13): drain 通知 + 冲突检测 + P1 压缩复用 + run_id 生成</code>
+    —— 跑通 Validation 卡片前 4 条。
+  </li>
+  <li>
+    <code
+      >test(ch13): run_async 必写 tool message + run_id 由 harness 生成</code
+    >
+    —— 全绿。
+  </li>
+</ol>
+
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 13 章</span>
+    <button class="card__copy" type="button" data-copy-card>复制</button>
+  </div>
+  <div class="card__body">
+    <p>
+      <strong>目标:</strong>实现 Async Run 模块, 让 harness 在跑长任务时不阻塞主
+      loop, 完成后通过 reminder 通知 LLM。
+    </p>
+    <p>
+      <strong>场景:</strong>用户说"跑测试, 跑完后告诉我", LLM 调
+      run_async("run_bash", {cmd: "npm test"}), 主 loop 继续, 5
+      分钟后后台任务完成, 第 N 轮 LLM 调用前 reminder 注入, LLM
+      看到结果后告诉用户。
+    </p>
+    <p>
+      <strong>模块:</strong> <code>src/async-runs.ts</code> (新) 暴露
+      <code>createAsyncRunManager()</code>;
+      <code>src/tools/run_async.ts</code> (新) 实现工具;
+      <code>src/agent.ts</code> 每轮 LLM 调用前 drain 通知 + 冲突检测;
+      <code>src/index.ts</code> 接线 asyncRunManager。
+    </p>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>通知 drain 一次性取走, 队列清空, 同条通知不重复注入</li>
+      <li>run_id 由 harness 生成 (UUID), LLM 不允许自创</li>
+      <li>run_async 必写 role: "tool" 消息含 run_id</li>
+      <li>前台工具执行前过冲突检测, 冲突拒绝写 tool message</li>
+      <li>大输出走 P1 压缩 (复用第 06 章 compressor)</li>
+    </ul>
+    <p>
+      <strong>验证 (用 fake asyncRunManager + spy, 逐条落到 vitest):</strong>
+    </p>
+    <ul>
+      <li>
+        fake start 内部 sleep 5s, run_async 调用后主 loop 不等 5s, 继续调 LLM
+      </li>
+      <li>
+        fake 预设 1 条通知, 第 1 轮 LLM 后 spy 验证 drainNotifications 被调用 1
+        次, 第 2 轮 LLM 后 history 不再追加这条通知
+      </li>
+      <li>
+        fake async run 输出 100k 字符串, history reminder 含 "output_id=xxx"
+        占位
+      </li>
+      <li>
+        fake async run 正在跑 run_bash, LLM 调 run_bash 前台, 写 tool message
+        "Blocked", spy 验证前台没执行
+      </li>
+      <li>
+        fake start 返回 run_id "abc-123", history 含 "Started async run abc-123"
+      </li>
+    </ul>
+  </div>
+</div>
 
 <h2 id="practice">本章练习</h2>
-<p>
-  练习：不看 Prompt Card，自己写一段 prompt，让另一个 coding agent 实现本章的
-  Async Run。写完后对照卡片，看是否遗漏了状态边界、失败模式和测试。
-</p>
+<ol>
+  <li>
+    故意把 start() 内部 await 5s, 跑测试, 看"run_async 不阻塞主 loop" 是否抓到
+    (主 loop 会卡 5s)。
+  </li>
+  <li>
+    在 drain 后忘记清空队列, 跑测试, 看"通知 drain 不重复" 是否抓到 (第 2 轮
+    history 仍追加)。
+  </li>
+  <li>
+    在冲突检测通过后忘记拒绝, 跑测试, 看"前台 / 后台冲突检测" 是否抓到 (spy
+    验证前台被执行了)。
+  </li>
+</ol>
 
 <h2 id="summary">本章小结</h2>
-<p>本章让 agent 能后台运行。下一章会让后台运行被时间触发：Schedule。</p>
+<p>
+  本章给 harness 加了 Async Run 模块, 让长任务派发到后台, 主 loop
+  继续等用户输入。通知走 reminder 标签, 不污染 system prompt; 大 输出走 P1
+  压缩复用第 06 章; 冲突检测防止前台 / 后台写同一文件。 下一章 (第 14 章)
+  我们会处理"定时触发 agent" 的问题——Schedule, 让 harness 每天自动跑一次代码
+  review 报告。
+</p>
 
 <h2 id="next">下一章伏笔</h2>
-<p>下一章进入 Schedule。</p>
+<p>
+  第 13 章让 harness 能跑后台任务, 但任务必须由 LLM 在会话内主动调 run_async
+  才能跑。下一章 Schedule 模块让 harness 按时间自动触发 任务 (例如"每天 8
+  点跑一次测试"), 任务本质上是 async run, scheduleManager 内部复用
+  asyncRunManager。这是 harness 第一次 具备"定时运行" 能力, 也是后台 agent +
+  task 系统的最终拼接。
+</p>

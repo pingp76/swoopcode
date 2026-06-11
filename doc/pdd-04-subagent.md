@@ -1,73 +1,103 @@
 # PDD-04: SubAgent 工具
 
-## 对应教程
+## 动机
 
-第 04 章：把旁路探索交给子智能体。
+父智能体在执行旁支任务（如搜索代码、分析文件、跑测试）时，中间过程会产生大量
+工具调用消息，污染主对话上下文。SubAgent 将这些中间过程隔离到独立的上下文中，
+只将最终结果返回给父智能体。
 
-## 设计目的
+## 核心设计
 
-父 Agent 在主任务中经常需要做旁路探索，例如“只读分析某个目录”“查找可能相关的测试”。如果把这些中间过程全部写入父 History，会迅速污染上下文。
+SubAgent 本质是一个名为 `run_subagent` 的工具，其执行函数内部创建一个新的
+Agent 实例来独立运行任务。
 
-SubAgent 通过工具形式提供一个隔离的短生命周期 Agent：
+## 数据流
 
-```text
-父 Agent 调用 run_subagent
-  -> 创建 child session/history
-  -> 复用父级稳定 prompt snapshot 和共享依赖
-  -> 运行受限工具集
-  -> 返回摘要给父 Agent
+```
+父智能体 LLM 决定调用 run_subagent(task, max_rounds)
+     │
+     ▼
+run_subagent 工具执行函数：
+  1. 创建独立的 History（设置 system prompt hint，帮助子智能体使用 skill）
+  2. 创建过滤后的 ToolRegistry（保留 bash + files + skill，排除 run_subagent 和 run_todo_*）
+  3. 创建独立的 ContextCompressor 实例（隔离压缩状态）
+  4. 创建子 Agent 实例（复用父级的 llm、logger、permissionManager）
+  5. 将 task 作为 query 传给子 Agent
+     │
+     ▼
+子 Agent 独立运行 think → act → observe 循环
+  - 有自己的轮数上限（默认 20，由参数覆盖）
+  - 共享父级 PermissionManager（子智能体内 ask 决策降级为 deny）
+  - LLM 调用失败 → 将错误信息作为 tool_result 返回
+  - 达到轮数上限 → 将已有中间结果总结后返回
+     │
+     ▼
+子 Agent 返回最终文本 → 作为 run_subagent 工具的 ToolResult
+     │
+     ▼
+父智能体在 history 中看到 tool_result，继续后续推理
 ```
 
-## 当前实现
+## 接口设计
 
-核心源码：
+### run_subagent 工具参数
 
-| 文件                         | 职责                                       |
-| ---------------------------- | ------------------------------------------ |
-| `src/tools/subagent.ts`      | `run_subagent` 工具 provider               |
-| `src/tools/subagent.test.ts` | 子智能体工具测试                           |
-| `src/session.ts`             | main/subagent sessionId 和 parentSessionId |
-| `src/agent.ts`               | 支持被子智能体复用的主循环                 |
-| `src/index.ts`               | 注入共享依赖与只读 registry factory        |
+- task (string, 必填)：子智能体需要完成的具体任务描述
+- max_rounds (number, 可选, 默认 20)：子智能体最大循环轮数
 
-## 共享与隔离
+### 子智能体的依赖
 
-共享：
+- LLM Client：复用父级的（共享连接和配置）
+- Logger：复用父级的（子智能体日志带 `[SubAgent]` 前缀）
+- History：独立新建（设置 system prompt hint，不与父级共享引用）
+- ToolRegistry：过滤后新建（通过 `createFilteredRegistry()` 工厂函数，排除递归风险工具）
+- ContextCompressor：独立新建（隔离压缩状态，不与父级共享）
+- PermissionManager：共享父级的（子智能体继承同一权限模式，不传 `askUserFn`，ask 降级为 deny）
 
-- LLM client 或同一 runtime policy 下的 LLM client。
-- PermissionManager 的模式和边界。
-- Stable system prompt snapshot。
-- OutputStore、ProjectContext、Logger 等应共享的基础设施。
+### 工具过滤规则
 
-隔离：
+- 保留：run_bash、run_read、run_write、run_edit、run_skill
+- 排除：run*subagent（防止无限递归）、run_todo*\* 全部（防止干扰父级任务状态）
 
-- child History。
-- child Transcript/session。
-- child TODO。
-- child 工具集通常更受限，默认不再允许无限递归创建 subagent。
+## 停止条件
 
-## 权限边界
+- 任务完成：子 Agent 的 run() 返回文本回复（LLM 不再请求工具调用）
+- 轮数上限：达到 max_rounds 时，强制截断并总结已有结果
+- LLM 错误：连续 LLM 调用失败时，返回最后一次的错误信息
 
-子智能体继承父级权限语义。没有交互式确认能力时，`ask` 应降级为 `deny`，避免子智能体在后台代表用户确认敏感操作。
+## 限制
 
-## Prompt Cache 边界
+- 子智能体只能返回 ToolResult（output + error），不能修改父智能体的上下文
+- 子智能体不能创建其他子智能体（通过工具过滤保证）
+- 父智能体在子智能体运行期间处于阻塞状态（同步等待结果）
+- 父智能体应避免并行创建多个修改同一文件的子智能体（资源冲突由调用者负责）
+- 子智能体内的权限 `ask` 决策降级为 `deny`（无 `askUserFn` 回调）
 
-当前实现保留 cache-friendly fork 的关键原则：子智能体复用父级稳定 prompt snapshot，而不是启动时重新扫描并构造一个漂移的 system prompt。
+## 循环依赖的解决
 
-## 测试入口
+`subagent.ts` 不直接 `import createAgent`，而是通过参数注入 `createAgentFn`：
 
-- `src/tools/subagent.test.ts`
-- `src/agent.test.ts`
-- `src/session.test.ts`
-- `src/permission.test.ts`
+```
+agent.ts → registry.ts → subagent.ts —如果 import createAgent→ agent.ts  ← 循环！
+                                      —通过注入 createAgentFn→ 打破循环
+```
 
-## 常见错误
+实际的依赖组装在 `index.ts`（组装根）中完成：
 
-1. 子智能体重新创建 PermissionManager，导致权限模式与父级不一致。
-2. 子智能体继承完整工具集并允许无限递归。
-3. 把 child 的全部中间消息写回父 History。
-4. 子智能体运行中刷新 system prompt，破坏稳定前缀。
+```typescript
+const subagentProvider = createSubagentToolProvider({
+  llm,
+  logger,
+  createFilteredRegistry: () =>
+    createToolRegistry(undefined, undefined, skillProvider),
+  createAgentFn: createAgent,
+  createCompressorFn: () => createContextCompressor(config.compression),
+  permissionManager,
+});
+```
 
-## 非目标
+## 与现有架构的集成
 
-SubAgent 不是多 Agent Team。它只是一个工具调用内的隔离运行实例，不实现真实分布式调度、handoff 协议或多成员协作状态机。
+- 通过 `SubagentToolProvider` 接口注册到 `tools/registry.ts`
+- 子智能体复用 `createAgent()` 工厂函数，传入过滤后的依赖
+- 实现在 `src/tools/subagent.ts`，包含工具定义和执行逻辑

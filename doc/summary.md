@@ -10,10 +10,11 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD-16：模型适配与 Agent Runtime Policy 抽象层**（Provider Profile + Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager + ContextRanker + RepoClassifier + TaskIntentClassifier）+ **PDD-17：Eval Harness 与当前单 Agent E2E**（Eval Core、deterministic suite、real core tools、CLI driver、replay、live smoke、judge/report、full-tools live E2E）+ **PDD-18：MCP 与 Agent Team Eval Harness Prototype**（prototype suites 默认 skipped，避免误读为生产能力）+ **网页版教程雏形**（`tutorial/` 静态站点 + 第 00/01 章 + `web/temp/2/` 风格三栏阅读布局）+ **公开版 PDD 整理**（`doc/pdd-01-*.md` 到 `doc/pdd-18-*.md`，旧 refactor 工作记录已合并回对应 PDD）
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD-16：模型适配与 Agent Runtime Policy 抽象层**（Provider Profile + Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager + ContextRanker + RepoClassifier + TaskIntentClassifier）+ **PDD-17：Eval Harness 基础框架**（Eval Core、deterministic suite、real core tools、CLI driver）+ **PDD-18：Replay/Live/Judge/Full-tools Eval**（replay、live smoke、judge/report、live regression、full-tools live E2E）+ **PDD-19：MCP 与 Agent Team Eval Harness Prototype**（prototype suites 默认 skipped，避免误读为生产能力）+ **网页版教程雏形**（`tutorial/` 静态站点 + 第 00/01 章 + `web/temp/2/` 风格三栏阅读布局）+ **公开版 PDD 整理**（`doc/pdd-01-*.md` 到 `doc/pdd-19-*.md`，保留原始 PDD 深度，旧 refactor 工作记录已合并回对应 PDD）
 
-- **PDD-17 Eval Harness 细分能力**：Deterministic Suite + Real Core Tools + CLI Driver；Replay + Live Smoke + Judge/Report；Live Regression — Core Tools；Full-tools Live E2E。
-- **PDD-18 Eval Prototype 边界**：MCP fixture server + MCP runtime adapter + MCP trace/assertions；顺序 supervisor Team driver + Team trace/assertions；由于项目尚未实现生产级 MCP runtime / 真实 Agent Team runtime，相关 MCP/Team 测试当前全部 `describe.skip`。
+- **PDD-17 Eval Harness 基础能力**：Eval Core + Deterministic Suite + Real Core Tools + CLI Driver。
+- **PDD-18 Eval 回归能力**：Replay + Live Smoke + Judge/Report；Live Regression — Core Tools；Full-tools Live E2E。
+- **PDD-19 Eval Prototype 边界**：MCP fixture server + MCP runtime adapter + MCP trace/assertions；顺序 supervisor Team driver + Team trace/assertions；由于项目尚未实现生产级 MCP runtime / 真实 Agent Team runtime，相关 MCP/Team 测试当前全部 `describe.skip`。
 
 ## 网页版教程站点雏形
 
@@ -342,7 +343,7 @@ skills/
 - **Live Regression Suite**：6 个 core-tools-only case 覆盖真实 LLM 下的读/写/编辑/bash/权限/多轮能力；每个 case 限制 `maxCalls`/`maxRounds`，Vitest timeout 30-60s；启用开关 `EVAL_LIVE_REGRESSION=1`；`EVAL_LIVE=1` 只启用 smoke suite；`EVAL_JUDGE=1` 启用 LLM judge 评价，`JUDGE_MODEL` 环境变量可覆盖 judge 模型（默认和 Agent 同模型）
 - **Live Full Suite**：4 个 release case 覆盖 TODO、confirmed Memory、seed Skill、readonly SubAgent；3 个 nightly case 预留 Task/Async/Schedule，默认 `describe.skip`；启用开关 `EVAL_LIVE_FULL=1`，所有 case 都使用临时 workspace + 临时 `agentHome`
 
-### PDD-17 Full-tools Live E2E (`src/eval/drivers/learn-claude-code/full-tool-runtime.ts` + `src/eval/live/live-full-suite.test.ts`)
+### PDD-18 Full-tools Live E2E (`src/eval/drivers/learn-claude-code/full-tool-runtime.ts` + `src/eval/live/live-full-suite.test.ts`)
 
 - **临时 agentHome 隔离**：full-tools eval runtime 使用 `createProjectContext({ projectRoot: workspaceRoot, agentHome })` 组装真实工具 provider，skills、memory、logs、task outputs、tasks、schedules 都写入 case 专属临时 `agentHome`，不读取用户真实 `~/.learn-claude-code-ts`
 - **完整工具组装**：`tools.kind="full"` 复用当前项目真实 TODO/Task/Memory/Skill/SubAgent/Async/Schedule/Output provider；Eval Core 仍保持中立，不直接 import 当前项目业务模块
@@ -354,7 +355,7 @@ skills/
 - **Live full nightly cases**：Task Group durable plan、Async Run output handle、Schedule create/read/cancel 三个 case 已预留为 `describe.skip`，每个 case 配置 120s timeout，便于后续夜间或人工触发
 - **Judge 成本**：Release 组 4 个 case 均内置 judge rubric；`EVAL_LIVE_FULL=1 EVAL_JUDGE=1` 会额外产生 4 次 judge LLM 调用
 
-### PDD-18 MCP 与 Agent Team Eval Harness Prototype (`src/eval/mcp/` + `src/eval/team/` + live suites)
+### PDD-19 MCP 与 Agent Team Eval Harness Prototype (`src/eval/mcp/` + `src/eval/team/` + live suites)
 
 - **MCP fixture server**：新增 `src/eval/mcp/fixture-server.ts`，实现 MCP 2025-06-18 最小 JSON-RPC 子集：`initialize`、`notifications/initialized`、`tools/list`、`tools/call`、`resources/list`、`resources/read`、JSON-RPC error；支持 fixture tool/resource、tool-call delay timeout、initialize failure、server crash 注入
 - **MCP runtime adapter**：`mcp-runtime.ts` 在 learn-claude-code driver 层把 fixture MCP tool 暴露为 `run_mcp_<server>_<tool>`，把 resource 暴露为 `run_mcp_resource_read`；Eval Core 不依赖当前项目 ToolRegistry，MCP adapter 通过 `combineToolRegistries()` 与真实工具链合并；in-process driver 同时支持 spec 风格的顶层 `driver.mcpServers` 和兼容路径 `tools.full.mcpServers`

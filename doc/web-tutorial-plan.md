@@ -506,7 +506,7 @@ chapter nav         narrow reading column      page toc
 
 ### 6.4 Eval 专题
 
-Eval 专题来自 `pdd-17-eval-harness.md` 与 `pdd-18-eval-mcp-team.md`。它相对独立，可以作为“如何证明你的 agent 真的工作”的小课程。
+Eval 专题来自 `pdd-17-eval-harness.md`、`pdd-18-eval-replay-live-judge.md` 与 `pdd-19-eval-mcp-team.md`。它相对独立，可以作为“如何证明你的 agent 真的工作”的小课程。
 
 ### 6.5 Reference
 
@@ -1079,7 +1079,7 @@ Prompt Card 目标：
 
 > 专题 B：如何测试一个不确定的 Coding Agent
 
-来源：`pdd-17-eval-harness.md`、`pdd-18-eval-mcp-team.md`。
+来源：`pdd-17-eval-harness.md`、`pdd-18-eval-replay-live-judge.md`、`pdd-19-eval-mcp-team.md`。
 
 这个专题相对独立。它不是继续给 agent 加功能，而是教学生如何证明 agent 真的工作。
 
@@ -1351,27 +1351,27 @@ flowchart LR
 
 ## 12. 从 PDD 到教程的映射
 
-| 教程位置  | 来源工作文档                                        | 发布版处理                                |
-| --------- | --------------------------------------------------- | ----------------------------------------- |
-| 第 0 章   | summary + 项目背景                                  | 改写成学习动机和致谢                      |
-| 第 1 章   | `pdd-01-agent-loop.md`                              | 讲最小 loop、History、LLM Client 与组装根 |
-| 第 2 章   | `pdd-02-tools.md`                                   | 讲工具调用，不贴完整实现                  |
-| 第 3 章   | `pdd-03-todo.md`                                    | 讲短期 TODO 与 loop 节奏                  |
-| 第 4 章   | `pdd-04-subagent.md`                                | 讲子智能体作为工具                        |
-| 第 5 章   | `pdd-05-skill.md`                                   | 讲 Skill 与按需能力加载                   |
-| 第 6 章   | `pdd-06-compression.md`                             | 讲消息规范化和压缩边界                    |
-| 第 7 章   | `pdd-07-permission.md`                              | 讲权限和安全层次                          |
-| 第 8 章   | `pdd-08-hooks.md`                                   | 讲 Hook 扩展点                            |
-| 第 9 章   | `pdd-09-memory.md`                                  | 讲长期 Memory                             |
-| 第 10 章  | `pdd-10-cache.md`                                   | 讲 cache-friendly request layout          |
-| 第 11 章  | `pdd-11-recovery.md`                                | 讲错误恢复                                |
-| 第 12 章  | `pdd-12-tasks.md`                                   | 讲持久化 Task                             |
-| 第 13 章  | `pdd-13-async-run.md`                               | 讲 Async Run                              |
-| 第 14 章  | `pdd-14-schedule.md`                                | 讲 Schedule                               |
-| 第 15 章  | `pdd-15-runtime-hardening.md`                       | 讲长期运行鲁棒性                          |
-| 专题 A    | `pdd-16-model-policy.md`                            | 讲模型能力画像和 runtime policy           |
-| 专题 B    | `pdd-17-eval-harness.md`、`pdd-18-eval-mcp-team.md` | 讲 eval harness                           |
-| Reference | summary + 源码注释                                  | 提炼术语表、prompt pack、验证 playbook    |
+| 教程位置  | 来源工作文档                                                                            | 发布版处理                                |
+| --------- | --------------------------------------------------------------------------------------- | ----------------------------------------- |
+| 第 0 章   | summary + 项目背景                                                                      | 改写成学习动机和致谢                      |
+| 第 1 章   | `pdd-01-agent-loop.md`                                                                  | 讲最小 loop、History、LLM Client 与组装根 |
+| 第 2 章   | `pdd-02-tools.md`                                                                       | 讲工具调用，不贴完整实现                  |
+| 第 3 章   | `pdd-03-todo.md`                                                                        | 讲短期 TODO 与 loop 节奏                  |
+| 第 4 章   | `pdd-04-subagent.md`                                                                    | 讲子智能体作为工具                        |
+| 第 5 章   | `pdd-05-skill.md`                                                                       | 讲 Skill 与按需能力加载                   |
+| 第 6 章   | `pdd-06-compression.md`                                                                 | 讲消息规范化和压缩边界                    |
+| 第 7 章   | `pdd-07-permission.md`                                                                  | 讲权限和安全层次                          |
+| 第 8 章   | `pdd-08-hooks.md`                                                                       | 讲 Hook 扩展点                            |
+| 第 9 章   | `pdd-09-memory.md`                                                                      | 讲长期 Memory                             |
+| 第 10 章  | `pdd-10-cache.md`                                                                       | 讲 cache-friendly request layout          |
+| 第 11 章  | `pdd-11-recovery.md`                                                                    | 讲错误恢复                                |
+| 第 12 章  | `pdd-12-tasks.md`                                                                       | 讲持久化 Task                             |
+| 第 13 章  | `pdd-13-async-run.md`                                                                   | 讲 Async Run                              |
+| 第 14 章  | `pdd-14-schedule.md`                                                                    | 讲 Schedule                               |
+| 第 15 章  | `pdd-15-runtime-hardening.md`                                                           | 讲长期运行鲁棒性                          |
+| 专题 A    | `pdd-16-model-policy.md`                                                                | 讲模型能力画像和 runtime policy           |
+| 专题 B    | `pdd-17-eval-harness.md`、`pdd-18-eval-replay-live-judge.md`、`pdd-19-eval-mcp-team.md` | 讲 eval harness                           |
+| Reference | summary + 源码注释                                                                      | 提炼术语表、prompt pack、验证 playbook    |
 
 ## 13. 内容生成流程建议
 
@@ -1420,7 +1420,7 @@ flowchart LR
 
 ### 13.4 第四轮：Eval 专题
 
-把 `pdd-17-eval-harness.md` 和 `pdd-18-eval-mcp-team.md` 改写为专题 B。
+把 `pdd-17-eval-harness.md`、`pdd-18-eval-replay-live-judge.md` 和 `pdd-19-eval-mcp-team.md` 改写为专题 B。
 
 重点不是工具命令，而是 eval 思维：
 
@@ -1485,7 +1485,7 @@ flowchart LR
 - 不要把章节写成薄提纲；每章都要有朴素方案、失败原因、真实运行 walkthrough、状态变化和验证叙事。
 - 不要把 Prompt Card、Design Trap、Validation Card 写成教程作者说明或学生考核说明；它们必须面向本章 agent 能力的实现、坑点和行为验证。
 - 不要把 `pdd-16-model-policy` 插到第 1 章前面，它会打断新手理解 loop。
-- 不要把 `pdd-17-eval-harness.md` / `pdd-18-eval-mcp-team.md` 混入主线章节，它们是独立 eval 课程。
+- 不要把 `pdd-17-eval-harness.md` / `pdd-18-eval-replay-live-judge.md` / `pdd-19-eval-mcp-team.md` 混入主线章节，它们是独立 eval 课程。
 - 不要在教程中假设 PDD 文件永远存在。
 - 不要让发布版正文默认链接本地 `/source/src/...`；源码链接默认使用 GitHub 代码页。
 - 不要写成“如何使用本项目工具”的说明书；要写成“如何设计和重建一个 agent harness”的课程。
@@ -1516,7 +1516,7 @@ flowchart LR
 - Prompt Card 必须面向“实现本章 agent 能力”，不能写成“如何生成教程”“如何考核学生”；学生复制 Prompt Card 各部分后，应能让其他 coding agent 大致生成本章代码。
 - 容易踩坑和验证方法必须围绕 agent 行为正确性，例如 history 是否保留多轮上下文、tool_call/tool_result 是否配对、权限是否在执行前生效、trace 是否记录事实，而不是围绕教程页面质量。
 - pdd-16-model-policy 改写为模型适配专题。
-- pdd-17/pdd-18 改写为 Eval 专题。
+- pdd-17/pdd-18/pdd-19 改写为 Eval 专题。
 - 学生克隆项目后，应能本地启动 web 服务阅读 HTML 版教程。
 - 教程要图文并茂，每章至少有一张帮助理解架构的图。
 - 当前视觉和交互以 web/temp/2/ dummy 页面为基准：固定顶部 header、三栏独立滚动、左侧章节目录、右侧页内目录、中间正文容器独立滚动。

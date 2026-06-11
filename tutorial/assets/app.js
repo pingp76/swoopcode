@@ -199,6 +199,7 @@ function afterArticleRendered(currentId) {
   buildPageToc();
   bindInPageLinks();
   bindCopyButtons();
+  highlightAllCodeBlocks(articleRoot);
 
   if (article) {
     article.scrollTop = 0;
@@ -487,6 +488,284 @@ function initializeSidebarLayout() {
       saveLayoutState(side, nextOpen);
     });
   });
+}
+
+// ============================================================
+// 代码块语法高亮 (TS/JS, 运行时零依赖)
+// ------------------------------------------------------------
+// 设计取舍:
+// - 不引入 highlight.js / shiki, 保持 "零依赖 + 零网络" 承诺。
+// - 识别 6 类 token: 关键字 / 字符串 / 数字 / 注释 / 接口名 / 类型名。
+// - 输入是已经 HTML 转义的字符串 (代码块写在 .html 里, < > & 已是实体),
+//   所以第一步反转义, 高亮后再转义回去, 避免把代码误识别为 HTML。
+// - 只处理 <pre class="code-block"><code>...</code></pre>, 不动行内 <code>。
+// ============================================================
+
+const TS_KEYWORDS = new Set([
+  // 控制流
+  "if",
+  "else",
+  "for",
+  "while",
+  "do",
+  "switch",
+  "case",
+  "default",
+  "break",
+  "continue",
+  "return",
+  "throw",
+  "try",
+  "catch",
+  "finally",
+  // 声明
+  "const",
+  "let",
+  "var",
+  "function",
+  "class",
+  "extends",
+  "implements",
+  "interface",
+  "type",
+  "enum",
+  "namespace",
+  "module",
+  "declare",
+  "import",
+  "export",
+  "from",
+  "as",
+  "default",
+  // 运算符 / 字面量
+  "new",
+  "delete",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "void",
+  "this",
+  "super",
+  "yield",
+  "async",
+  "await",
+  "static",
+  "get",
+  "set",
+  // 字面量
+  "true",
+  "false",
+  "null",
+  "undefined",
+  // TS 特有
+  "public",
+  "private",
+  "protected",
+  "readonly",
+  "abstract",
+  "keyof",
+  "infer",
+  "is",
+  "satisfies",
+  "never",
+  "unknown",
+  "any",
+]);
+
+const TS_BUILTIN_TYPES = new Set([
+  "string",
+  "number",
+  "boolean",
+  "bigint",
+  "symbol",
+  "object",
+  "Array",
+  "Map",
+  "Set",
+  "Record",
+  "Partial",
+  "Readonly",
+  "Promise",
+  "Date",
+  "RegExp",
+  "Error",
+  "void",
+  "never",
+  "unknown",
+  "any",
+]);
+
+function unescapeHtmlEntities(input) {
+  return input
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&amp;", "&");
+}
+
+function escapeHtmlEntities(input) {
+  return input
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function highlightTokens(source) {
+  // 状态机: 普通 / 行注释 / 块注释 / 字符串 / 模板字符串
+  let out = "";
+  let i = 0;
+  const len = source.length;
+
+  function push(text, cls) {
+    if (!text) return;
+    out += cls
+      ? `<span class="tok-${cls}">${escapeHtmlEntities(text)}</span>`
+      : escapeHtmlEntities(text);
+  }
+
+  function isIdStart(ch) {
+    return /[A-Za-z_$]/.test(ch);
+  }
+  function isIdPart(ch) {
+    return /[A-Za-z0-9_$]/.test(ch);
+  }
+
+  while (i < len) {
+    const ch = source[i];
+    const next = source[i + 1];
+
+    // 行注释
+    if (ch === "/" && next === "/") {
+      let j = i;
+      while (j < len && source[j] !== "\n") j++;
+      push(source.slice(i, j), "comment");
+      i = j;
+      continue;
+    }
+
+    // 块注释
+    if (ch === "/" && next === "*") {
+      let j = i + 2;
+      while (j < len - 1 && !(source[j] === "*" && source[j + 1] === "/")) j++;
+      j = Math.min(len, j + 2);
+      push(source.slice(i, j), "comment");
+      i = j;
+      continue;
+    }
+
+    // 字符串 (单引号 / 双引号)
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      let j = i + 1;
+      while (j < len && source[j] !== quote) {
+        if (source[j] === "\\") j += 2;
+        else if (source[j] === "\n") break;
+        else j++;
+      }
+      j = Math.min(len, j + 1);
+      push(source.slice(i, j), "string");
+      i = j;
+      continue;
+    }
+
+    // 模板字符串 (允许 ${...} 嵌套, 简单版本: 找到匹配的 `)
+    if (ch === "`") {
+      let j = i + 1;
+      let depth = 0;
+      while (j < len) {
+        if (source[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (source[j] === "$" && source[j + 1] === "{") {
+          depth++;
+          j += 2;
+          continue;
+        }
+        if (source[j] === "}" && depth > 0) {
+          depth--;
+          j++;
+          continue;
+        }
+        if (source[j] === "`" && depth === 0) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      push(source.slice(i, j), "string");
+      i = j;
+      continue;
+    }
+
+    // 数字 (含 0x / 0b / 0o / 小数 / 指数)
+    if (/[0-9]/.test(ch) || (ch === "." && /[0-9]/.test(next))) {
+      let j = i;
+      if (source[j] === "0" && /[xXbBoO]/.test(source[j + 1])) {
+        j += 2;
+        while (j < len && /[0-9a-fA-F_]/.test(source[j])) j++;
+      } else {
+        while (j < len && /[0-9_]/.test(source[j])) j++;
+        if (source[j] === ".") j++;
+        while (j < len && /[0-9_]/.test(source[j])) j++;
+        if (source[j] === "e" || source[j] === "E") {
+          j++;
+          if (source[j] === "+" || source[j] === "-") j++;
+          while (j < len && /[0-9_]/.test(source[j])) j++;
+        }
+      }
+      push(source.slice(i, j), "number");
+      i = j;
+      continue;
+    }
+
+    // 标识符
+    if (isIdStart(ch)) {
+      let j = i;
+      while (j < len && isIdPart(source[j])) j++;
+      const word = source.slice(i, j);
+
+      // 类型标注位: `:` `=` `(` `,` `<` `[` `!` `?` `{` `&` `|` 之后
+      // 才把标识符识别成类型名; interface/type 后的 identifier 一律是类型
+      let cls = "";
+      if (TS_KEYWORDS.has(word)) {
+        cls = "keyword";
+      } else if (TS_BUILTIN_TYPES.has(word)) {
+        cls = "type";
+      } else if (word[0] >= "A" && word[0] <= "Z") {
+        // 名字以大写开头的标识符 (PascalCase) 在 TS 习惯上是类型/接口
+        cls = "type";
+      }
+
+      push(word, cls);
+      i = j;
+      continue;
+    }
+
+    // 其他字符原样输出
+    push(ch, "");
+    i++;
+  }
+
+  return out;
+}
+
+function highlightCodeBlock(codeElement) {
+  if (codeElement.dataset.highlighted === "true") return;
+  codeElement.dataset.highlighted = "true";
+  const raw = codeElement.textContent ?? "";
+  const source = unescapeHtmlEntities(raw);
+  codeElement.innerHTML = highlightTokens(source);
+}
+
+function highlightAllCodeBlocks(root) {
+  if (!root) return;
+  const blocks = root.querySelectorAll("pre.code-block > code");
+  blocks.forEach(highlightCodeBlock);
 }
 
 initializeSidebarLayout();
