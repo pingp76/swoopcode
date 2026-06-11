@@ -10,8 +10,7 @@
  * - 每个 case 限制 maxCalls/maxRounds，控制成本和运行时间。
  *
  * 启用条件：
- *   EVAL_LIVE=1              → 同时跑 live-smoke + live-regression
- *   EVAL_LIVE_REGRESSION=1   → 只跑 live-regression（不需要 EVAL_LIVE）
+ *   EVAL_LIVE_REGRESSION=1   → 只跑 live-regression
  * 未设置时自动 skip。
  */
 

@@ -12,7 +12,7 @@ Design documents live in `doc/`. The current project state lives in `doc/summary
 
 Before working in this repository:
 
-1. Read `AGENTS.md`.
+1. Read `AGENTS.md` (and `CLAUDE.md`, which is a mirror of this file for Claude Code compatibility).
 2. Read `doc/summary.md` to understand the current implemented state.
 3. If the task references a design document, read that document before changing code.
 

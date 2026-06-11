@@ -461,8 +461,8 @@ resolve(tasksDir, "groups")
 {
   "title": "实现持久化 Task 系统",
   "description": "可选的长期目标说明",
-  "project_roots": ["/Users/lebingxie/AI/AI_Worspace2026/swoopcode"],
-  "primary_project_root": "/Users/lebingxie/AI/AI_Worspace2026/swoopcode",
+  "project_roots": ["<absolute-path-to-your-project>"],
+  "primary_project_root": "<absolute-path-to-your-project>",
   "tasks": [
     {
       "subject": "设计 TaskStore",

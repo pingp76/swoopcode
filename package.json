@@ -1,7 +1,24 @@
 {
   "name": "swoopcode",
   "version": "0.1.0",
-  "description": "A teaching-purpose coding agent built with TypeScript",
+  "description": "A teaching-purpose TypeScript coding agent demonstrating the full harness: agent loop, tools, permissions, context, memory, async runs, schedules, and an eval harness",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pingp76/swoopcode.git"
+  },
+  "homepage": "https://github.com/pingp76/swoopcode",
+  "bugs": {
+    "url": "https://github.com/pingp76/swoopcode/issues"
+  },
+  "keywords": [
+    "agent",
+    "coding-agent",
+    "typescript",
+    "llm",
+    "tool-use",
+    "tutorial"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "engines": {
