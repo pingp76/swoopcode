@@ -39,7 +39,7 @@ Memory 的目标是让 Agent 在跨会话、跨任务时记住少量长期稳定
 - 不把 memory 当成 TODO、计划或任务进度系统。
 - 不把 memory 当成安全策略来源。
 
-如果未来要做更接近生产系统的全局用户记忆，可以把 `memory/` 迁移到用户 home 目录，例如 `~/.learn-claude-code/memory/`。本阶段为了教学直观，默认放在 Agent 仓库内。
+如果未来要做更接近生产系统的全局用户记忆，可以把 `memory/` 迁移到用户 home 目录，例如 `~/.swoopcode/memory/`。本阶段为了教学直观，默认放在 Agent 仓库内。
 
 ## 目录语义
 

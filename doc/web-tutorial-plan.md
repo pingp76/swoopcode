@@ -22,7 +22,7 @@
 
 > 这个教程受到 `shareAI-lab/learn-claude-code` 启发。原项目用非常清晰的方式展示了 Claude Code 一类 coding agent 的核心思想：真正需要我们构建的，不是另一个大模型，而是承载模型工作的 harness，也就是 loop、工具、上下文、权限、记忆、任务、调度和验证系统。
 >
-> 本项目是这个思路的 TypeScript 教学版本。我们不追求生产级复杂度，而是追求让学生一步步看懂：一个 coding agent 为什么会这样长出来。
+> 本项目是这个思路的 TypeScript Coding Agent 教程本。我们不追求生产级复杂度，而是追求让学生一步步看懂：一个 coding agent 为什么会这样长出来。
 
 不要把致谢写成脚注。它应该出现在首页第一屏或第一章开头，因为这决定了项目的思想来源和读者预期。
 
@@ -473,7 +473,7 @@ chapter nav         narrow reading column      page toc
 
 推荐做法：
 
-- 在站点配置中集中定义源码根地址，例如 `sourceBaseUrl = "https://github.com/pingp76/learning-claude-code-ts/blob/main"`。
+- 在站点配置中集中定义源码根地址，例如 `sourceBaseUrl = "https://github.com/pingp76/swoopcode/blob/main"`。
 - 页面里不要手写散落的完整 URL，而是通过组件或 helper 生成 `${sourceBaseUrl}/src/agent.ts`。
 - 如果未来维护章节 tag、branch 或 commit，优先把第 N 章链接指向对应版本，例如 `chapter-01-agent-loop`，避免新手点进当前 `main` 后看到后续章节的复杂实现。
 - 如果暂时没有章节版本，允许先指向 `main`，但正文要提醒：当前源码可能已经包含后续章节能力，读者只需关注本章提到的入口和接口。
@@ -488,7 +488,7 @@ chapter nav         narrow reading column      page toc
 
 必须包含：
 
-- 项目一句话：用 TypeScript 从零构建一个 Claude Code 风格的 coding agent harness。
+- 项目一句话：swoopcode：用 TypeScript 从零构建一个 coding agent harness。
 - 致谢：明确感谢 `shareAI-lab/learn-claude-code`。
 - 学习承诺：读完后能写 prompt 重建 agent，而不是背代码。
 - 学习路线图：主线教程、模型适配专题、Eval 专题。

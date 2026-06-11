@@ -9,7 +9,7 @@ import { chapters, defaultChapterId, navGroups } from "./content.js";
 // 这不是最终站点框架的绑定选择。它更像一块“交互样板”：未来迁移到
 // VitePress/Astro 时，可以把这里的行为拆成 layout/component。
 
-const STORAGE_KEY = "learn-claude-code-ts.tutorial.sidebar.v1";
+const STORAGE_KEY = "swoopcode.tutorial.sidebar.v1";
 const article = document.querySelector(".article");
 const articleRoot = document.querySelector("#article-root");
 const chapterNav = document.querySelector("#chapter-nav");
@@ -164,7 +164,7 @@ async function loadChapter(id) {
   const chapter = chapters[id] ?? chapters[defaultChapterId];
   if (!chapter || !articleRoot) return;
 
-  document.title = `${chapter.number} · ${chapter.title} · 重建一个 Coding Agent`;
+  document.title = `${chapter.number} · ${chapter.title} · swoopcode`;
 
   if (!chapter.ready || !chapter.file) {
     articleRoot.innerHTML = renderPlaceholderChapter(chapter);

@@ -127,7 +127,7 @@ const DEFAULT_CONFIG: CompressionConfig = {
   compactKeepRecent: 4,
   compressibleTools: ["run_bash"],
   outputDir: resolve(
-    process.env["AGENT_HOME"] ?? resolve(homedir(), ".learn-claude-code-ts"),
+    process.env["AGENT_HOME"] ?? resolve(homedir(), ".swoopcode"),
     ".task_outputs",
   ),
 };

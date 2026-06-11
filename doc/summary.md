@@ -1,12 +1,12 @@
 # 项目状态总览
 
-这是 learning-claude-code-ts 项目的持久化状态文档。每次新增功能模块后更新此文件。
+这是 swoopcode 项目的持久化状态文档。每次新增功能模块后更新此文件。
 
 ## 项目简介
 
 教学用途的 TypeScript Coding Agent，递进式构建，每一步都能独立运行。
 
-GitHub: https://github.com/pingp76/learning-claude-code-ts
+GitHub: https://github.com/pingp76/swoopcode
 
 ## 当前状态
 
@@ -208,7 +208,7 @@ skills/
 ### ProjectContext (`project-context.ts`)
 
 - **项目根目录抽象**：启动时集中解析 `projectRoot`，默认仍为 `process.cwd()`，后续可通过 `AGENT_PROJECT_ROOT` 扩展
-- **Agent 全局运行根目录**：启动时集中解析 `agentHome`，默认 `~/.learn-claude-code-ts`，可通过 `AGENT_HOME` 扩展
+- **Agent 全局运行根目录**：启动时集中解析 `agentHome`，默认 `~/.swoopcode`，可通过 `AGENT_HOME` 扩展
 - **项目级指令路径**：统一派生 `agentsFile = <projectRoot>/AGENTS.md`，存在时进入稳定 system prompt 头部
 - **路径集中管理**：`skillsDir`、`memoryDir`、`logsDir`、`taskOutputsDir`、`tasksDir` 全部从 `agentHome` 派生，不写入被操作项目目录
 - **组装根负责注入**：`index.ts` 创建一次 ProjectContext，再传给权限、工具注册表、压缩器、日志器、Memory/Skill 管理器
@@ -345,7 +345,7 @@ skills/
 
 ### PDD-18 Full-tools Live E2E (`src/eval/drivers/learn-claude-code/full-tool-runtime.ts` + `src/eval/live/live-full-suite.test.ts`)
 
-- **临时 agentHome 隔离**：full-tools eval runtime 使用 `createProjectContext({ projectRoot: workspaceRoot, agentHome })` 组装真实工具 provider，skills、memory、logs、task outputs、tasks、schedules 都写入 case 专属临时 `agentHome`，不读取用户真实 `~/.learn-claude-code-ts`
+- **临时 agentHome 隔离**：full-tools eval runtime 使用 `createProjectContext({ projectRoot: workspaceRoot, agentHome })` 组装真实工具 provider，skills、memory、logs、task outputs、tasks、schedules 都写入 case 专属临时 `agentHome`，不读取用户真实 `~/.swoopcode`
 - **完整工具组装**：`tools.kind="full"` 复用当前项目真实 TODO/Task/Memory/Skill/SubAgent/Async/Schedule/Output provider；Eval Core 仍保持中立，不直接 import 当前项目业务模块
 - **Seed 数据**：`seedSkills` 在创建 SkillManager 前写入临时 skills 目录；`seedMemories` 通过 MemoryManager 写入临时 memory 目录；release skill case 使用 `SKILL_USED_22` 作为技能行为标记，便于失败 trace 快速识别
 - **Async cleanup**：full runtime cleanup 会先 `scheduleManager.stop()`，再调用 `asyncRunManager.shutdown()` 将仍在 running 的 async run 收敛为 `abandoned`，最后按 `keepAgentHome` 决定是否删除临时 `agentHome`
@@ -527,7 +527,7 @@ skills/
 - **不做任何截断**：消息内容、工具参数、tool_call arguments 全部完整保留
 - **新增 Cache Debug 记录**：systemPromptHash、toolsHash、stablePrefixHash、变化标记
 - **格式化为易读结构**：角色标签对齐、JSON 美化、缩进
-- **文件策略**：固定写入 `<agentHome>/logs/llm.log`，每次启动追加 BOOT 标记；默认单文件超过 5MB 时轮转为 `llm.log.1`、`llm.log.2` 等，默认保留 5 份；默认路径是 `~/.learn-claude-code-ts/logs/llm.log`，不是项目根目录的 `logs/llm.log`
+- **文件策略**：固定写入 `<agentHome>/logs/llm.log`，每次启动追加 BOOT 标记；默认单文件超过 5MB 时轮转为 `llm.log.1`、`llm.log.2` 等，默认保留 5 份；默认路径是 `~/.swoopcode/logs/llm.log`，不是项目根目录的 `logs/llm.log`
 - **请求-响应成对**：每组用空行 + 分隔线隔开
 - **Usage 记录**：响应日志中记录 prompt/completion/total/reasoning/cache hit/cache miss 等字段
 - **Reasoning 截断**：reasoning_content 日志默认只显示前 200 字符
@@ -729,7 +729,7 @@ skills/
 | `COMPRESS_MAX_CONTEXT`     | 全量压缩 token 阈值                 | `80000`                       |
 | `COMPACT_KEEP_RECENT`      | 全量压缩保留消息块数                | `4`                           |
 | `AGENT_PROJECT_ROOT`       | 被操作项目根目录                    | 当前启动目录                  |
-| `AGENT_HOME`               | Agent 全局运行根目录                | `~/.learn-claude-code-ts`     |
+| `AGENT_HOME`               | Agent 全局运行根目录                | `~/.swoopcode`                |
 | `MEMORY_DIR`               | Memory 文件目录名（相对 agentHome） | `memory`                      |
 | `LLM_MODEL_PROFILE`        | 显式指定模型 profile                | `kimi-k2.6`                   |
 | `LLM_CONTEXT_BUDGET`       | 上下文预算覆盖（token 数）          | `180000`                      |

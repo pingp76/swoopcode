@@ -16,8 +16,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const tutorialRoot = resolve(__dirname, "..");
 const chaptersDir = resolve(tutorialRoot, "chapters");
-const githubBase =
-  "https://github.com/pingp76/learning-claude-code-ts/blob/main";
+const githubBase = "https://github.com/pingp76/swoopcode/blob/main";
 
 function escapeHtml(value) {
   return String(value)
@@ -2317,7 +2316,7 @@ chapters.push(
     ],
     naive: `朴素方案是“先不管，等文件太多再 rm -rf logs”。这会让重要审计记录、用户长期记忆和可删除缓存混在一起。`,
     naiveCode: `// 危险：不知道哪些数据可删，哪些是长期事实。
-rm -rf ~/.learn-claude-code-ts/*`,
+rm -rf ~/.swoopcode/*`,
     failures: [
       {
         term: "半截 JSON",

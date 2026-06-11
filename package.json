@@ -1,5 +1,5 @@
 {
-  "name": "learn-claude-code-ts",
+  "name": "swoopcode",
   "version": "0.1.0",
   "description": "A teaching-purpose coding agent built with TypeScript",
   "type": "module",

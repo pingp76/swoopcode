@@ -55,7 +55,7 @@ PDD-17 已经把 Eval Core、当前项目 in-process driver、deterministic suit
 5. 不把真实 LLM 输出做完整 golden snapshot。
 6. 不为了测试改写主 Agent system prompt 或工具定义。
 7. 不在本阶段重构 `index.ts` 的组装逻辑。
-8. 不读取用户真实 `~/.learn-claude-code-ts` 数据。
+8. 不读取用户真实 `~/.swoopcode` 数据。
 
 ## 核心原则
 

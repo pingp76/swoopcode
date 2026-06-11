@@ -1,6 +1,6 @@
 # Coding Agent 网页教程
 
-把 `learn-claude-code-ts` 项目讲成网页教程, 让学生看了能自己 vibe coding
+把 `swoopcode` 项目讲成网页教程, 让学生看了能自己 vibe coding
 类似的 coding agent, 也了解工作原理和注意事项。
 
 ## 本地运行

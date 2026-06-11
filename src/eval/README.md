@@ -323,7 +323,7 @@ EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 JUDGE_MODEL=gpt-4o-mini npm run test:eval:li
 
 ## Live Full Regression
 
-Live full regression 使用 `tools.kind = "full"` 验证当前单 Agent 的复杂工具系统。默认 **不运行**，并且每个 case 都使用临时 workspace 与临时 `agentHome`，不会读取或写入用户真实 `~/.learn-claude-code-ts`。
+Live full regression 使用 `tools.kind = "full"` 验证当前单 Agent 的复杂工具系统。默认 **不运行**，并且每个 case 都使用临时 workspace 与临时 `agentHome`，不会读取或写入用户真实 `~/.swoopcode`。
 
 ### 启用条件
 
