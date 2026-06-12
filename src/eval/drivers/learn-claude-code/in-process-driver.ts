@@ -199,6 +199,7 @@ export async function createLearnClaudeCodeInProcessDriver(
           join(tmpdir(), "learn-claude-eval-home-"),
         );
         const runtimeOptions: Parameters<typeof createFullEvalRuntime>[0] = {
+          caseId: context.caseId,
           workspaceRoot: context.workspaceRoot,
           agentHome,
           llm,

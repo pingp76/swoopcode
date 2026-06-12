@@ -74,9 +74,11 @@ import {
   createEvalMcpRuntime,
   type EvalMcpRuntime,
 } from "./mcp-runtime.js";
+import { writeEvalArtifactManifest } from "../../core/temp-cleanup.js";
 
 /** Full runtime 创建参数。 */
 export interface CreateFullEvalRuntimeOptions {
+  caseId?: string;
   workspaceRoot: string;
   agentHome: string;
   llm: LLMClient;
@@ -415,6 +417,16 @@ export async function createFullEvalRuntime(
         );
       }
       if (cleanupOptions?.keepAgentHome === true) {
+        try {
+          // full-tools 的 agentHome 会保存 Memory、Task、Schedule、Output 等真实状态。
+          // keepOnFailure 保留它用于调试，但写入 manifest 后，跨运行 GC 可以按 TTL 收掉。
+          await writeEvalArtifactManifest(projectContext.agentHome, {
+            caseId: options.caseId ?? "unknown",
+            kind: "agentHome",
+          });
+        } catch {
+          // manifest 只是 GC 提示；写入失败时仍保留目录，后续清理器按 mtime 兜底。
+        }
         return;
       }
       await rm(projectContext.agentHome, { recursive: true, force: true });

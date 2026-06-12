@@ -12,7 +12,8 @@
 
 import { describe, it, expect } from "vitest";
 import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import type { LLMClient } from "../llm.js";
 import type { CodingAgentDriver } from "./core/driver.js";
 import type {
@@ -22,6 +23,7 @@ import type {
 } from "./core/case-schema.js";
 import { runEvalCase } from "./core/runner.js";
 import { createLearnClaudeCodeInProcessDriver } from "./drivers/learn-claude-code/in-process-driver.js";
+import { EVAL_ARTIFACT_MANIFEST } from "./core/temp-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Fake Driver（用于测试 core runner 本身，不依赖当前项目 Agent）
@@ -424,6 +426,12 @@ describe("Eval Runner", () => {
       expect(workspaceRoot).toBeTruthy();
       expect(existsSync(agentHome!)).toBe(true);
       expect(existsSync(workspaceRoot!)).toBe(true);
+      await expect(
+        readFile(join(agentHome!, EVAL_ARTIFACT_MANIFEST), "utf-8"),
+      ).resolves.toContain("full-tools-keep-agent-home-on-failure");
+      await expect(
+        readFile(join(workspaceRoot!, EVAL_ARTIFACT_MANIFEST), "utf-8"),
+      ).resolves.toContain("full-tools-keep-agent-home-on-failure");
     } finally {
       if (agentHome) {
         await rm(agentHome, { recursive: true, force: true });

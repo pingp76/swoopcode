@@ -41,6 +41,7 @@
     "test:eval:live:team": "vitest run src/eval/live/live-team-suite.test.ts",
     "test:eval:live:team:mcp": "vitest run src/eval/live/live-team-suite.test.ts",
     "test:eval:judge": "vitest run src/eval/judge/judge-suite.test.ts",
+    "eval:cleanup": "tsx src/eval/cleanup-cli.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "format": "prettier --write \"src/**/*.ts\"",

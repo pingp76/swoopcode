@@ -10,11 +10,12 @@ GitHub: https://github.com/pingp76/swoopcode
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD-16：模型适配与 Agent Runtime Policy 抽象层**（Provider Profile + Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager + ContextRanker + RepoClassifier + TaskIntentClassifier）+ **PDD-17：Eval Harness 基础框架**（Eval Core、deterministic suite、real core tools、CLI driver）+ **PDD-18：Replay/Live/Judge/Full-tools Eval**（replay、live smoke、judge/report、live regression、full-tools live E2E）+ **PDD-19：MCP 与 Agent Team Eval Harness Prototype**（prototype suites 默认 skipped，避免误读为生产能力）+ **网页版教程雏形**（`tutorial/` 静态站点 + 第 00/01 章 + `web/temp/2/` 风格三栏阅读布局）+ **公开版 PDD 整理**（`doc/pdd-01-*.md` 到 `doc/pdd-19-*.md`，保留原始 PDD 深度，旧 refactor 工作记录已合并回对应 PDD）
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制 + Memory（长期记忆）+ **Prompt Cache 友好的请求布局** + LLM 错误恢复 + ProjectContext + Session/Transcript 原始事件流 + 持久化 Task 任务系统 + Async Run 非阻塞运行实例 + **Schedule 定时运行系统** + OutputStore 输出句柄 + 安全精确编辑 + 时间语义收口 + Runtime Hardening Round A（原子写与日志轮转）+ 教学注释增强（实现路径注释补齐）+ **PDD-16：模型适配与 Agent Runtime Policy 抽象层**（Provider Profile + Foundation Model Profile + Runtime Policy + LLM Adapter + Context Budget + Stable Context Manager + ContextRanker + RepoClassifier + TaskIntentClassifier）+ **PDD-17：Eval Harness 基础框架**（Eval Core、deterministic suite、real core tools、CLI driver）+ **PDD-18：Replay/Live/Judge/Full-tools Eval**（replay、live smoke、judge/report、live regression、full-tools live E2E）+ **PDD-19：MCP 与 Agent Team Eval Harness Prototype**（prototype suites 默认 skipped，避免误读为生产能力）+ **Eval 临时产物 TTL 清理**（失败保留 manifest + 白名单 GC CLI + trace 文件清理）+ **网页版教程雏形**（`tutorial/` 静态站点 + 第 00/01 章 + `web/temp/2/` 风格三栏阅读布局）+ **公开版 PDD 整理**（`doc/pdd-01-*.md` 到 `doc/pdd-19-*.md`，保留原始 PDD 深度，旧 refactor 工作记录已合并回对应 PDD）
 
 - **PDD-17 Eval Harness 基础能力**：Eval Core + Deterministic Suite + Real Core Tools + CLI Driver。
 - **PDD-18 Eval 回归能力**：Replay + Live Smoke + Judge/Report；Live Regression — Core Tools；Full-tools Live E2E。
 - **PDD-19 Eval Prototype 边界**：MCP fixture server + MCP runtime adapter + MCP trace/assertions；顺序 supervisor Team driver + Team trace/assertions；由于项目尚未实现生产级 MCP runtime / 真实 Agent Team runtime，相关 MCP/Team 测试当前全部 `describe.skip`。
+- **Eval 临时产物清理**：默认通过 case 结束即删除 workspace；`keepOnFailure` 保留失败 workspace / agentHome 时写入 `.eval-artifact.json`；`npm run eval:cleanup` 按白名单前缀和 TTL 清理 OS tmpdir 中的 eval 残留，并清理过期 `*.trace.json`。
 
 ## 网页版教程站点雏形
 
@@ -150,7 +151,8 @@ src/
 │   │   ├── trace.ts          # TraceRecorder、RuntimeEvent
 │   │   ├── assertions.ts     # portable + instrumented assertion 执行器
 │   │   ├── runner.ts         # runEvalCase/runEvalSuite 核心 runner
-│   │   └── trace-writer.ts   # JSON trace 输出
+│   │   ├── trace-writer.ts   # JSON trace 输出
+│   │   └── temp-cleanup.ts   # Eval 临时产物 TTL manifest 与白名单清理
 │   ├── drivers/
 │   │   ├── learn-claude-code/
 │   │   │   ├── in-process-driver.ts       # 当前项目 createAgent() driver
@@ -195,6 +197,7 @@ src/
 │   ├── replay/
 │   │   └── replay-llm.ts             # Replay LLM client
 │   ├── runner.test.ts        # core + in-process driver 集成测试
+│   ├── cleanup-cli.ts        # Eval 临时产物清理 CLI
 │   └── README.md             # Eval 系统使用文档
 skills/
 ├── code-review/
