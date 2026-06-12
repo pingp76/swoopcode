@@ -1,519 +1,661 @@
-<p class="article__eyebrow">第 09 章 · 跨会话记忆</p>
-<h1 class="article__title">让 Harness 记得用户: Memory</h1>
+<p class="article__eyebrow">第 09 章 · 跨会话的长期记忆</p>
+<h1 class="article__title">Memory: 4 类 tag 持久化团队规范与用户偏好</h1>
 <p class="article__lede">
-  前面八章让 harness 在单次会话内能聊天、调工具、跑子任务、压缩、拦权限、 留
-  hook。但用户偏好 (例如"我喜欢简洁解释") 仍然在每次新会话都丢。 这一章给
-  harness 加 Memory 模块, 区分"项目级短期事实" 和"用户级长期 事实",
-  把后者持久化, 让 harness 在新会话里也能想起。
+  第 08 章的 Hook 给了"主循环周围挂逻辑" 的扩展点, 但 SessionStart
+  handler 想读的"团队规范 / 用户偏好" 从哪来? 用户的 home 目录里
+  躺着一个 <code>MEMORY.md</code>, 团队 git 仓库里有一个
+  <code>.claude/memory/</code> 目录, 但 LLM 不知道哪些"应该记住"。 这一章
+  加 <strong>Memory 系统</strong>: 4 类 tag (user / feedback / project /
+  reference) × Markdown frontmatter 存储 × 自动生成索引 × Jaccard
+  相似度去重, 启动时通过 SessionStart handler 注入 system prompt。
+  读完后, 你能讲清"4 类 tag 的语义" (用户偏好 vs 团队规范 vs 项目
+  上下文 vs 参考资料), 并能用 fake filesystem 验证"name 合法 + 索引
+  重建 + 相似度去重" 3 条不变量。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-08">在第 08 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="real-failure">真实失败故事: 用户说"我之前说过" harness 完全不知道</h2>
 <p>
-  这一章在 Composition Root 加 memory 持久化层。memory 数据落盘到
-  <code>~/.claude/memory/&lt;scope&gt;/&lt;key&gt;.md</code> 这样的 markdown
-  文件, scope 区分 <code>user</code> (用户级) 和 <code>project</code> (项目级)。
-  agent 主循环在 SessionStart 时把 memory 注入到 system prompt, 会话过程中 LLM
-  可通过 save_memory 工具更新 memory。memory 与 history 严格分离, 不进 messages
-  序列。 对应到代码, 改动集中在 3 个文件: <code>src/memory.ts</code> (新)、
-  <code>src/tools/save_memory.ts</code> (新)、<code>src/agent.ts</code> (改
-  SessionStart 注入 memory)。
+  写代码之前, 先看一个真实痛点。 用户的 team 用 harness 跑 3 个月后,
+  反复问 LLM 同样的偏好:
 </p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/memory.ts: Memory 持久化 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/agent.ts: SessionStart 注入 memory 到 system prompt</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/project-context.ts"
-    target="_blank"
-    rel="noreferrer"
-    >3. src/project-context.ts: 项目级上下文 (新)</a
-  >
+<ol>
+<li>
+<strong>用户偏好</strong>: 用户每次都说"中文回答 + TypeScript 不要 any",
+    harness 每次都按默认回答。
+  </li>
+<li>
+<strong>团队规范</strong>: team 反复要求"PR 标题用 conventional commit
+    格式", harness 每次都按普通 commit 写。
+  </li>
+<li>
+<strong>项目上下文</strong>: 用户每次说"这个项目用 pnpm 不用 npm",
+    harness 每次都跑 <code>npm install</code>。
+  </li>
+<li>
+<strong>参考资料</strong>: 用户每次说"读 README.md 第 3 节", harness
+    每次都搜错文件。
+  </li>
+</ol>
+<p>
+  朴素想法 1: "把这些写进 system prompt?" 错。 system prompt 是
+  稳定前缀, 频繁改会破坏 prompt cache (第 10 章), 改一次成本
+  ×10。 system prompt 应该<strong>冷启动时一次</strong>写, 不
+  经常改。
+</p>
+<p>
+  朴素想法 2: "让 LLM 自己读 MEMORY.md?" 浪费 token, 而且 LLM 不知道
+  "应该读哪里", 容易读错。 应该 harness 主动<strong>按 type 筛选</strong>,
+  只把"高价值低频变" 的条目注入 system prompt。
+</p>
+<p>
+  正确做法: 加 <code>src/memory.ts</code> 模块 — 每条 memory 是独立
+  Markdown 文件 (frontmatter + body), 4 类 tag 区分, harness 在
+  SessionStart 启动时扫一次目录, 把所有条目按 type 排序后注入
+  system prompt, 之后 100 轮对话 cache 命中。 这是 Reference 章节
+  "模式 11 · Cache-friendly 缓存友好" 的具体应用。
+</p>
+<h2 id="four-types">4 类 tag: user / feedback / project / reference</h2>
+<p>
+  <strong>用途</strong>: 不同来源 / 不同变更频率 / 不同优先级的
+  memory 条目应该<strong>分开存</strong>, 启动时按 type 决定注入
+  顺序。 4 类 tag 是固定枚举, 不允许自定义第 5 类 — 多了维护成本
+  上升, 少了语义冲突。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户把"中文回答" 存为
+  <code>type: user</code>; team 把"PR 用 conventional commit" 存为
+  <code>type: feedback</code>; 项目把"用 pnpm" 存为
+  <code>type: project</code>; 用户把"读 README.md 第 3 节" 存为
+  <code>type: reference</code>。 4 类各管一摊, 不会把"个人偏好" 和
+  "团队规范" 混在一起。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>固定枚举 + 字段类型</strong> —
+  4 类不是任意字符串, 是编译期可见的 union, 写错会 TypeScript 编译
+  失败。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L30"><code>src/memory.ts</code> 第 30 行的 <code>MemoryType</code> union</a>:
+</p>
+<pre><code class="language-typescript">export type MemoryType = "user" | "feedback" | "project" | "reference";</code></pre>
+<div class="figure figure--stack">
+  <div class="figure__title">图 1 · 4 类 memory 的语义边界</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">user · 用户偏好</div>
+      <div class="flow-stack__body">"中文回答" "不要用 any" "注释用中文" — 来自单个用户, 跨项目, 几乎不变。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">feedback · 团队反馈</div>
+      <div class="flow-stack__body">"PR 用 conventional commit" "测试要覆盖边界" — 来自团队, 跨项目但周期更新。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">project · 项目上下文</div>
+      <div class="flow-stack__body">"这个项目用 pnpm" "src/ 在 packages/core 下" — 来自项目, 项目内稳定, 跨项目无意义。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">reference · 参考资料</div>
+      <div class="flow-stack__body">"读 README.md 第 3 节" "API 文档在 https://..." — 高频查, 路径稳定但内容可能改。</div>
+    </div>
+  </div>
 </div>
-
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    用户在新会话里说"我喜欢简洁解释", agent 完全不知道用户在上一会话
-    说过这件事。现象是"harness 短期记忆 OK, 长期记忆缺失"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"把 memory 写在 history 里"。这有两个问题: 一是 history
-    每次新会话都从空开始, memory 仍然丢; 二是 history 是"对话 上下文", memory
-    是"长期事实", 两者职责不同。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口:
-    <code
-      >interface MemoryStore { get(scope, key), set(scope, key, value),
-      list(scope) }</code
-    >。 不变量三条: (1) memory 数据不进 history.getMessages(), (2) memory 落盘是
-    append-only (更新是写新文件, 不直接改原文件, 第 15 章 atomic-write 兜底),
-    (3) 区分 user 级与 project 级, user 级跨项目共享, project
-    级仅在当前项目可见。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    fake memoryStore 暴露 spy, 跑完一次会话, spy.set 被调用写入"用户 喜欢简洁";
-    第二次会话启动, SessionStart 注入的 system prompt 含 "用户偏好: 简洁解释",
-    LLM 第二轮能引用这个事实。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
-
-<div class="note">
-  <p class="note__title">观察 1 · memory 写在 history 里</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// 错误: 试图用 history 保存 memory
-history.add({ role: "system", content: "User preference: 简洁解释" });
-history.persist();  // 错误: history 不该有 persist 方法</code></pre>
-  <p><strong>问:</strong>为什么不复用 history 的持久化能力?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 职责: history 是"对话上下文", memory
-    是"长期事实", 两者职责不同; 性能: history 每次 LLM 调用都 重新发送, memory
-    写进去意味着每次都重传无关事实; 协议: memory 改了 history 的语义, 后续
-    compress / replay 都会混乱。
-  </p>
-</div>
-
-<div class="note">
-  <p class="note__title">观察 2 · 不区分 scope, 所有 memory 写一个文件</p>
-  <pre class="code-block"><code>// 教学简化版
-const memory = await fs.readFile("~/.claude/memory", "utf8");
-memory += `\n${newFact}`;
-await fs.writeFile("~/.claude/memory", memory);</code></pre>
-  <p><strong>问:</strong>为什么不分 scope?</p>
-  <p>
-    <strong>答:</strong>用户换项目之后, 项目级 fact (例如"本项目用 React") 跟着
-    user 走, 污染新项目。区分 user / project scope 之后, 项目级 fact
-    在新项目自动隐藏, 不会被 LLM 误用。
-  </p>
-</div>
-
-<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export type MemoryScope = "user" | "project";
-
-export interface MemoryEntry {
-  scope: MemoryScope;
-  key: string;       // 例如 "user.preference.explanation_style"
-  value: string;     // markdown 内容
-  updatedAt: number; // epoch ms
-}
-
-export interface MemoryStore {
-  get(scope: MemoryScope, key: string): Promise&lt;MemoryEntry | null&gt;;
-  set(scope: MemoryScope, key: string, value: string): Promise&lt;void&gt;;
-  list(scope: MemoryScope): Promise&lt;MemoryEntry[]&gt;;
-  // 渲染为 system prompt 片段
-  renderForPrompt(scope: MemoryScope): Promise&lt;string&gt;;
+<p>
+  <strong>实现细节</strong>: 4 类 tag 的<strong>语义正交</strong>, 不允许
+  出现"既是 user 又是 feedback" 的情况 — 真出现, 说明该拆成两条
+  memory。 启动注入顺序按 type 排序 (user → feedback → project →
+  reference), 保证 system prompt 里的相对位置稳定, cache 命中。
+</p>
+<h2 id="file-format">文件格式: frontmatter + body 的 Markdown</h2>
+<p>
+  <strong>用途</strong>: 每条 memory 是独立 .md 文件, 方便 git diff
+  / review / 合并冲突解决。 文件名 = <code>${name}.md</code>, 文件
+  内 frontmatter <code>name</code> 字段必须和文件名一致 (双重校验)。
+</p>
+<p>
+  <strong>真实场景</strong>: team 改了一条 feedback memory, 提 PR,
+  reviewer 看 git diff 看到 frontmatter 改了 description + body 改了
+  一段, 接受合并。 如果用 JSON, 整个文件一行, review 看到的是
+  "改了一个字符但不知道改哪"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>人类可读 + 工具可解析</strong> —
+  复用 skills.ts 的 <code>parseFrontmatter()</code> (第 05 章), 不引入
+  YAML 依赖。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L151"><code>src/memory.ts</code> 第 151 行的 <code>serializeMemory</code></a>:
+</p>
+<pre><code class="language-typescript">export function serializeMemory(entry: MemoryEntry): string {
+  const lines = [
+    "---",
+    `name: ${entry.meta.name}`,
+    `description: ${entry.meta.description}`,
+    `type: ${entry.meta.type}`,
+    `createdAt: ${entry.meta.createdAt}`,
+    `updatedAt: ${entry.meta.updatedAt}`,
+    "---",
+    entry.body,
+  ];
+  return lines.join("\n");
 }</code></pre>
+<p>
+  <strong>实现细节</strong>: frontmatter 5 个必填字段 (name /
+  description / type / createdAt / updatedAt) — 缺一个就 warn
+  日志 + 跳过该文件, 不抛错。 这条"宽容失败" 是 Reference 章节
+  "模式 17 · Test Doubles 测试替身" 的反向应用 — 解析器要容忍
+  坏文件, 不因为一个坏文件就让 agent 启动失败。
+</p>
+<p>
+  name 字段有<strong>双重校验</strong>: 文件名 <code>${name}.md</code> ↔
+  frontmatter <code>name</code> 必须一致。 不一致就 warn + 跳过。
+  这条"对称校验" 是 AGENTS.md "Validation Rules" 的体现 — name 是
+  identity 字段, 文件名和 frontmatter 必须由一个模块明确验证。
+</p>
+<h2 id="manager-closure">createMemoryManager 工厂 + 闭包缓存</h2>
+<p>
+  <strong>用途</strong>: MemoryManager 接口在 Composition Root 创建,
+  通过闭包缓存 scan 过的 entries 列表, <code>read()</code> /
+  <code>list()</code> 走内存不走磁盘, 性能稳定。
+</p>
+<p>
+  <strong>真实场景</strong>: SessionStart 启动时调一次 <code>scan()</code>
+  扫目录 (10 个文件, 大约 5ms), 之后 100 轮对话每次都调
+  <code>buildPromptSection()</code> 注入 system prompt, 这 100 次
+  调都走内存缓存, 不再读磁盘。 内存里的 entries 在
+  <code>create()</code> / <code>delete()</code> 后自动重建索引。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>工厂 + 闭包</strong> — 这是
+  Reference 章节 "模式 1 · 工厂 + 闭包" 的标准应用: 内部状态
+  (cachedEntries + memoryDir + logger) 全在闭包内, 外部只能通过
+  MemoryManager 接口访问。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L331"><code>src/memory.ts</code> 第 331 行的 <code>createMemoryManager</code> 工厂</a>:
+</p>
+<pre><code class="language-typescript">export function createMemoryManager(options: {
+  memoryDir: string;
+  logger: Logger;
+}): MemoryManager {
+  const { memoryDir, logger } = options;
+  let cachedEntries: MemoryEntry[] = [];  // 闭包内状态
 
-<h2 id="scope-rules">scope 划分规则</h2>
-<dl class="defs">
-  <dt>user 级</dt>
-  <dd>
-    跨项目共享的事实, 例如 "user.preference.explanation_style = 简洁",
-    "user.preferred_language = zh-CN"。这些 facts 在任何项目任何会话 都生效。
-  </dd>
-  <dt>project 级</dt>
-  <dd>
-    仅在当前项目可见的事实, 例如 "project.tech_stack = React + TypeScript",
-    "project.naming = camelCase"。这些 facts 在新项目自动隐藏, 不会污染
-    其他项目。
-  </dd>
-  <dt>key 命名规范</dt>
-  <dd>
-    <code>&lt;scope-prefix&gt;.&lt;category&gt;.&lt;name&gt;</code>, 例如
-    <code>user.preference.explanation_style</code>。key 稳定, 不允许 LLM
-    自由发挥改名。
-  </dd>
-</dl>
+  function scan(): MemoryEntry[] { /* 读目录 + 解析 */ }
+  function read(name: string): MemoryEntry | null { /* 查缓存或读单文件 */ }
+  function create(input: CreateMemoryInput): MemoryEntry { /* 写文件 + 重建索引 */ }
+  // ...
 
-<h2 id="loop-integration">loop 接入: SessionStart 注入到 system prompt</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// 第一次 run() 时, SessionStart 阶段
-if (!sessionStarted) {
-  sessionStarted = true;
-
-  // 1. 加载 memory 渲染为 system prompt 片段
-  const userMemory = await memoryStore.renderForPrompt("user");
-  const projectMemory = await memoryStore.renderForPrompt("project");
-
-  // 2. 拼接到 system prompt (用稳定前缀, 第 10 章 cache-friendly 伏笔)
-  const basePrompt = history.getSystemPrompt() ?? "";
-  history.setSystemPrompt(
-    `${basePrompt}\n\n# User Memory\n${userMemory}\n\n# Project Memory\n${projectMemory}`
+  return { scan, read, create, list, findSimilar, delete, buildPromptSection, rebuildIndex, getMemoryDir };
+}</code></pre>
+<p>
+  <strong>实现细节</strong>: <code>scan()</code> 每次都清空
+  <code>cachedEntries = []</code> 然后重读, 保证结果反映磁盘最新
+  状态; <code>read(name)</code> 优先查缓存, 缓存没有再读单文件 (允许
+  "scan 之后外部改文件" 的边界情况)。 闭包隔离让多个 MemoryManager
+  实例 (父子 subagent 各一个) 互不污染。
+</p>
+<h2 id="validation">name 合法性 + type 合法性 + name == 文件名 三重校验</h2>
+<p>
+  <strong>用途</strong>: 写入和读取都要校验, 不合法的 name (路径穿越 /
+  隐藏文件 / 特殊字符) 一律拒绝。 这是 Reference 章节 "模式 15 ·
+  Identity Check 身份校验" + AGENTS.md "Validation Rules: 字段
+  一致性" 的具体应用。
+</p>
+<p>
+  <strong>真实场景</strong>: LLM 调 <code>memory_create({name: "../../etc/passwd", ...})</code>
+  想穿越目录, name 合法性校验拒绝; LLM 调 <code>memory_create({name: "foo", ...})</code>
+  但磁盘上文件叫 <code>bar.md</code>, name == 文件名校验拒绝。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>3 重校验</strong>:
+</p>
+<ol>
+<li>
+<strong>name 合法字符</strong>: 只允许 <code>[a-z0-9_-]+</code>, 看
+    <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L127"><code>src/memory.ts</code> 第 127 行的 <code>isValidName</code></a>。
+    拒绝大写 / 空格 / 点 / 斜杠, 防止路径穿越和 case-insensitive
+    文件系统的歧义。
+  </li>
+<li>
+<strong>type 合法枚举</strong>: 只允许 4 类 tag, 看
+    <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L134"><code>src/memory.ts</code> 第 134 行的 <code>isValidType</code></a>。
+    拒绝任意字符串, 防止"我自己加一类" 破坏 4 类语义。
+  </li>
+<li>
+<strong>name == 文件名</strong>: frontmatter <code>name</code> 必须
+    等于文件名 (去掉 .md), 看
+    <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L394"><code>src/memory.ts</code> 第 394 行的对称校验</a>。
+    防止"改了 frontmatter 没改名" 或"改了名没改 frontmatter" 的
+    身份错位。
+  </li>
+</ol>
+<p>
+  <strong>实现细节</strong>: 3 重校验失败都<strong>只 warn 日志 + 跳过</strong>,
+  不抛错。 一个坏文件不能阻止整个 agent 启动 — 用户可能手改了
+  frontmatter, harness 应该宽容。 这是 Reference 章节 "模式 13 ·
+  Error→Action 错误转动作" 的应用 — 错误 = warn + 跳过, 不是 throw。
+</p>
+<h2 id="index">MEMORY.md 自动索引: 不手写</h2>
+<p>
+  <strong>用途</strong>: 用户 / reviewer 看 <code>memory/</code> 目录
+  时需要一个"目录页" — 哪些 memory 存在, 各自是哪个 type, 一句话
+  描述是什么。 索引自动生成, 不手写, 否则容易"加 memory 忘了同步
+  索引"。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户想看 "我项目里有哪些 feedback 类型
+  的 memory", 直接读 <code>MEMORY.md</code> 看索引 — 按 type 排好
+  序, 每行 <code>- [feedback] name: description</code>。 这是
+  Reference 章节 "模式 11 · Cache-friendly 缓存友好" 的延伸 —
+  索引是 cache miss 时 fallback 的"快速查表"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>派生数据</strong> — 索引是
+  scan 结果的派生, 每次 <code>create()</code> / <code>delete()</code>
+  后自动 rebuild, 用户不能手写 (被排除在 scan 之外)。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L234"><code>src/memory.ts</code> 第 234 行的 <code>buildIndexContent</code></a>:
+</p>
+<pre><code class="language-typescript">function buildIndexContent(entries: MemoryEntry[]): string {
+  const header = "# Memory Index\n";
+  const lines = entries.map(
+    (e) =&gt; `- [${e.meta.type}] ${e.meta.name}: ${e.meta.description}`,
   );
-
-  // 3. SessionStart Hook (第 08 章)
-  const hookResult = await safeRunHook(/* ... */);
-  if (hookResult.exitCode === 1) return hookResult.message;
-}
-
-// save_memory 工具
-async function saveMemory(args) {
-  await memoryStore.set(args.scope, args.key, args.value);
-  return { toolCallId: call.id, content: `Saved ${args.scope}.${args.key}` };
+  return header + "\n" + lines.join("\n") + "\n";
 }</code></pre>
 <p>
-  关键设计: memory 拼到 system prompt 的固定位置 ("# User Memory" / "# Project
-  Memory"), 即使 memory 内容变化, 这一行 prefix 稳定, 不会破坏第 10 章
-  cache-friendly 布局。memory 内容本身在 LLM 视角 是动态的, 但 prefix 锚点不变。
+  <strong>实现细节</strong>: 索引按 type → name 稳定排序
+  (看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L247"><code>src/memory.ts</code> 第 247 行的 <code>getStableSortKey</code></a>),
+  保证每次 rebuild 出来的 MEMORY.md 内容一致, git diff 只显示
+  "新增/删除/更新", 不显示"顺序变了"。
 </p>
-
-<h2 id="persistence">落盘: append-only + atomic write</h2>
+<h2 id="similarity">相似度去重: Jaccard 教学版</h2>
 <p>
-  memory 落盘必须用 atomic write (第 15 章会展开): 写新文件到
-  <code>~/.claude/memory/&lt;scope&gt;/&lt;key&gt;.md.tmp</code>, fsync 之后
-  rename 到正式路径。直接 <code>fs.writeFile</code> 在断电时会留半截文件,
-  下次启动解析失败。
+  <strong>用途</strong>: 用户创建 memory 前, 检查是否已存在相似条目
+  (Jaccard 相似度 ≥ 0.5 就算相似), 给 LLM 返回"已有相似条目,
+  请确认是要新增还是要更新"。 防止"反复加重复 memory"。
 </p>
 <p>
-  set() 内部追加 metadata header (updatedAt, scope), 这样 list() 时
-  不需要读文件内容就能展示元信息。文件本身是 markdown 格式, 人类可读,
-  也方便用户用编辑器手动修正。
+  <strong>真实场景</strong>: LLM 想加 "中文回答" (description), 但
+  磁盘上已有 "中文交流" (description + body 提到"中文"), 相似度
+  0.6, 返回"已有相似条目, 是否要更新?", LLM 决定更新而不是新增。
 </p>
+<p>
+  <strong>设计思想</strong>: <strong>教学版去重</strong> — 不引入
+  embedding / 向量数据库, 用 Jaccard token 重叠系数, 简单到能
+  在 30 行内讲清楚。 教学项目优先可读性, 不追求工业级精度。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L288"><code>src/memory.ts</code> 第 288 行的 <code>calculateTokenOverlap</code></a>:
+</p>
+<pre><code class="language-typescript">function calculateTokenOverlap(a: Set&lt;string&gt;, b: Set&lt;string&gt;): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const token of a) {
+    if (b.has(token)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}</code></pre>
+<p>
+  <strong>实现细节</strong>: 文本先经过 <code>normalizeForSimilarity</code>
+  (看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L261"><code>src/memory.ts</code> 第 261 行</a>)
+  — 小写 + 标点变空格 + 连续空白压缩, 再 <code>tokenizeForSimilarity</code>
+  提取长度 ≥ 2 的 token。 教学版的局限: 不识别同义词 ("中文" vs
+  "汉语"), 不识别语序变化 ("用 pnpm" vs "pnpm 是这个项目的包
+  管理器")。 工业级要做 embedding, 教学版讲 Jaccard 就够了。
+</p>
+<h2 id="prompt-section">buildPromptSection: 启动注入到 system prompt</h2>
+<p>
+  <strong>用途</strong>: SessionStart handler 调
+  <code>memoryManager.buildPromptSection()</code>, 把所有 memory
+  按 type 排序后拼成一段短文本, 注入 system prompt 的最前面
+  (稳定前缀)。
+</p>
+<p>
+  <strong>真实场景</strong>: SessionStart handler 写:
+  <code>const section = memoryManager.buildPromptSection(); if (section) systemPrompt = section + "\n\n" + systemPrompt;</code>。
+  之后 100 轮对话, system prompt 里的 memory 段不变, cache 命中。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>冷启动一次, 热对话复用</strong> —
+  memory 段在 SessionStart 一次写入 system prompt, 之后所有
+  history 都引用同一份前缀, OpenAI / Anthropic 的 prompt cache
+  按前缀命中 (第 10 章详细展开)。 这是 Reference 章节 "模式 11 ·
+  Cache-friendly 缓存友好" + "模式 12 · Reminder 注入提醒" 的
+  联合应用。
+</p>
+<p>
+  <strong>实现细节</strong>: 注入的 section 应该<strong>短小精悍</strong>
+  — 每条 memory 只取 description, 不取 body。 body 留给 LLM 需要时
+  主动调 <code>memory_read(name)</code> 查全量, 避免 system prompt
+  撑爆。 这就是"摘要 vs 全文" 的设计权衡。
+</p>
+<h2 id="loop-integration">主循环集成: SessionStart handler 读 memory</h2>
+<p>
+  <strong>用途</strong>: MemoryManager 在 Composition Root 创建, 注入
+  SessionStart handler; SessionStart handler 调
+  <code>buildPromptSection()</code> 返回 inject message; 主循环
+  收集 inject message 注入 system prompt (第 08 章延迟注入协议)。
+</p>
+<p>
+  <strong>真实场景</strong>: <code>index.ts</code> 里:
+  <code>createHookRunner({ SessionStart: [createMemoryInjectHandler(memoryManager)] }, logger)</code>。
+  Handler 内部: <code>const section = memoryManager.buildPromptSection(); return section ? { exitCode: 2, message: section } : { exitCode: 0 }</code>。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>Memory 不知道 Hook, Hook 知道 Memory</strong>
+  — memory.ts 是<strong>纯模块</strong>, 不 import hooks.ts; hooks.ts
+  通过 handler 闭包注入 memoryManager。 这就是 Reference 章节
+  "模式 3 · 依赖注入" 的应用 — 模块之间不直接耦合, 通过 Composition
+  Root 拼装。
+</p>
+<p>
+  <strong>实现细节</strong>: SessionStart handler 是<strong>幂等</strong>
+  的 — 同一 session 内, 第一次 run() 调一次, 之后不再调。 memory
+  段在第一次就注入 system prompt, 后续轮引用同一前缀, cache 命中。
+</p>
+<h2 id="cache-implication">对 prompt cache 的影响: memory 段是 stable prefix 一部分</h2>
+<p>
+  <strong>用途</strong>: 注入 system prompt 的 memory 段应该
+  <strong>位置稳定 + 内容稳定</strong>。 位置 = 拼在 system prompt
+  最前面; 内容 = 同一 session 内不变。
+</p>
+<p>
+  <strong>真实场景</strong>: 团队加了一条 feedback memory, 重启
+  session 后 system prompt 里的 memory 段多了 1 行, 整个对话的
+  cache prefix 变长 100 字符, 后续 100 轮对话 cache <strong>全
+  miss</strong>。 正确做法: 接受这次 miss, 后续 100 轮对话 cache
+  重新累积。 memory 段应该是"冷启动一次, 后续稳定", 不是"每轮
+  变"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>冷数据, 不热数据</strong> —
+  memory 是"几乎不变" 的数据, 不应该频繁写。 想要"动态变化" 用
+  Reminder (第 03 章), 不是 memory。 memory 和 Reminder 职责
+  切分: memory = 冷, Reminder = 热。
+</p>
+<p>
+  <strong>实现细节</strong>: 这是和第 05 章 (Skill 稳定前缀) +
+  第 08 章 (Hook SessionStart 注入) 联合的 cache 策略。 三者
+  都强调"前缀稳定", 拼在 system prompt 最前面, OpenAI / Anthropic
+  的 prompt cache 按前缀命中 (前缀 1024 字符左右开始 cache)。
+</p>
+<h2 id="fake-test">fake test: 用 tmp 目录验证 3 条不变量</h2>
+<p>
+  <strong>用途</strong>: Memory 测试不需要真实 memory 目录, 用
+  <code>os.tmpdir()</code> 临时目录即可 — 测的是"文件系统读写 +
+  解析 + 校验" 的集成行为, 不是单函数逻辑。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户写测试验证"加 3 条 memory,
+  调 <code>scan()</code> 拿到 3 条, 索引 MEMORY.md 包含 3 行"。
+  用 tmp 目录, 测完清理, 不污染 home 目录。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>集成测试</strong>覆盖核心
+  流程 — 写文件 + 读 + 解析 + 校验 + 索引, 一个测试走完整个
+  链路, 比 5 个单测加起来更稳。 看测试示例:
+</p>
+<pre><code class="language-typescript">test("完整流程: create -&gt; scan -&gt; list -&gt; buildPromptSection", () =&gt; {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mem-test-"));
+  const mgr = createMemoryManager({ memoryDir: dir, logger: noopLogger });
 
-<h2 id="trap">反例梯度</h2>
+  mgr.create({ name: "chinese", description: "中文回答", type: "user", body: "..." });
+  mgr.create({ name: "commit-format", description: "conventional commit", type: "feedback", body: "..." });
+  mgr.create({ name: "use-pnpm", description: "用 pnpm", type: "project", body: "..." });
 
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
+  const entries = mgr.scan();
+  expect(entries).toHaveLength(3);
+
+  // 按 type 排序: feedback 在前, project 在后, user 在中间
+  expect(entries[0]!.meta.type).toBe("feedback");
+  expect(entries[1]!.meta.type).toBe("user");
+  expect(entries[2]!.meta.type).toBe("project");
+
+  // 索引文件自动生成
+  const indexContent = fs.readFileSync(path.join(dir, "MEMORY.md"), "utf-8");
+  expect(indexContent).toContain("- [feedback] commit-format:");
+  expect(indexContent).toContain("- [user] chinese:");
+});
+
+test("非法 name 拒绝", () =&gt; {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mem-test-"));
+  const mgr = createMemoryManager({ memoryDir: dir, logger: noopLogger });
+  expect(() =&gt; mgr.create({ name: "../escape", description: "x", type: "user", body: "" }))
+    .toThrow(/Invalid memory name/);
+});
+
+test("frontmatter name != 文件名 警告跳过", () =&gt; {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mem-test-"));
+  fs.writeFileSync(path.join(dir, "foo.md"), "---\nname: bar\n---\n");
+  const mgr = createMemoryManager({ memoryDir: dir, logger: noopLogger });
+  const entries = mgr.scan();
+  expect(entries).toHaveLength(0);  // 校验失败, 跳过
+});</code></pre>
+<p>
+  <strong>实现细节</strong>: 3 个测试覆盖 (a) 完整读写流程,
+  (b) name 合法性校验, (c) name == 文件名校验。 不需要 mock fs,
+  真实 tmp 目录比 in-memory fs 更稳 — 真实测出 "文件权限 / 编码"
+  这类边界。
+</p>
+<h2 id="common-confusion">常见误解: 4 类不是权限, 是来源</h2>
+<p>
+  <strong>误解 1: "4 类是权限分级?"</strong> 错。 4 类 tag 是
+  <strong>来源</strong> (谁写的), 不是<strong>权限</strong> (谁能
+  改)。 想做权限分级, 加 role-based access, 不是 4 类 tag。
+</p>
+<p>
+  <strong>误解 2: "memory 越多越好?"</strong> 错。 memory 段注入
+  system prompt, 多了撑爆 cache prefix 命中率。 应该 5-20 条
+  精炼条目, 不该 100 条碎片。 LLM 加 memory 前应该先
+  <code>findSimilar</code> 检查是否已存在。
+</p>
+<p>
+  <strong>误解 3: "MEMORY.md 手写也可以?"</strong> 不行。 MEMORY.md
+  是自动生成的索引, scan 时跳过。 手写会被忽略, 而且和 create
+  / delete 后自动 rebuild 的内容冲突。
+</p>
+<p>
+  <strong>误解 4: "Jaccard 相似度能识别同义词?"</strong> 错。 教学版
+  Jaccard 只看字面 token 重叠, "中文" 和 "汉语" 不重叠。 想要
+  同义词识别, 引入 embedding, 不在本章范围。
+</p>
+<h2 id="trap">反例梯度: 4 个常见错误</h2>
+<div class="cards-grid">
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 1 · 不校验 name</span></div>
+    <div class="card__body">
+      <p>让 <code>memory_create({name: "../../etc/passwd"})</code> 走通,
+        LLM 写入 <code>memory/../../etc/passwd.md</code>, 路径穿越。
+        错。 任何写入都必须 <code>isValidName</code> 校验, 失败 throw,
+        不让 LLM 重试。 路径穿越是安全漏洞, 不是"格式问题"。</p>
+    </div>
   </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>memory 写进 history。</p>
-    <p>
-      <strong>为什么错:</strong>每次 LLM 调用都重传, token 浪费; 职责混淆;
-      compress / replay 都会混乱。
-    </p>
-    <p>
-      <strong>正确做法:</strong>memory 独立落盘, SessionStart 注入 system
-      prompt, 不写 history。
-    </p>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 2 · 不校验 name == 文件名</span></div>
+    <div class="card__body">
+      <p>LLM 改 frontmatter 把 <code>name: foo</code> 改成
+        <code>name: bar</code>, 但文件名还是 <code>foo.md</code>。
+        表面无害, 实际 read("foo") 找不到 (文件叫 foo 但
+        frontmatter 写 bar), read("bar") 也找不到 (文件叫 foo)。
+        错。 scan 时必须校验 frontmatter name == 文件名, 不一致
+        warn + 跳过。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 3 · 解析失败抛错</span></div>
+    <div class="card__body">
+      <p>用户手改了一个 memory 文件, frontmatter 少一个字段, parser
+        throw。 agent 启动失败。 错。 解析失败应该 warn 日志 + 跳过
+        单个文件, 不 throw, 不阻止 agent 启动。 harness 容忍坏文件,
+        用户修好之后下次启动自动恢复。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 4 · memory 段写在 history 而非 system</span></div>
+    <div class="card__body">
+      <p>把 <code>buildPromptSection()</code> 的结果 append 到
+        <code>history[]</code> 第一条 user message, 而不是注入
+        <code>systemPrompt</code>。 表面能跑, 实际破坏 prompt cache
+        (history 增长每次都变, system 不变)。 错。 memory 段必须
+        注入 system prompt, 让它成为稳定前缀的一部分。</p>
+    </div>
   </div>
 </div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>不区分 scope, 所有 memory 写一个文件。</p>
-    <p>
-      <strong>为什么错:</strong>用户换项目后项目级 fact 跟着走, 污染新项目。
-    </p>
-    <p>
-      <strong>正确做法:</strong>按 scope 写到不同目录, 渲染 system prompt
-      时按当前项目过滤。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>LLM 写 memory 时 key 自由发挥, 每次都新建一个
-      key。
-    </p>
-    <p>
-      <strong>为什么错:</strong>"user.preference.style" 和
-      "user.preference.explanation_style" 实际是同一件事, 写两份互相覆盖。
-    </p>
-    <p>
-      <strong>正确做法:</strong>key 命名规范, save_memory 工具在 schema 里硬约束
-      key 格式, harness 拒绝不合规的 key。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>memory 写入不原子, 断电后留半截文件。</p>
-    <p><strong>为什么错:</strong>下次启动解析失败, user 长期偏好丢失。</p>
-    <p>
-      <strong>正确做法:</strong>第 15 章的 atomic-write 模块兜底, write tmp +
-      fsync + rename。
-    </p>
-  </div>
-</div>
-
-<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
-<div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · 第 09 章</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>memory 不进 history:</strong>save_memory 调用后, history 末尾有
-      tool message "Saved user.preference.style", 但 history.getMessages()
-      中不含 memory value 内容。
-    </p>
-    <p>
-      <strong>SessionStart 注入 system prompt:</strong>fake memoryStore 预设
-      user.preference.style = "简洁", 跑完一次 run() 后,
-      history.getSystemPrompt() 含 "# User Memory" 和 "简洁"。
-    </p>
-    <p>
-      <strong>scope 隔离:</strong>fake memoryStore 同时有 user 级和 project
-      级条目, renderForPrompt("user") 不含 project 级内容。
-    </p>
-    <p>
-      <strong>key 命名规范:</strong>save_memory 调用 key = "free_style" (不符合
-      &lt;scope-prefix&gt;.&lt;category&gt;.&lt;name&gt; 规范), 写 error tool
-      message, 拒绝写入。
-    </p>
-    <p>
-      <strong>memory 持久化:</strong>fake memoryStore 暴露 spy, 跑完 save_memory
-      后 spy.set 被调用, 参数含 scope / key / value。
-    </p>
-  </div>
-</div>
-
-<h2 id="lookback">回望第 00–08 章: 哪些原则在本章兑现了</h2>
+<h2 id="validate">Validation: 4 条不变量检验</h2>
+<ol>
+<li>
+<strong>写读对称</strong>: <code>create()</code> 写入的条目,
+    <code>read(name)</code> 必须能读回, 字段 (description / type /
+    body) 完全一致。 验证: tmp 目录, create 一条带特殊字符 body
+    (含中文 + 换行 + JSON), read 回来字符串相等。
+  </li>
+<li>
+<strong>name 合法性</strong>: <code>create({name: "Foo/../bar"})</code>
+    必须 throw, 错误信息含 "Invalid memory name"。 验证: 单测覆盖
+    大写 / 斜杠 / 点 / 空格 / 空字符串 5 类非法 name。
+  </li>
+<li>
+<strong>name == 文件名</strong>: 写入 <code>foo.md</code> 但
+    frontmatter <code>name: bar</code>, scan 跳过该文件 + warn
+    日志。 验证: tmp 目录, 写一个不一致的文件, scan 拿不到。
+  </li>
+<li>
+<strong>索引派生</strong>: create / delete 后 MEMORY.md 内容自动
+    rebuild, 顺序稳定 (按 type → name 排序), 多次 rebuild 内容
+    字节相等。 验证: 写 3 条 memory, rebuild, 再 rebuild, 字节
+    相等 (git diff 显示 0 行)。
+  </li>
+</ol>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
 <ul>
-  <li>
-    <strong>事实与视图分离:</strong>memory 独立于 history, 是"长期事实", history
-    是"对话上下文"。这条原则在第 06 章 compress 隐含, 本章显式兑现。
+<li>
+<strong>工厂 + 闭包</strong>: <code>createMemoryManager</code> 把
+    状态藏在闭包, 外部只通过 MemoryManager 接口访问。
   </li>
-  <li>
-    <strong>稳定前缀原则:</strong>memory 拼到 system prompt 的固定位置, prefix
-    锚点不变, 为第 10 章 cache-friendly 布局做准备。
+<li>
+<strong>派生数据</strong>: MEMORY.md 索引是 scan 派生, 不手写,
+    自动 rebuild, git diff 干净。
   </li>
-  <li>
-    <strong>职责单一:</strong>memory 模块只管"读 / 写 memory 文件", 不参与
-    messages 构建 (那是 prepareMessages 的事)。
+<li>
+<strong>3 重身份校验</strong>: name 合法字符 + type 合法枚举 +
+    name == 文件名, 防路径穿越 / 类型错乱 / 身份错位。
   </li>
-  <li>
-    <strong>错误降级原则:</strong>memory 读失败 (文件不存在) 降级为"空 memory",
-    不让主 loop 崩。
+<li>
+<strong>宽容失败</strong>: 解析失败 warn + 跳过, 不 throw, agent
+    启动不因单条坏 memory 失败。
+  </li>
+<li>
+<strong>冷数据进稳定前缀</strong>: memory 段注入 system prompt
+    而非 history, 保持 cache 命中。
   </li>
 </ul>
-
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
-  <dt>memory 内容太长</dt>
-  <dd>
-    第 10 章 cache-friendly 布局会展开, memory 内容进 system prompt 时按 scope
-    分块, 不全量加载。
+<dt>多 session 一致性</dt>
+<dd>
+    memory 持久化在磁盘, 跨 session 生效。 但 subagent 嵌套时,
+    子 agent 是否继承父 agent 的 memory? 当前策略: 继承。
+    这可能让子 agent 看到不该看到的 user 偏好 (如"中文回答" 是
+    用户的, 子 agent 跑英文项目不该看)。 第 11 章 Recovery 讨论
+    subagent 隔离时, memory 隔离会作为子话题。
   </dd>
-  <dt>memory 跨进程冲突</dt>
-  <dd>
-    第 15 章 atomic-write 兜底, memory 写新文件 + rename, 不直接改原文件。
+<dt>并发写入冲突</dt>
+<dd>
+    多个 subagent 同时 <code>create()</code> 同一 name, 后写
+    覆盖先写, 丢 createdAt。 当前不处理。 第 13 章 Async Run
+    讨论并发时, memory 写入是冲突点之一。
   </dd>
-  <dt>memory 落盘决策点</dt>
-  <dd>
-    第 12 章 task 区分"会话内 memory" (本章的 save_memory) 和"项目级 task"
-    (例如"未来要重构 X"), task 进 plan 文件, 不进 memory。
-  </dd>
-  <dt>memory 审计</dt>
-  <dd>
-    第 15 章 transcript 会记录"memory 何时被读、被写", 用于审计 user 偏好变更。
+<dt>MEMORY.md 是单文件</dt>
+<dd>
+    100 条 memory 时 MEMORY.md 仍然是一份索引, 不分裂。
+    rebuild 100 条 ~1ms, 规模 OK。 但要监控条目数, 超过 50
+    该提醒用户"该清理了"。
   </dd>
 </dl>
-
-<h2 id="vibe-coding-09">本次如何 vibe code: 第 09 章的三件套</h2>
-
-<h3 id="vibe-feed-09">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>MemoryStore</code> /
-    <code>MemoryEntry</code> / <code>MemoryScope</code> 三个 interface, 以及 key
-    命名规范文档。本轮不写实现。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
-    <code>createMemoryStore()</code> 接受 scope 目录, SessionStart 注入仍是 stub
-    (永远注入空 memory)。本轮 review 重点: memoryStore 实例在
-    <code>index.ts</code> 只 new 一次。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createMemoryStore + save_memory
-    工具 + agent.SessionStart 注入。本轮 review 重点: scope 隔离, key
-    命名规范校验, atomic write (第 15 章会展开)。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。让 LLM 写
-    <code>test/memory.test.ts</code>。本轮 review 重点: "memory 不进 history" 和
-    "key 命名规范" 两条必须有反向断言。
-  </li>
-</ol>
-
-<h3 id="vibe-review-09">Review: 第 09 章专属 checklist</h3>
-<ol>
-  <li>
-    <strong>memory 不进 history。</strong>save_memory 调用后
-    history.getMessages() 不含 memory value。验证:
-    <code>grep -n 'role: "user".*memory' src/agent.ts</code> 应当 0 行 (除
-    system prompt 注入路径)。
-  </li>
-  <li>
-    <strong>scope 隔离。</strong>renderForPrompt("user") 不返回 project
-    级内容。验证: Validation 卡片"scope 隔离" 那条测试通过。
-  </li>
-  <li>
-    <strong>key 命名规范。</strong>save_memory 拒绝不合规 key。验证: Validation
-    卡片"key 命名规范" 那条测试通过。
-  </li>
-  <li>
-    <strong>SessionStart 注入位置正确。</strong>memory 拼到 system prompt, 不写
-    history。验证: 跑完 run() 后 history.getSystemPrompt() 含 "# User Memory"。
-  </li>
-  <li>
-    <strong>memoryStore 是工厂, 不在 agent 内 new。</strong>验证:
-    <code>grep -n 'new MemoryStore' src/</code> 应当 0 行。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-09">调试: 第 09 章典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · memory 写进 history messages。</strong>症状: save_memory
-    工具内部
-    <code>history.add({role: "user", content: \`Saved: ${value}\`})</code
-    >。验证: Validation 卡片"memory 不进 history" 那条测试失败。
-  </li>
-  <li>
-    <strong>伪装 B · scope 混用, 渲染时不过滤。</strong>症状:
-    <code>renderForPrompt(scope)</code> 不过滤 scope, 总是返回所有 memory。验证:
-    Validation 卡片"scope 隔离" 那条测试失败。
-  </li>
-  <li>
-    <strong>伪装 C · LLM 写 memory 时 key 自由发挥。</strong>症状: save_memory
-    工具对 key 不校验, LLM 写 "my style" / "user_pref_1" 等自由 key。验证:
-    Validation 卡片"key 命名规范" 那条测试通过 (写不合规 key 应当拒绝)。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-09">迭代: 第 09 章 4 个 commit 节点</h3>
-<ol>
-  <li>
-    <code
-      >feat(ch09): 钉 MemoryStore / MemoryEntry / MemoryScope 接口与 key
-      规范</code
-    >
-    —— tsc 通过, 无实现。
-  </li>
-  <li>
-    <code>feat(ch09): createMemoryStore 工厂 + save_memory 工具 stub</code> ——
-    tsc 通过, 写空文件。
-  </li>
-  <li>
-    <code
-      >feat(ch09): agent.SessionStart 注入 + scope 隔离 + key 校验 + atomic
-      write</code
-    >
-    —— 跑通 Validation 卡片前 4 条。
-  </li>
-  <li><code>test(ch09): memory 持久化 spy 验证</code> —— 全绿。</li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
   <div class="card__head">
     <span class="card__tag">Prompt Card · 第 09 章</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
+    <button class="card__copy" data-copy-card="" type="button">复制</button>
   </div>
   <div class="card__body">
-    <p>
-      <strong>目标:</strong>实现 Memory 模块, 区分 user 级与 project 级,
-      SessionStart 注入 system prompt, LLM 可通过 save_memory 工具更新 memory。
-    </p>
-    <p>
-      <strong>场景:</strong>用户在新会话说 "我喜欢简洁解释", agent 调
-      save_memory("user", "user.preference.explanation_style", "简洁"); 下次会话
-      SessionStart 时 system prompt 含 "用户偏好: 简洁", LLM
-      在新会话能引用这个事实。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/memory.ts</code> (新) 暴露
-      <code>createMemoryStore()</code>;
-      <code>src/tools/save_memory.ts</code> (新) 实现工具;
-      <code>src/agent.ts</code> 改 SessionStart 注入 memory 到 system prompt;
-      <code>src/index.ts</code> 接线 memoryStore。
-    </p>
+    <p><strong>目标:</strong> 给 harness 加 Memory 系统, 4 类 tag 持久化
+      到 memory/ 目录, SessionStart handler 注入 system prompt。</p>
+    <p><strong>场景:</strong> 用户加 3 条 memory — "中文回答" (user) /
+      "conventional commit" (feedback) / "用 pnpm" (project), 启动
+      session, system prompt 多了 3 行摘要, 后续 100 轮对话 cache
+      命中。</p>
+    <p><strong>模块:</strong> <code>src/memory.ts</code> (新) 暴露
+      <code>createMemoryManager({memoryDir, logger})</code>;
+      <code>src/index.ts</code> (改) Composition Root 创建 + 注入
+      SessionStart handler; <code>src/system-prompt.ts</code> (改)
+      SessionStart 阶段调 <code>buildPromptSection()</code> 注入。</p>
     <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
     <ul>
-      <li>memory 不写进 history.messages, 只在 system prompt 注入</li>
-      <li>scope 区分 user / project, renderForPrompt 按 scope 过滤</li>
-      <li>
-        key 必须符合
-        <code>&lt;scope-prefix&gt;.&lt;category&gt;.&lt;name&gt;</code> 规范,
-        不合规拒绝
-      </li>
-      <li>memory 落盘走 atomic write (write tmp + fsync + rename)</li>
-      <li>memoryStore 工厂, Composition Root 唯一 new</li>
+      <li>4 类 tag 固定枚举 user / feedback / project / reference, 不可新增</li>
+      <li>name 只允许 <code>[a-z0-9_-]+</code>, 写时校验, 失败 throw</li>
+      <li>type 必须属于 4 类枚举, 写时校验, 失败 throw</li>
+      <li>frontmatter <code>name</code> 必须等于文件名 (去 .md), scan 时校验, 失败 warn + 跳过</li>
+      <li>解析失败 (frontmatter 缺字段 / type 非法 / 字段含换行) warn + 跳过, 不 throw</li>
+      <li>MEMORY.md 索引是派生数据, 自动 rebuild, scan 时跳过, 用户不手写</li>
+      <li>buildPromptSection() 只取 description, 不取 body, 控制注入体积</li>
+      <li>Jaccard 相似度 ≥ 0.5 返回相似条目, 教学版不引入 embedding</li>
     </ul>
-    <p><strong>验证 (用 fake memoryStore + spy, 逐条落到 vitest):</strong></p>
+    <p><strong>验证 (用 tmp 目录 + vitest, 逐条断言):</strong></p>
     <ul>
-      <li>save_memory 调用后, history.getMessages() 不含 memory value</li>
-      <li>
-        fake 预设 user.preference.style = "简洁", SessionStart 后 system prompt
-        含 "简洁"
-      </li>
-      <li>
-        fake 同时有 user 级和 project 级, renderForPrompt("user") 不含 project
-        级
-      </li>
-      <li>
-        save_memory 调用 key = "free_style", 写 error tool message, 拒绝写入
-      </li>
-      <li>spy 验证 memoryStore.set 被调用, 参数含 scope / key / value</li>
+      <li>create → scan → list → buildPromptSection 完整流程, 3 条 memory 按 type 排序</li>
+      <li>create({name: "../escape"}) throw, 错误信息含 "Invalid memory name"</li>
+      <li>手写 <code>foo.md</code> 但 frontmatter name=bar, scan 返回 0 条, warn 日志</li>
+      <li>create / delete 多次后, MEMORY.md 字节稳定, 排序一致</li>
     </ul>
   </div>
 </div>
-
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    故意把 memory value 写进 history.messages, 跑测试, 看"memory 不进 history"
-    是否抓到。
+<li>
+    故意不写 name 合法性校验, 跑 <code>create({name: "../escape"})</code>
+    测试, 看"路径穿越" 是否抓到 (文件被写到 memory 目录外)。
   </li>
-  <li>让 renderForPrompt 不过滤 scope, 跑测试, 看"scope 隔离" 是否抓到。</li>
-  <li>
-    在 save_memory 工具里不校验 key 格式, 跑测试, 看"key 命名规范" 是否抓到。
+<li>
+    故意不写 name == 文件名校验, 手改 <code>foo.md</code> 的
+    frontmatter name=bar, 跑 scan, 看"身份错位" 是否抓到
+    (read 找不到任何条目)。
+  </li>
+<li>
+    故意让 parser throw (不 catch), 跑 scan 一个 frontmatter 缺字段
+    的文件, 看"宽容失败" 是否抓到 (agent 启动失败 vs. warn +
+    跳过, 启动成功)。
+  </li>
+<li>
+    把 <code>buildPromptSection()</code> 的结果 append 到 history
+    第一条 user message, 跑 SessionStart 测试, 看"memory 段进
+    稳定前缀" 是否抓到 (cache prefix 增长, 后续轮 miss)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本章给 harness 加了 Memory 模块, 区分 user 级与 project 级长期事实。 memory
-  独立于 history, 通过 SessionStart 注入 system prompt 的固定 位置 (prefix 稳定,
-  内容动态), 既给 LLM 长期事实, 又不破坏 cache 友好布局。下一章 (第 10 章)
-  我们会展开 prompt cache 友好布局的 完整设计: 哪些进稳定前缀, 哪些走 reminder,
-  哪些靠 history。
+  Memory 是给 system prompt 的<strong>冷数据</strong>, 4 类 tag 把
+  来源分清楚。 核心是 5 个设计:
 </p>
-
-<h2 id="next">下一章伏笔</h2>
+<ul>
+<li>
+<strong>4 类 tag</strong>: user / feedback / project / reference,
+    固定枚举, 不可新增。
+  </li>
+<li>
+<strong>Markdown 文件</strong>: frontmatter 5 字段 + body, 文件名
+    = <code>${name}.md</code>, 双重校验。
+  </li>
+<li>
+<strong>3 重身份校验</strong>: name 合法字符 + type 合法枚举 +
+    name == 文件名, 缺一不可。
+  </li>
+<li>
+<strong>派生索引</strong>: MEMORY.md 自动 rebuild, 按 type → name
+    稳定排序, git diff 干净。
+  </li>
+<li>
+<strong>Jaccard 教学版去重</strong>: 不引入 embedding, 30 行讲清楚,
+    容忍"中文 vs 汉语" 的局限。
+  </li>
 <p>
-  第 09 章把 memory 注入 system prompt, 但还没系统讲"如何让 system prompt 稳定 +
-  动态状态走 reminder + history 自然增长" 这套布局。 下一章 (第 10 章)
-  会基于前九章的所有设计选择 (memory 锚点、reminder 标签、tool 描述作为稳定前缀)
-  总结出 prompt cache 友好布局的完整 原则, 并讨论 token 成本和 cache hit rate
-  的权衡。
+  下一章 (第 10 章) 展开 prompt cache 的具体策略 — 稳定前缀的边界
+  在哪, 哪些字段"必须稳定", 哪些"可以变化", cache miss 后的
+  fallback。
 </p>

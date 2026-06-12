@@ -1,573 +1,672 @@
-<p class="article__eyebrow">专题 A · 模型差异</p>
-<h1 class="article__title">不同大模型不是只换模型名</h1>
+<p class="article__eyebrow">专题 A · LLM 选型策略层</p>
+<h1 class="article__title">Model Policy: 任务类型 → Model 推荐的策略层</h1>
 <p class="article__lede">
-  Claude / GPT / Gemini 在 tool call 协议、cache 边界、错误码、输出
-  截断规则上都不一样。本专题讲 harness 应当如何吸收这些差异, 不让模型
-  切换变成"改十几处代码" 的体力活。
+  第 15 章提过 3 个 LLM provider (OpenAI / Anthropic / 自部署 vLLM)
+  + 5 个常见 model, 但 harness 怎么知道"这个任务该用哪个 model"?
+  用户让 LLM 跑"5 天迁移" 该用 GPT-4o (质量) 还是 Qwen2.5-7B
+  (成本)? 跑"5 分钟 git status" 该用 Claude Haiku (快) 还是
+  Claude Opus (贵)? 选错就是几倍账单浪费或质量崩盘。 这一专题
+  加 <strong>Model Policy 策略层</strong>: 5 种<strong>任务分类</strong>
+  (long_running / short_interactive / bulk_summarize / complex_reasoning
+  / experimental) → 5 种<strong>推荐 model</strong>, 配
+  <code>--model-policy auto|fast|quality|budget</code> 4 种<strong>策略</strong>
+  切换, 用户在质量 / 速度 / 成本间选边。 读完后, 你能讲清"为什么
+  不能 1 个 model 跑所有任务" + "auto 策略怎么工作" + "怎么扩展
+  第 6 个 model"。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-15">在第 15 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="real-failure">真实失败故事: 5 分钟任务跑了 2 小时, 账单 ×10</h2>
 <p>
-  这一章不修改 harness 主结构, 而是在 <code>src/llm-adapter.ts</code> 下
-  收口所有模型差异。LLM Provider 维度拆 4 个 adapter (Anthropic / OpenAI /
-  Google / 本地兼容), 每个 adapter 实现 <code>LLMClient</code> interface,
-  把模型差异 (tool call 协议 / cache 边界 / 错误码 / 截断 规则) 收口在 adapter
-  内部。Composition Root 通过 <code>Config</code>
-  字段选 adapter, harness 其他部分完全不感知。
+  写代码之前, 先看一个真实痛点。 用户的 team 跑 1 个月 harness,
+  发现账单异常 — 明明只是跑"git status" 这种 5 秒任务, 实际
+  账单 ×10。
 </p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/llm-adapter.ts"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/llm-adapter.ts: 模型差异适配</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/llm-providers.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/llm-providers.ts: provider 解析</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/foundation-models.ts"
-    target="_blank"
-    rel="noreferrer"
-    >3. src/foundation-models.ts: 基座模型画像</a
-  >
+<ol>
+<li>
+<strong>症状 1: 大材小用</strong>: 用户跑简单的"扫一下 src/ 找 TODO"
+    任务, harness 默认用 GPT-4o (贵的 model), 5 分钟任务花
+    $0.50, 实际 Qwen2.5-7B 跑同样任务 30 秒花 $0.005。 100 倍
+    浪费。
+  </li>
+<li>
+<strong>症状 2: 小材大用</strong>: 用户跑"5 天迁移 500 文件" 用
+    Qwen2.5-7B (便宜的 model), 跑 1 周, 质量崩盘, 70% 转换
+    错误, 团队 leader 花了 2 周手动修正。 实际该用 GPT-4o 跑 1 天
+    质量好。
+  </li>
+<li>
+<strong>症状 3: 切换靠人</strong>: team 想"小任务用便宜, 大任务
+    用贵", 每次手动改 <code>LLM_MODEL=...</code>, 容易忘, 出现
+    "昨天我手动改了, 今天又跑贵 model" 的混乱。
+  </li>
+<li>
+<strong>真问题</strong>: 缺少<strong>Model Policy 策略层</strong>
+  — harness 知道任务类型 (短 / 长 / 简单 / 复杂), 应该自动选
+    合适 model, 不该让用户每次手动配。 同时给用户 4 种
+    <strong>策略</strong> (auto / fast / quality / budget) 切
+    偏好, 满足"我今天要省钱" / "我今天要质量" 的临时切换。
+  </li>
+</ol>
+<p>
+  朴素想法 1: "用最贵的 model 跑所有任务?" 错。 大材小用, 账单
+  ×100, 简单任务浪费钱。 该用便宜的快 model。
+</p>
+<p>
+  朴素想法 2: "用最便宜的 model 跑所有任务?" 错。 小材大用,
+  质量崩盘, 团队返工, 实际更贵。 该用贵的慢 model 做关键任务。
+</p>
+<p>
+  正确做法: 加 <strong>Model Policy</strong> 策略层 —
+  harness 内部按<strong>任务类型</strong>分类 (5 种), 每种推荐
+  一个 model, 用户在 4 种<strong>策略</strong> (auto / fast /
+  quality / budget) 切偏好, 临时改变单次任务的 model。 这是
+  Reference 章节 "模式 8 · Strategy 策略模式" + "模式 4 ·
+  依赖注入" 的联合应用。
+</p>
+<h2 id="five-task-types">5 种任务类型: 决定 model 推荐</h2>
+<p>
+  <strong>用途</strong>: 不是所有任务都用同一种 model, 任务本身
+  有 5 种<strong>典型特征</strong>: 跑多长 / 多频繁 / 多复杂 /
+  多容错 / 多便宜。 按特征选 model 才是合理。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户让 LLM 跑"5 天迁移 500 文件" 是
+  <strong>long_running</strong> (跑 1 周, 不能崩, 质量优先);
+  "5 分钟 git status" 是 <strong>short_interactive</strong>
+  (快进快出, 速度优先); "1 小时扫 100 个 PR 摘要" 是
+  <strong>bulk_summarize</strong> (大批量, 成本优先); "半天设计
+  复杂算法" 是 <strong>complex_reasoning</strong> (高难度, 质量
+  优先); "试试新模型的 beta 功能" 是 <strong>experimental</strong>
+  (新东西, 容错优先)。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>特征分类 + 静态枚举</strong> —
+  5 种是固定枚举, 不允许"我自己加第 6 种" (保持简单); 每种
+  配推荐 model, 但允许策略 (auto/fast/quality/budget) 覆盖。 看
+  任务类型定义:
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 1 · 5 种任务类型的边界</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">long_running · 长时间任务</div>
+      <div class="flow-stack__body">跑 1 小时以上, 不能崩, 质量优先。 推荐: GPT-4o / Claude Sonnet (高质量 + 稳定)。 例子: 5 天迁移, 全项目扫描。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">short_interactive · 短对话</div>
+      <div class="flow-stack__body">跑 1-10 分钟, 快进快出, 速度优先。 推荐: Claude Haiku / GPT-4o-mini (快 + 便宜)。 例子: git status, ls, 单文件改。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">bulk_summarize · 批量摘要</div>
+      <div class="flow-stack__body">跑 1 小时, 但任务重复, 成本优先。 推荐: Qwen2.5-7B / Llama-3.1-8B (本地便宜)。 例子: 100 个 PR 摘要, 1000 个文件总结。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">complex_reasoning · 复杂推理</div>
+      <div class="flow-stack__body">跑 10-60 分钟, 难度高, 质量优先。 推荐: Claude Opus / o1 (最强推理)。 例子: 算法设计, 架构决策, 复杂 bug 修复。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--warn">
+      <div class="flow-stack__label">experimental · 实验性任务</div>
+      <div class="flow-stack__body">用户主动选"试试新 model", 容错优先。 推荐: 最新 beta model (新功能多但可能崩)。 例子: "试用 GPT-5 预览版"。</div>
+    </div>
+  </div>
 </div>
+<p>
+  <strong>实现细节</strong>: 任务类型在 LLM 调 agent.run() 时
+  <strong>声明</strong> (传 <code>taskType</code> 参数), 不靠
+  harness 启发式猜测。 让用户 / 上层调度器 (Schedule / Async Run)
+  显式声明, 避免 "harness 猜错任务类型选错 model" 的尴尬。
+</p>
+<h2 id="four-strategies">4 种策略: 用户切偏好</h2>
+<p>
+  <strong>用途</strong>: 5 种任务类型 → 1 个推荐 model, 但用户
+  经常想"今天我就要省钱" / "今天我就要质量"。 提供 4 种
+  <strong>策略</strong> 切偏好, 临时改变 model 选择。
+</p>
+<p>
+  <strong>真实场景</strong>: team 平时用 auto (自动按任务类型选);
+  临时跑"周末实验" 切 fast (全用便宜 model 跑快); 跑"重要
+  demo" 切 quality (全用最贵 model); 预算紧的月切 budget
+  (全用最便宜 model, 质量可能差)。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>4 种策略 + 覆盖机制</strong> —
+  Reference 章节 "模式 8 · Strategy 策略模式" 的应用。 4 种
+  策略固定枚举, 不可新增第 5 种; 每种策略决定"对每种任务类型
+  选什么 model"。 看策略定义:
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 2 · 4 种策略对 5 种任务类型的覆盖</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">auto · 自动 (默认)</div>
+      <div class="flow-stack__body">按任务类型用推荐 model。 long_running → GPT-4o; short_interactive → Haiku; bulk_summarize → Qwen; complex_reasoning → Opus; experimental → 用户的 LLM_MODEL 环境变量。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">fast · 全快</div>
+      <div class="flow-stack__body">所有任务都用最快最便宜的 model。 全用 Claude Haiku / GPT-4o-mini。 速度快, 成本低, 质量可能差。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">quality · 全质</div>
+      <div class="flow-stack__body">所有任务都用最贵最强的 model。 全用 Claude Opus / o1。 质量最高, 速度慢, 成本高。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--warn">
+      <div class="flow-stack__label">budget · 全省</div>
+      <div class="flow-stack__body">所有任务都用最便宜的本地 model。 全用 Qwen2.5-7B / Llama-3.1-8B (本地 vLLM)。 成本最低, 质量可能崩。</div>
+    </div>
+  </div>
+</div>
+<p>
+  <strong>实现细节</strong>: 策略用 <code>--model-policy auto|fast|quality|budget</code>
+  CLI 切换, 也可以 <code>/model-policy show</code> 在 REPL 看当前
+  策略 + 5 种任务类型对应的 model。 策略选择后, 派生一个
+  <code>modelResolver(taskType) → modelName</code> 函数, agent
+  调 LLM 前查 resolver 选 model。
+</p>
+<h2 id="default-table">default 任务类型 → model 映射表</h2>
+<p>
+  <strong>用途</strong>: 5 种任务类型 → 5 个推荐 model 是<strong>默认
+  表</strong>, 写在 <code>src/execution-policy.ts</code> 的常量。
+  表是<strong>可改</strong>的 (新 model 出, 改表), 不是 hard
+  code 在 if/else 里。
+</p>
+<p>
+  <strong>真实场景</strong>: 2026 年 GPT-4o 是 long_running 推荐,
+  2027 年 GPT-5 出来后, 改 default 表 <code>long_running: "gpt-5"</code>,
+  所有 harness 升级后自动用 GPT-5, 不改 agent.ts。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>查表代替 if/else</strong> —
+  Reference 章节 "模式 8 · Strategy 策略模式" 的延伸, "查表"
+  是策略模式的具体实现。 看 execution-policy.ts 里的 default
+  表:
+</p>
+<pre><code class="language-typescript">// 5 种任务类型 → 推荐 model (default 表)
+const DEFAULT_MODEL_FOR_TASK: Record&lt;TaskType, ModelName&gt; = {
+  long_running: "gpt-4o",
+  short_interactive: "claude-haiku-4-5",
+  bulk_summarize: "qwen2.5-7b",
+  complex_reasoning: "claude-opus-4-5",
+  experimental: process.env.LLM_MODEL ?? "gpt-4o",
+};</code></pre>
+<p>
+  <strong>实现细节</strong>: 表是 readonly, agent.ts 通过
+  <code>createModelResolver({policy, table})</code> 拿 resolver,
+  resolver 内部按 (policy, taskType) 查表。 表改 = 改常量, 不
+  改 resolver。 这是 Reference 章节 "模式 5 · Composition Root
+  组合根" 的应用 — 表在 Composition Root 注入, 运行时不变。
+</p>
+<h2 id="auto-strategy">auto 策略: 怎么"自动"</h2>
+<p>
+  <strong>用途</strong>: auto 策略是<strong>默认</strong>, 任务类型
+  → model 的映射完全靠 default 表, 不靠运行时判断。 "自动" 的
+  含义是"用户不用选 model, harness 按任务类型自动选"。
+</p>
+<p>
+  <strong>真实场景</strong>: team 跑 10 个不同任务 (5 分钟 git /
+  1 小时迁移 / 30 分钟设计 / ...), 不传 <code>taskType</code> 让
+  harness 猜 (这会错), 让上层 (Async Run / Schedule) 显式传。
+  显式声明, 不启发式猜测。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>声明式, 不启发式</strong> —
+  harness <strong>不启发式</strong>判断"这个任务是 long 还是
+  short", 启发式容易猜错; 任务类型由<strong>调用方</strong>显式
+  声明 (Async Run 默认 short_interactive, Schedule 默认
+  bulk_summarize, 用户手动 run 默认 short_interactive)。
+</p>
+<p>
+  <strong>实现细节</strong>: <code>agent.run({query, taskType})</code>
+  接收 taskType, 内部调 <code>modelResolver(taskType)</code> 选
+  model。 默认 taskType = "short_interactive" (用户最常见的
+  "短对话" 场景)。 想覆盖, 显式传 taskType。
+</p>
+<h2 id="fast-quality-budget">fast / quality / budget: 3 个 override</h2>
+<p>
+  <strong>用途</strong>: 3 个策略 (fast / quality / budget) 是
+  <strong>全 override</strong>, 不管任务类型, 全部任务用同一种
+  model (最快 / 最强 / 最便宜)。 适合"用户明确知道今天要什么"
+  的场景。
+</p>
+<p>
+  <strong>真实场景</strong>: team 周五下午, 老板说"今天剩下的
+  任务都用最快 model, 质量无所谓, 跑快就行", <code>--model-policy fast</code>
+  一下, 所有后续任务用 Claude Haiku。 周一早上切回 auto。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>3 个常量 model, 不查表</strong> —
+  fast / quality / budget 各自对应 1 个固定 model (最快 / 最强 /
+  最便宜), 不查表, 直接 hard-code 关联。
+</p>
+<pre><code class="language-typescript">const STRATEGY_TO_MODEL: Record&lt;FastQualityBudget, ModelName&gt; = {
+  fast: "claude-haiku-4-5",
+  quality: "claude-opus-4-5",
+  budget: "qwen2.5-7b",
+};
 
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    harness 默认跑 Claude 3.5 Sonnet, 用户想换 GPT-4o, 改了一行 model 名, 结果
-    tool call 字段名不一样、cache 边界不一样、错误 码不一样, harness
-    立刻崩。现象是"模型切换像换引擎, 不是换轮胎"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"在主代码里 if (provider === "anthropic") {...} else if
-    (provider === "openai") {...}"。这有两个问题: 一是 主代码被 provider
-    分支污染, 难以维护; 二是新增 provider 时要 改十几处 if, 容易漏。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口:
-    <code
-      >interface LLMClient { chat(messages): Promise&lt;AssistantMessage&gt;
-      }</code
-    >。 不变量三条: (1) 暴露给 harness 的是统一 <code>AssistantMessage</code>
-    形态 (role / content / tool_calls), 内部差异完全不外泄, (2) cache 边界由
-    adapter 内部实现, harness 不知道细节, (3) 错误码统一收敛到 6 种 LLMErrorKind
-    (第 11 章), adapter 负责把 provider 特定错误翻译过来。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    同一 scenario 跑 4 个 adapter, 断言 trace 里 tool_calls 字段 完全一致 (虽然
-    provider 内部表示不同), LLMErrorKind 分类一致 (虽然 provider 错误码不同)。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
-
-<div class="note">
-  <p class="note__title">观察 1 · 在主代码里 if provider</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// 错误: provider 分支散落在主代码
-async function run(query: string) {
-  history.add({ role: "user", content: query });
-  let assistant;
-  if (config.provider === "anthropic") {
-    assistant = await callAnthropic(messages);  // Anthropic 特有格式
-  } else if (config.provider === "openai") {
-    assistant = await callOpenAI(messages);  // OpenAI 特有格式
-  } else if (config.provider === "google") {
-    assistant = await callGoogle(messages);  // Google 特有格式
+function createModelResolver({policy}: {policy: ModelPolicy}): ModelResolver {
+  if (policy === "auto") {
+    return (taskType) =&gt; DEFAULT_MODEL_FOR_TASK[taskType];
   }
-  history.add(assistant);
-  /* ... */
+  if (policy === "fast" || policy === "quality" || policy === "budget") {
+    return () =&gt; STRATEGY_TO_MODEL[policy];
+  }
+  throw new Error(`Unknown policy: ${policy}`);
 }</code></pre>
-  <p><strong>问:</strong>为什么不直接 if provider?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 污染: agent.ts 不该知道 provider 存在,
-    职责被越界; 维护: 新增 provider 要改十几处 if, 容易漏; 测试: 主代码被
-    provider 分支污染, 单元测试要 mock 多个 provider。
-  </p>
-</div>
+<p>
+  <strong>实现细节</strong>: 4 种策略共 3 个常量 model (auto
+  走 default 表 5 个, fast/quality/budget 各 1 个), 总共 5 + 3
+  = 8 个 model name。 改策略 = 改 3 个常量, 改 default 表 = 改
+  5 个常量。 简单, 教学友好。
+</p>
+<h2 id="execution-profile">execution profile: readonly / ci / workspace_write</h2>
+<p>
+  <strong>用途</strong>: 任务类型决定<strong>model</strong>, 执行
+  profile 决定<strong>权限</strong>。 两者正交, 不耦合。 profile
+  3 种 (readonly / ci / workspace_write) 沿用第 14 章 Schedule
+  的定义。
+</p>
+<p>
+  <strong>真实场景</strong>: long_running 任务 + readonly profile
+  = "5 天跑扫描 (只读, 用 GPT-4o)"; long_running + workspace_write
+  = "5 天跑迁移 (读写, 用 GPT-4o)"; 两者 model 一样, 权限不同。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>model × profile 两维</strong> —
+  Reference 章节 "模式 5 · Composition Root 组合根" 的延伸。
+  modelResolver 选 model, ExecutionPolicy 校验 profile 权限, 两者
+  不互相 import。
+</p>
+<p>
+  <strong>实现细节</strong>: profile 透传到 Async Run (第 13 章)
+  的 <code>permissionProfile</code> 字段, 由 executionPolicy
+  的 <code>validateCommand / validateResources</code> 校验。 model
+  和 profile 是<strong>独立</strong>维度, 组合出 5 × 3 = 15 种
+  任务场景。
+</p>
+<h2 id="graceful-degradation">graceful degradation: model 不可用怎么办</h2>
+<p>
+  <strong>用途</strong>: 推荐的 model 不可用 (rate limit / 服务挂 /
+  配额用完) 时, harness 不能直接 fail, 应该<strong>优雅降级</strong>
+  到次优 model。 这条 fallback 链是 Model Policy 的隐藏价值。
+</p>
+<p>
+  <strong>真实场景</strong>: team 跑 bulk_summarize, 推荐 Qwen2.5-7B
+  (本地 vLLM), vLLM 服务挂, fallback 到 GPT-4o-mini (云端
+  OpenAI), 速度慢但能用; 再 fallback 到 Claude Haiku; 再不行
+  fail 提示用户 "所有 model 都不可用"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>Fallback 链 + 优雅降级</strong> —
+  Reference 章节 "模式 13 · Error→Action 错误转动作" 的应用。
+  不可用 = fail 之前先试 fallback。 fallback 顺序写死 (推荐 →
+  次优 → 次次优 → fail), 不动态计算。
+</p>
+<pre><code class="language-typescript">const FALLBACK_CHAIN: Record&lt;ModelName, ModelName[]&gt; = {
+  "gpt-4o": ["claude-sonnet-4-5", "claude-haiku-4-5"],
+  "claude-opus-4-5": ["gpt-4o", "claude-sonnet-4-5"],
+  "claude-haiku-4-5": ["gpt-4o-mini", "qwen2.5-7b"],
+  "qwen2.5-7b": ["claude-haiku-4-5", "gpt-4o-mini"],
+  // ...
+};
 
-<div class="note">
-  <p class="note__title">观察 2 · 错误码不翻译直接抛</p>
-  <pre class="code-block"><code>// 教学简化版
-catch (err) {
-  // 错误: provider 错误码直接抛
-  throw err;  // harness 看到的是 Anthropic 特定错误码
+async function callWithFallback(model: ModelName, args): Promise&lt;Response&gt; {
+  const chain = [model, ...(FALLBACK_CHAIN[model] ?? [])];
+  for (const m of chain) {
+    try {
+      return await llmClient.call(m, args);
+    } catch (err) {
+      if (isRetryableError(err)) continue;  // 试下一个
+      throw err;  // 不可恢复错误立即 throw
+    }
+  }
+  throw new Error("All models in fallback chain failed");
 }</code></pre>
-  <p><strong>问:</strong>为什么不直接抛 provider 错误?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 跨模型: 切到 OpenAI 后, 第 11 章的
-    Recovery 模块不知道是 rate_limit 还是 rate_limit_exceeded; 抽象: harness
-    不该知道 provider 内部错误码, 这是 adapter 职责; 演化: provider 升级 SDK
-    改了错误码, harness 全挂。
-  </p>
-</div>
-
-<h2 id="differences">4 个 adapter 收口的差异</h2>
-<p>不同 provider 在以下 4 个维度上有差异, adapter 负责收口:</p>
-
-<h3>1. tool call 协议</h3>
-<dl class="defs">
-  <dt>Anthropic</dt>
-  <dd><code>tool_use</code> 字段, content 是数组 (text + tool_use 块)。</dd>
-  <dt>OpenAI</dt>
-  <dd><code>tool_calls</code> 字段, content 字符串 + tool_calls 数组并列。</dd>
-  <dt>Google</dt>
-  <dd>
-    <code>functionCall</code> 字段, parts 数组, 命名 <code>functionCall</code>。
-  </dd>
-  <dt>本地兼容 (Ollama / vLLM)</dt>
-  <dd>通常模仿 OpenAI, 但 tool name 可能需要规范化 (例如不允许 ".")。</dd>
-</dl>
 <p>
-  adapter 内部把 4 种表示都翻译成统一的
-  <code>AssistantMessage.tool_calls</code>。
+  <strong>实现细节</strong>: 5 个推荐 model 各自配 fallback 链,
+  链长 2-3, 教学版够用。 链必须是<strong>有限</strong>的 (不能
+  无限循环, 也不能跳到自身), 用 TypeScript 类型 + 单元测试保证。
 </p>
-
-<h3>2. cache 边界</h3>
-<dl class="defs">
-  <dt>Anthropic</dt>
-  <dd>
-    prompt cache 4 个 breakpoint (system / messages / tools / 末尾), 自动 5 分钟
-    TTL, 命中按 1/10 计费。
-  </dd>
-  <dt>OpenAI</dt>
-  <dd>自动 cache, 无显式 breakpoint, 命中按 1/2 计费 (o1 系列)。</dd>
-  <dt>Google</dt>
-  <dd>implicit cache, TTL 短, 命中按 1/4 计费。</dd>
-  <dt>本地兼容</dt>
-  <dd>无 cache, 所有 token 全价。</dd>
-</dl>
+<h2 id="cost-estimate">cost 估算: 让用户知道"这次大概多少钱"</h2>
 <p>
-  第 10 章的"稳定前缀 / 动态状态 / 自然增量" 布局在 Anthropic 效果 最好 (cache
-  hit rate 最高), 在 OpenAI 中等, 在本地模型无效但也没坏处。 adapter 在 metadata
-  里返回 cache hit 状态, harness 记录到 cache-debug (第 10 章)。
+  <strong>用途</strong>: 用户跑任务前, harness 估算"这次大概花
+  多少", 避免跑完发现"我跑了 $5"。 估算基于 (model 价目表 +
+  token 估算), 不精准但"够参考"。
 </p>
-
-<h3>3. 错误码</h3>
-<dl class="defs">
-  <dt>Anthropic</dt>
-  <dd>
-    HTTP 429 (rate_limit) / 529 (overloaded) / 400 (context_overflow) / 500
-    (api_error)。
-  </dd>
-  <dt>OpenAI</dt>
-  <dd>
-    HTTP 429 / 503 / 400 / 500, 错误码字符串 "rate_limit_error" /
-    "context_length_exceeded"。
-  </dd>
-  <dt>Google</dt>
-  <dd>
-    HTTP 429 / 503 / 400 / 500, 错误码字符串 "RESOURCE_EXHAUSTED" /
-    "INVALID_ARGUMENT"。
-  </dd>
-</dl>
 <p>
-  adapter 翻译成 6 种 <code>LLMErrorKind</code> (第 11 章), Recovery 模块只认
-  LLMErrorKind, 不认 provider 错误码。
+  <strong>真实场景</strong>: user 跑 long_running 任务, 启动前
+  harness 输出 "Estimated cost: $0.30-$0.50 (GPT-4o, ~50k input +
+  5k output tokens)"。 user 知道"大概 5 毛", 决定跑; 如果输出
+  "Estimated cost: $5-$10 (Claude Opus, 复杂推理)", user 可能
+  改成 GPT-4o 跑。
 </p>
-
-<h3>4. 输出截断规则</h3>
-<dl class="defs">
-  <dt>Anthropic</dt>
-  <dd>
-    <code>stop_reason === "max_tokens"</code>, content 截断在最后一个完整
-    token。
-  </dd>
-  <dt>OpenAI</dt>
-  <dd>
-    <code>finish_reason === "length"</code>, content 截断在最后一个完整 token。
-  </dd>
-  <dt>Google</dt>
-  <dd><code>finishReason === "MAX_TOKENS"</code>, 行为类似。</dd>
-</dl>
 <p>
-  adapter 统一翻译成 <code>finishReason === "length"</code> +
-  <code>truncated === true</code>, Recovery 模块 (第 11 章) 一致处理。
+  <strong>设计思想</strong>: <strong>价目表 + token 估算</strong> —
+  Reference 章节 "模式 19 · Idempotent 幂等" 的延伸 (估算可重
+  复, 不靠 LLM 自己估)。 看 cost 估算实现:
 </p>
+<pre><code class="language-typescript">// 价目表: 每 1M token 的美元价
+const MODEL_PRICING: Record&lt;ModelName, { input: number; output: number }&gt; = {
+  "gpt-4o": { input: 2.5, output: 10.0 },
+  "claude-opus-4-5": { input: 15.0, output: 75.0 },
+  "claude-haiku-4-5": { input: 0.8, output: 4.0 },
+  "qwen2.5-7b": { input: 0.0, output: 0.0 },  // 本地免费
+  // ...
+};
 
-<h2 id="foundation-models">基座模型画像</h2>
+function estimateCost(model: ModelName, inputTokens: number, outputTokens: number): { min: number; max: number } {
+  const p = MODEL_PRICING[model];
+  return {
+    min: (inputTokens / 1_000_000) * p.input + (outputTokens / 1_000_000) * p.output,
+    max: ((inputTokens * 1.2) / 1_000_000) * p.input + ((outputTokens * 1.5) / 1_000_000) * p.output,
+  };
+}</code></pre>
 <p>
-  同样是 "claude-3-5-sonnet", 也有 4 个版本 (claude-3-5-sonnet-20240620,
-  claude-3-5-sonnet-20241022, ...), 不同版本 cache 行为 / 工具协议 /
-  错误码都略有差异。本章用 <code>foundation-models.ts</code> 维护一份
-  "基座模型画像", 描述每个具体版本的差异, harness 启动时根据 model 名选画像,
-  应用到 adapter。
+  <strong>实现细节</strong>: 输出 min / max 两个值, min = 精确估算,
+  max = 实际可能 1.2-1.5 倍 (LLM 输出不一定可控)。 启动前
+  estimateCost() 算一次, 输出 "Estimated cost: $0.30-$0.50"。 不
+  精准, 但够参考。 这是 Reference 章节 "模式 19 · Idempotent"
+  的应用 — 估算可重复, 同一任务多次跑估算一致。
 </p>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export interface FoundationModelProfile {
-  provider: LLMProviderId;
-  model: string;
-  supportsCache: boolean;
-  cacheBreakpoints: number;
-  maxContextTokens: number;
-  supportsTools: boolean;
-  supportsCompaction: boolean;  // 是否支持原生 compaction
-  notes: string;
-}
-
-export function resolveFoundationModelProfile(opts: { provider, model, explicitProfileId? }): FoundationModelProfile;</code></pre>
-
-<h2 id="wiring">Composition Root 接线</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export async function main() {
-  const config = loadConfig();  // 读 ANTHROPIC_API_KEY / OPENAI_API_KEY / etc
-  const modelProfile = resolveFoundationModelProfile({
-    provider: config.provider,
-    model: config.model,
+<h2 id="loop-integration">主循环集成: 在哪 2 个时机选 model</h2>
+<p>
+  <strong>用途</strong>: Model Policy 集成到 agent 主循环有 2 个
+  时机:
+</p>
+<ol>
+<li>
+<strong>agent.run() 启动前</strong>: 接收 taskType, 调
+    <code>modelResolver(taskType)</code> 选 model, 调
+    <code>estimateCost(...)</code> 算预算, 输出 "Using model X,
+    estimated cost $Y"。
+  </li>
+<li>
+<strong>每次 LLM 调用前</strong>: 拿 model 调 llmClient.call(),
+    失败时走 fallback 链。
+  </li>
+</ol>
+<p>
+  <strong>设计思想</strong>: <strong>显式选择 + 启动一次</strong> —
+  agent.run() 一次选 model, 之后整个 run 期间都用同 model (不
+  切换)。 切换 model = 重新 agent.run()。 这是 Reference 章节
+  "模式 1 · 工厂 + 闭包" 的应用 — model 选完在闭包内, 整个
+  run 期间不变。
+</p>
+<p>
+  <strong>实现细节</strong>: 集成代码在 <code>src/agent.ts</code> 第
+  0 步 (setup) — 接收 taskType → 调 modelResolver → 拿 model
+  → 调 estimateCost → 注入到 run() 闭包。 之后所有 LLM 调用都
+  用这个 model, 失败走 fallback。
+</p>
+<h2 id="fake-test">fake test: 用 fake model 测 fallback 链</h2>
+<p>
+  <strong>用途</strong>: Model Policy 测试需要<strong>fake LLM client</strong>
+  — 不真调 OpenAI / Anthropic, 用 stub 返回"rate_limit" / "ok"
+  / "fail", 验证 fallback 链走通。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户写测试 "推荐 GPT-4o + 链
+  [Claude Sonnet, Claude Haiku]; fake client 第一次 GPT-4o
+  返回 rate_limit, 第二次 Claude Sonnet 返回 ok, 验证:
+  最终 model = Claude Sonnet, fallback 链用了 2 步, 不再
+  试 Claude Haiku"。
+</p>
+<pre><code class="language-typescript">test("fallback 链: 推荐 model rate_limit -&gt; 次优 model 成功", async () =&gt; {
+  const fakeLlm = createFakeLlmClient({
+    "gpt-4o": () =&gt; ({ error: "rate_limit" }),
+    "claude-sonnet-4-5": () =&gt; ({ content: "ok" }),
   });
-  const llm = createLlm(config, modelProfile);  // 选 adapter
-  // 之后 agent / subagent / 评测 都只看到 LLMClient interface
-  // 完全不感知 provider
-}</code></pre>
+  const result = await callWithFallback("gpt-4o", fakeLlm, args);
+  expect(result.content).toBe("ok");
+  expect(fakeLlm.callHistory).toEqual(["gpt-4o", "claude-sonnet-4-5"]);
+});
+
+test("cost 估算: GPT-4o + 50k input + 5k output = $0.175", () =&gt; {
+  const cost = estimateCost("gpt-4o", 50_000, 5_000);
+  // 50k / 1M * 2.5 = 0.125; 5k / 1M * 10 = 0.05; total = 0.175
+  expect(cost.min).toBeCloseTo(0.175, 2);
+});
+
+test("auto 策略: long_running 任务 -&gt; GPT-4o", () =&gt; {
+  const resolver = createModelResolver({ policy: "auto" });
+  expect(resolver("long_running")).toBe("gpt-4o");
+  expect(resolver("short_interactive")).toBe("claude-haiku-4-5");
+});
+
+test("fast 策略: 任意任务都返回 Haiku", () =&gt; {
+  const resolver = createModelResolver({ policy: "fast" });
+  expect(resolver("long_running")).toBe("claude-haiku-4-5");
+  expect(resolver("short_interactive")).toBe("claude-haiku-4-5");
+  expect(resolver("complex_reasoning")).toBe("claude-haiku-4-5");
+});</code></pre>
 <p>
-  Composition Root 唯一感知 provider 的地方, 其他模块全部只看到
-  <code>LLMClient</code> interface。切模型 = 改环境变量, 不改代码。
+  <strong>实现细节</strong>: 4 个测试覆盖 (a) fallback 链走通;
+  (b) cost 估算正确; (c) auto 策略查表; (d) fast 策略返回常量。
+  fake LLM client 不连真 API, 用 stub map 返回固定结果, 测试
+  0 成本。
 </p>
-
-<h2 id="trap">反例梯度</h2>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
+<h2 id="common-confusion">常见误解: 1 个 model 不能跑所有</h2>
+<p>
+  <strong>误解 1: "1 个最强 model 跑所有?"</strong> 错。 大材
+  小用, 简单任务浪费钱 (100 倍)。 应该 cheap model 跑简单, 强
+  model 跑复杂。
+</p>
+<p>
+  <strong>误解 2: "auto 策略 = 启发式判断?"</strong> 错。 auto 是
+  "用户不用选 model, 按任务类型查表选", 不是 harness 启发式猜
+  任务类型。 任务类型由调用方<strong>显式声明</strong>。
+</p>
+<p>
+  <strong>误解 3: "fallback 是无脑降级?"</strong> 错。 fallback
+  是<strong>有序</strong>的 (推荐 → 次优 → 次次优 → fail), 不
+  是随机选。 链写死在常量里, 改链 = 改常量。
+</p>
+<p>
+  <strong>误解 4: "model 一旦选定, 整个 run 不变?"</strong> 对。
+  整个 agent.run() 期间用同 model, 切换 = 重新 run()。 中途切换
+  会破坏 prompt cache (第 10 章) + 上下文不一致。
+</p>
+<h2 id="trap">反例梯度: 4 个常见错误</h2>
+<div class="cards-grid">
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 1 · 1 个 model 跑所有</span></div>
+    <div class="card__body">
+      <p>team 觉得"用最好的最省心", 全部任务用 Claude Opus。
+        错。 跑 5 分钟 git status 用 Opus 5 分钟 × $0.015/分钟
+        = $0.075; 用 Haiku 5 分钟 × $0.0008/分钟 = $0.004。 100 倍
+        浪费。 正确: 5 种任务类型 → 5 个 model, 按类型选。</p>
+    </div>
   </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>在 agent.ts 主代码里 if provider ===
-      "anthropic"。
-    </p>
-    <p>
-      <strong>为什么错:</strong>主代码被 provider 污染, 维护噩梦, 测试难写。
-    </p>
-    <p>
-      <strong>正确做法:</strong>4 个 adapter 实现 LLMClient interface, agent.ts
-      完全不感知 provider。
-    </p>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 2 · auto 启发式猜</span></div>
+    <div class="card__body">
+      <p>让 harness 启发式判断"这个 query 长 = long_running, 短
+        = short_interactive"。 错。 启发式猜错率高 (1 句话也可能
+        是复杂问题)。 正确: 任务类型由调用方显式声明, harness
+        只查表选 model, 不猜。</p>
+    </div>
   </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 3 · 没有 fallback 链</span></div>
+    <div class="card__body">
+      <p>推荐 model 不可用 (rate limit) 就 throw fail。 错。
+        1 个 model 不可用 = 整个 harness 死, 体验差。 正确:
+        配 fallback 链 (推荐 → 次优 → 次次优), 不可用就试下一个,
+        全失败才 fail。</p>
+    </div>
   </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>provider 错误码不翻译直接抛。</p>
-    <p>
-      <strong>为什么错:</strong>Recovery 模块看不懂 provider 错误码,
-      跨模型立刻挂。
-    </p>
-    <p>
-      <strong>正确做法:</strong>adapter 把 provider 错误码翻译成 6 种
-      LLMErrorKind, 统一收敛。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>hardcode "claude-3-5-sonnet" 的 cache 行为, 切到
-      GPT-4o 后不工作。
-    </p>
-    <p>
-      <strong>为什么错:</strong>cache 行为是 provider 特性, 不是 agent
-      假设。不同 provider 表现不同, 切模型后假设失效。
-    </p>
-    <p>
-      <strong>正确做法:</strong>从 modelProfile.supportsCache / cacheBreakpoints
-      读, 不 hardcode。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>本地模型跑 tool call 失败, 切到 Claude
-      之后才发现是 tool name 不合法 ("fs.read" 有点)。
-    </p>
-    <p>
-      <strong>为什么错:</strong>tool name 在不同 provider 规则不同 (Anthropic
-      允许 ".", OpenAI 不允许), harness 不该 hardcode 假设。
-    </p>
-    <p>
-      <strong>正确做法:</strong>tool registry 暴露 getNormalizedName() 给
-      adapter, adapter 在注册时做规范化。
-    </p>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 4 · 中途切换 model</span></div>
+    <div class="card__body">
+      <p>让 agent.run() 中途根据 token 消耗切换 model (发现花
+        太多就换便宜)。 错。 切换 model 破坏 prompt cache (model
+        B 看不到 model A 的 cache 块), 也破坏上下文一致性 (model
+        A 看到的 conversation model B 看到的不一样)。 正确:
+        整个 run 用同 model, 切换 = 重新 run()。</p>
+    </div>
   </div>
 </div>
-
-<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
-<div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · model-policy 专题</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>4 个 adapter 暴露统一 LLMClient:</strong>每个 adapter 实现
-      <code>chat(messages): Promise&lt;AssistantMessage&gt;</code>, 内部
-      provider 表示完全翻译成统一形态。
-    </p>
-    <p>
-      <strong>provider 错误码翻译成 LLMErrorKind:</strong>fake provider 抛 429
-      错误, adapter 抛 LLMErrorKind === "rate_limit"。
-    </p>
-    <p>
-      <strong>切模型 = 改环境变量, 不改代码:</strong>设 ANTHROPIC_API_KEY 跑通,
-      切到 OPENAI_API_KEY 同样跑通, agent.ts 不变。
-    </p>
-    <p>
-      <strong>tool name 规范化:</strong>tool name 含 "." 时, OpenAI adapter
-      内部替换为 "_" (OpenAI 限制), 但 trace 里仍然 显示原始 name。
-    </p>
-    <p>
-      <strong>modelProfile 决定 cache 行为:</strong>fake profile
-      supportsCache=false, harness 不调用 cache-debug tracker;
-      supportsCache=true, harness 调用并记录 hit/miss。
-    </p>
-  </div>
-</div>
-
-<h2 id="lookback">回望第 00–15 章: 哪些原则在本章兑现了</h2>
+<h2 id="validate">Validation: 4 条不变量检验</h2>
+<ol>
+<li>
+<strong>default 表完整</strong>: 5 种任务类型都有推荐 model, 缺
+    一个 TypeScript 编译失败 (Record 强制完整)。 验证: 单测覆盖
+    5 个 taskType 都能查表。
+  </li>
+<li>
+<strong>fallback 链无循环</strong>: 链必须有限, 不能跳回自身。
+    验证: 单测覆盖 5 个推荐 model 的 fallback 链, 跑 100 次调用,
+    链不超 3 步, 不回到起点。
+  </li>
+<li>
+<strong>策略优先级一致</strong>: auto = 按 taskType 选; fast/quality/budget
+    = 忽略 taskType 选常量。 验证: 4 个测试覆盖 4 种策略。
+  </li>
+<li>
+<strong>cost 估算合理</strong>: 价目表 × token 估算 = cost, 不靠
+    LLM 自己估。 验证: 3 个测试覆盖 (a) 输入 token 算; (b) 输出
+    token 算; (c) 本地 model cost = 0。
+  </li>
+</ol>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
 <ul>
-  <li>
-    <strong>Composition Root 唯一感知 provider:</strong>其他模块只看到 LLMClient
-    interface。
+<li>
+<strong>策略模式</strong>: 4 种策略决定 model 选, 5 种任务类型
+    决定 default 表, 两者正交。
   </li>
-  <li>
-    <strong>不变量在 adapter 内部兑现:</strong>cache 边界、错误码、截断规则,
-    全部 adapter 收口。
+<li>
+<strong>声明式 vs 启发式</strong>: 任务类型由调用方显式声明,
+    harness 查表, 不启发式猜。
   </li>
-  <li><strong>配置即适配:</strong>切模型 = 改 env, harness 主体不变。</li>
-  <li>
-    <strong>事实与视图分离:</strong>modelProfile 是"事实" (provider 描述),
-    adapter 是"视图" (实际调用)。
+<li>
+<strong>有限 fallback 链</strong>: 链写死, 不动态算, 不无限循环。
+  </li>
+<li>
+<strong>幂等估算</strong>: cost 估算可重复, 同一任务多次跑
+    估算一致。
+  </li>
+<li>
+<strong>显式切换</strong>: 整个 run 用同 model, 切换 = 重新 run。
   </li>
 </ul>
-
-<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<h2 id="forward">前瞻张力: 留给后续专题</h2>
 <dl class="defs">
-  <dt>多 provider 同时跑</dt>
-  <dd>
-    未来 harness 允许同一个 run() 内调多个 provider (例如用 GPT-4 选 tool, 用
-    Claude 总结), 4 个 adapter 要能并存。
+<dt>动态 cost 实时监控</dt>
+<dd>
+    当前 cost 是启动时估算, 实际可能偏差 1.5 倍。 工业级想要
+    "实时 cost 监控, 超预算自动切换到便宜 model", 涉及 streaming
+    token count + 实时熔断。 留 P2 阶段。
   </dd>
-  <dt>model profile 动态加载</dt>
-  <dd>
-    新 model 版本发布时, foundation-models.ts 要更新, 跑一次 eval 验证 cache /
-    tool / 错误码行为。
+<dt>Model 评测 (A/B testing)</dt>
+<dd>
+    教学版 default 表是 hard-code, 工业级想要"同时跑 GPT-4o +
+    Claude Sonnet, 哪个质量好用哪个", 涉及 multi-model 投票 +
+    自动回归测试。 留 P2 阶段。
   </dd>
-  <dt>local model 协议差异</dt>
-  <dd>
-    Ollama / vLLM / LM Studio 各自的 tool call 协议略有差异, adapter
-    抽象要能容下。
-  </dd>
-  <dt>cost-aware adapter selection</dt>
-  <dd>
-    不同 provider 价位不同, harness 应当能在"质量 vs 成本" 之间动态选 adapter
-    (例如用户配置"省钱模式")。
+<dt>用户级 cost 配额</dt>
+<dd>
+    当前没有"这个月只能花 $100" 限制, 工业级想要配额管理
+    (user-level / team-level / org-level), 涉及 quota tracker
+    + 熔断。 留 P2 阶段。
   </dd>
 </dl>
-
-<h2 id="vibe-coding-model">本次如何 vibe code: model-policy 专题的三件套</h2>
-
-<h3 id="vibe-feed-model">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>LLMAdapter</code> /
-    <code>FoundationModelProfile</code> 两个 interface, 以及 4 个 adapter
-    (Anthropic / OpenAI / Google / 本地) 的命名规范。本轮不写实现,
-    重点钉"agent.ts 完全不感知 provider"。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。让 LLM 给出
-    <code>src/llm-adapter.ts</code> 的 stub, 4 个 adapter 是 noop
-    (直接返回硬编码 messages)。本轮 review 重点: agent.ts / main.ts 不出现
-    provider 字符串。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。让 LLM 写 4 个 adapter + 错误码翻译 +
-    modelProfile 解析 + tool name 规范化。本轮 review 重点: 错误码统一翻译成
-    LLMErrorKind, tool name 规范化不在 agent.ts。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。让 LLM 写
-    <code>test/adapter.test.ts</code>。本轮 review 重点: "切模型 = 改 env,
-    不改代码" 和 "tool name 规范化" 两条必须有 env 切换断言。
-  </li>
-</ol>
-
-<h3 id="vibe-review-model">Review: model-policy 专题专属 checklist</h3>
-<ol>
-  <li>
-    <strong>agent.ts / main.ts 不出现 provider 字符串。</strong>验证:
-    <code>grep -rn 'anthropic\|openai' src/agent.ts src/main.ts</code> 应当 0
-    行。
-  </li>
-  <li>
-    <strong>4 个 adapter 都实现 LLMClient。</strong>验证: 每个 adapter.ts 内有
-    <code>chat(messages): Promise&lt;AssistantMessage&gt;</code> 签名。
-  </li>
-  <li>
-    <strong>错误码翻译在 adapter 内部。</strong>验证: catch 块把 provider
-    错误码翻译成 LLMErrorKind, 不直接 throw provider error。
-  </li>
-  <li>
-    <strong>tool name 规范化在 adapter 内部。</strong>验证: tool registry
-    不做规范化, adapter 在调用 provider API 前做。
-  </li>
-  <li>
-    <strong>modelProfile 决定 cache 行为。</strong>验证:
-    <code>grep -n 'supportsCache' src/llm-adapter.ts</code> ≥ 1 行, 决定是否调用
-    cache-debug tracker。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-model">调试: model-policy 专题典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · agent.ts 出现 provider 字符串。</strong>症状:
-    <code>if (provider === "anthropic") ...</code> 写在 agent.ts。验证:
-    <code>grep -rn 'anthropic\|openai' src/agent.ts</code> 不为 0 行时,
-    跑"切模型 = 改 env" 测试应当挂。
-  </li>
-  <li>
-    <strong>伪装 B · provider 错误码直接抛。</strong>症状: adapter catch 块
-    <code>throw err</code>。验证: 写一个 fake provider 抛 429, 跑"provider
-    错误码翻译" 测试, 应当收到 LLMErrorKind === "rate_limit"。
-  </li>
-  <li>
-    <strong>伪装 C · cache 行为 hardcode。</strong>症状:
-    <code>if (provider === "anthropic") cacheHit = true</code>。验证: 改
-    modelProfile.supportsCache=false, 跑测试, cache-debug tracker 不应被调用。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-model">迭代: model-policy 专题 4 个 commit 节点</h3>
-<ol>
-  <li>
-    <code
-      >feat(model): 钉 LLMAdapter / FoundationModelProfile 接口 + 4 个 adapter
-      命名</code
-    >
-    —— tsc 通过, 无实现。
-  </li>
-  <li>
-    <code
-      >feat(model): createLlm(config, modelProfile) + 4 个 adapter stub</code
-    >
-    —— tsc 通过, stub 永远返回 hardcoded 响应。
-  </li>
-  <li>
-    <code
-      >feat(model): 4 个 adapter 真实实现 + 错误码翻译 + tool name 规范化 +
-      modelProfile 解析</code
-    >
-    —— 跑通 Validation 卡片前 4 条。
-  </li>
-  <li>
-    <code
-      >test(model): 切 env 跑通同一 scenario + modelProfile.supportsCache 决定
-      cache-debug 调用</code
-    >
-    —— 全绿。
-  </li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
   <div class="card__head">
-    <span class="card__tag">Prompt Card · model-policy 专题</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
+    <span class="card__tag">Prompt Card · 专题 A</span>
+    <button class="card__copy" data-copy-card="" type="button">复制</button>
   </div>
   <div class="card__body">
-    <p>
-      <strong>目标:</strong>实现 LLM Adapter 层, 用 4 个 adapter 收口 provider
-      差异 (tool call 协议 / cache 边界 / 错误码 / 截断规则), harness
-      其他部分完全不感知 provider。
-    </p>
-    <p>
-      <strong>场景:</strong>用户设 ANTHROPIC_API_KEY 跑通, 切到 OPENAI_API_KEY
-      同样跑通, agent.ts 不改一行代码。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/llm-adapter.ts</code> (新) 暴露
-      <code>createLlm(config, modelProfile)</code>;
-      <code>src/llm-providers.ts</code> (新) 4 个 adapter (Anthropic / OpenAI /
-      Google / 本地); <code>src/foundation-models.ts</code> (新) modelProfile
-      解析; <code>src/index.ts</code> 接线 config + modelProfile 选 adapter。
-    </p>
+    <p><strong>目标:</strong> 给 harness 加 Model Policy 策略层,
+      5 种任务类型 → 5 个推荐 model, 4 种策略切偏好, fallback 链
+      优雅降级, cost 估算让用户知道大概花多少。</p>
+    <p><strong>场景:</strong> team 跑 10 个不同任务 (5 分钟 git /
+      1 小时迁移 / 30 分钟设计 / ...), --model-policy auto 启动,
+      harness 按 taskType 自动选 model。 临时周末实验切 fast
+      (全用 Haiku), 重要 demo 切 quality (全用 Opus), 预算紧的
+      月切 budget (全用 Qwen 本地)。</p>
+    <p><strong>模块:</strong> <code>src/execution-policy.ts</code> (改)
+      加 DEFAULT_MODEL_FOR_TASK 表 + STRATEGY_TO_MODEL 常量 +
+      createModelResolver 工厂 + callWithFallback 链 + estimateCost
+      估算; <code>src/cli-commands.ts</code> (改) 加 /model-policy
+      show / set 命令; <code>src/agent.ts</code> (改) 接收
+      taskType + 调 resolver + 输出 cost 估算; <code>src/index.ts</code>
+      (改) Composition Root 注入 modelResolver + fallback 链。</p>
     <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
     <ul>
-      <li>
-        agent.ts / main.ts / loop 不出现 provider 字符串 (anthropic / openai /
-        google)
-      </li>
-      <li>4 个 adapter 都实现 LLMClient interface</li>
-      <li>provider 错误码在 adapter 内部翻译成 LLMErrorKind (第 11 章)</li>
-      <li>tool name 规范化在 adapter 内部, 不在 tool registry</li>
-      <li>cache 行为从 modelProfile.supportsCache 读, 不 hardcode</li>
+      <li>5 种任务类型固定枚举 long_running / short_interactive / bulk_summarize / complex_reasoning / experimental, 不可新增</li>
+      <li>4 种策略固定枚举 auto / fast / quality / budget, 不可新增</li>
+      <li>auto 策略查 default 表, fast/quality/budget 各自返常量, 不查表</li>
+      <li>任务类型由调用方显式声明, harness 不启发式猜</li>
+      <li>fallback 链有限, 长度 ≤ 3, 不跳自身, 不无限循环</li>
+      <li>cost 估算可重复, 同一任务多次跑一致, 不靠 LLM 自己估</li>
+      <li>整个 agent.run() 用同 model, 中途不切换 (切换 = 重新 run)</li>
+      <li>execution profile 3 种 readonly / ci / workspace_write 与 model 选择正交, 独立维度</li>
     </ul>
-    <p><strong>验证 (用 fake adapter + env 切换, 逐条落到 vitest):</strong></p>
+    <p><strong>验证 (用 fake LLM client + fake 价目表 + vitest, 逐条断言):</strong></p>
     <ul>
-      <li>
-        4 个 adapter 暴露统一 chat(messages) 签名, 内部 provider 表示翻译成
-        AssistantMessage
-      </li>
-      <li>fake provider 抛 429, adapter 抛 LLMErrorKind === "rate_limit"</li>
-      <li>
-        设 ANTHROPIC_API_KEY 跑通, 切到 OPENAI_API_KEY 同样跑通, agent.ts 不变
-      </li>
-      <li>
-        tool name 含 "." 时, OpenAI adapter 内部替换为 "_", trace 显示原始 name
-      </li>
-      <li>modelProfile.supportsCache=false 时, cache-debug tracker 不被调用</li>
+      <li>default 表完整: 5 种 taskType 都能查表, 缺一个 TS 编译失败</li>
+      <li>fallback 链走通: 推荐 model rate_limit → 次优 model ok, 链用 2 步</li>
+      <li>4 种策略正确: auto 按 taskType 选, fast/quality/budget 各自返常量</li>
+      <li>cost 估算: GPT-4o + 50k input + 5k output = $0.175 (精确), 本地 model = $0</li>
     </ul>
   </div>
 </div>
-
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    故意在 agent.ts 写 if (provider === "anthropic"), 跑测试, 看"agent.ts 不出现
-    provider 字符串" 是否抓到 (切 env 后挂)。
+<li>
+    故意让 harness 用 1 个 model (Opus) 跑所有任务, 跑 1 个月
+    harness, 看账单 vs 引入 Model Policy 后的账单 (×10 浪费 vs.
+    优化后)。
   </li>
-  <li>
-    在 adapter catch 块 throw err (不翻译), 跑测试, 看"provider 错误码翻译"
-    是否抓到 (LLMErrorKind 拿不到)。
+<li>
+    故意让 auto 策略启发式猜任务类型 (query 长度判断), 跑测试
+    "1 句话的复杂推理" + "长 query 的简单任务", 看"启发式猜"
+    是否抓到 (猜错率高 vs. 显式声明 100% 准)。
   </li>
-  <li>
-    hardcode "anthropic 有 cache", 不读 modelProfile.supportsCache, 跑测试,
-    看"modelProfile 决定 cache 行为" 是否抓到。
+<li>
+    故意不写 fallback 链, 推荐 model rate_limit 时直接 throw,
+    跑测试, 看"fallback 缺失" 是否抓到 (1 个 rate limit = harness
+    死 vs. fallback 链试次优 model)。
+  </li>
+<li>
+    故意让 agent.run() 中途根据 token 消耗切 model, 跑测试,
+    看"中途切换" 是否抓到 (cache miss + 上下文不一致 vs. 整个
+    run 用同 model + 切换 = 重新 run)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本专题给 harness 加了 LLM Adapter 层, 用 4 个 adapter 收口 provider 在 tool
-  call 协议 / cache 边界 / 错误码 / 截断规则 上的差异。harness
-  其他部分完全不感知 provider, 切模型 = 改 环境变量。modelProfile
-  决定每个具体模型版本的行为, 不 hardcode provider 假设。这是 harness
-  跨模型可移植性的关键。
+  Model Policy 是给 LLM 选型的<strong>策略层</strong>, 5 种任务
+  类型 × 4 种策略 × 3 种 execution profile = 60 种任务场景,
+  每种有合适的 model + 权限 + 成本。 核心是 5 个设计:
+</p>
+<ul>
+<li>
+<strong>5 种任务类型</strong>: long_running / short_interactive /
+    bulk_summarize / complex_reasoning / experimental, 固定
+    枚举。
+  </li>
+<li>
+<strong>4 种策略</strong>: auto / fast / quality / budget, 固定
+    枚举, 切用户偏好。
+  </li>
+<li>
+<strong>声明式 taskType</strong>: 调用方显式声明, harness 查表
+    选 model, 不启发式猜。
+  </li>
+<li>
+<strong>有限 fallback 链</strong>: 推荐 → 次优 → 次次优 → fail,
+    写死, 不动态算。
+  </li>
+<li>
+<strong>幂等 cost 估算</strong>: 价目表 × token 估算, 启动时输出
+    min/max, 实际可偏差 1.5 倍。
+  </li>
+<p>
+  教程完结。 下一份是 <strong>专题 B · eval harness</strong>, 讲
+  怎么写测试覆盖 harness 行为 — scripted LLM client + 4 类
+  eval case (deterministic / live regression / live full / replay)
+  + 6 阶段 prompt card 模板 + judge 4 层降级, 把前面所有模块在
+  CI 里跑稳。
 </p>

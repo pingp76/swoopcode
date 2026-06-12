@@ -1,580 +1,689 @@
-<p class="article__eyebrow">第 13 章 · 不阻塞主循环</p>
-<h1 class="article__title">后台跑长任务: Async Run</h1>
+<p class="article__eyebrow">第 13 章 · 后台跑长任务不阻塞主对话</p>
+<h1 class="article__title">Async Run: 3 并发上限 + 终态幂等 + 输出隔离</h1>
 <p class="article__lede">
-  前面十二章让 harness 在单次会话内能聊天、调工具、跑子任务、压缩、拦权限、 留
-  hook、记 memory、cache 友好、recovery、记 task。但 harness 内部如果 要"跑 5
-  分钟测试" 这种长任务, 仍然会阻塞主 loop, 用户只能干等。 这一章给 harness 加
-  Async Run 模块, 让 agent.run() 内部启动后台任务, 主 loop 继续等用户输入,
-  后台任务完成时通过 reminder 通知 LLM。
+  第 12 章的 Task 是"长期计划", 但 LLM 想"现在跑 3 个独立测试
+  (build / lint / typecheck), 不阻塞当前对话" 时, Task 不够 —
+  Task 是计划层, 需要<strong>执行层</strong>。 这一章加
+  <code>src/async-runs.ts</code> 模块: AsyncRun = 一次非阻塞运行
+  实例, 支持 command (跑 bash) 和 subagent (派子 agent) 两种
+  executor, 最多 3 个同时 running, 5 分钟超时, 终态<strong>幂等</strong>
+  (race condition 安全) + 输出<strong>隔离</strong> (写到独立文件
+  + LRU OutputStore)。 读完后, 你能讲清"Async Run vs Task" 的
+  边界 (执行层 vs 计划层) + "finishRun 收敛" 的核心正确性保证
+  + "并发限制 3" 的理由。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-12">在第 12 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="real-failure">真实失败故事: LLM 跑 npm test 卡死主对话 10 分钟</h2>
 <p>
-  这一章在 agent.run() 主循环里加 async run 工具 (<code>run_async</code>)。 当
-  LLM 决定要跑长任务时, 调 <code>run_async</code>, harness 把任务 派发到后台
-  worker (不阻塞主 loop), 返回 run_id; 主 loop 继续, 下一次 LLM 调用前, harness
-  把已完成的 async run 输出作为 reminder 注入, LLM 看到结果后决定下一步。
-  对应到代码, 改动集中在 3 个文件: <code>src/async-runs.ts</code> (新)、
-  <code>src/tools/run_async.ts</code> (新)、<code>src/agent.ts</code> (改 每轮
-  LLM 调用前 drain 通知)。
+  写代码之前, 先看一个真实痛点。 用户的 team 用 harness 跑大型
+  monorepo, LLM 跑一个简单 fix 后想"跑 npm test 验证", 但
+  npm test 跑 10 分钟才完。 这 10 分钟内 LLM 主循环被阻塞,
+  user 不能 ctrl-c, 不能切到别的对话, 不能问别的任务。
 </p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/async-runs.ts: Async run 管理器 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/agent.ts: 每轮 LLM 调用前 drain 通知</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/output-store.ts"
-    target="_blank"
-    rel="noreferrer"
-    >3. src/output-store.ts: 大输出存盘 (第 06 章 P1 复用)</a
-  >
-</div>
-
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    用户说"跑测试, 跑完后告诉我", harness 调 run_bash("npm test") 阻塞 5 分钟, 5
-    分钟内用户既不能输入也不能看到中间进度。现象是"长任务 占用主 loop,
-    用户体验差"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"用 setTimeout 包装一下, 不阻塞就行"。这有两个问题:
-    一是后台任务的输出没有持久化, 进程崩了任务丢; 二是 LLM 不知道
-    "任务什么时候完成", 完成时没有任何信号通知主 loop。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口:
-    <code
-      >interface AsyncRunManager { start(spec), list(), drainNotifications()
-      }</code
-    >。 不变量三条: (1) async run 的输出走 P1 压缩 (第 06 章), 大输出 存文件 +
-    output_id 占位, (2) 通知队列是 FIFO, 每轮 LLM 调用前 drain 一次,
-    同一通知不会重复注入, (3) run_id 由 harness 生成 (UUID), LLM 通过
-    read_async_output 工具按 id 读输出。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    fake asyncRunManager.start 返回固定 run_id, 跑完后 LLM 调 read_async_output
-    拿结果; fake LLM 第二轮收到的 messages 包含 reminder 标签
-    "&lt;system-reminder source='async-run'&gt;", 描述后台任务状态。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
-
-<div class="note">
-  <p class="note__title">观察 1 · setTimeout 包装, 假装不阻塞</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// 错误: 用 setTimeout 包装一下, 没真正异步
-setTimeout(async () =&gt; {
-  const result = await exec("npm test");
-  history.add({ role: "user", content: `Async result: ${result}` });
-}, 0);</code></pre>
-  <p><strong>问:</strong>为什么不直接 setTimeout?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 持久化: setTimeout 不进任何 持久层,
-    进程崩了任务丢; 通知: 完成后直接写 history, LLM 在第 5 轮突然看到 "Async
-    result: ..." 一条陌生 user message, 不知道 这是哪来的; 抢占: 没有冲突检测,
-    LLM 跑后台任务的同时调前台工具, 两者可能写同一文件。
-  </p>
-</div>
-
-<div class="note">
-  <p class="note__title">观察 2 · 通知不 drain, 每轮重复注入</p>
-  <pre class="code-block"><code>// 教学简化版
-async function run(query) {
-  for (;;) {
-    const messages = history.getMessages();
-    // 错误: 不 drain, 每轮 LLM 看到的都是完整通知队列
-    const notifications = asyncRunManager.getAllNotifications();
-    for (const n of notifications) {
-      history.add({ role: "user", content: formatNotification(n) });
-    }
-    /* ... */
-  }
-}</code></pre>
-  <p><strong>问:</strong>为什么不 drain?</p>
-  <p>
-    <strong>答:</strong>不 drain 的话, 同一通知每轮都注入, 10 轮后 history
-    里就有 10 条同样的 "Async run completed: X" 消息, token 浪费, LLM
-    看到重复内容也困惑。drain() 一次性取走, 队列清空, 每条通知 只注入一次。
-  </p>
-</div>
-
-<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export type AsyncRunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
-
-export interface AsyncRunSpec {
-  tool: string;                 // 调哪个工具 (例如 "run_bash")
-  args: Record&lt;string, unknown&gt;;
-  title: string;                // 给用户看的标题
-}
-
-export interface AsyncRun {
-  id: string;                   // harness 生成的 UUID
-  spec: AsyncRunSpec;
-  status: AsyncRunStatus;
-  outputRef?: { outputId: string };  // P1 压缩的 output_id (第 06 章)
-  error?: string;
-  startedAt: number;
-  finishedAt?: number;
-}
-
-export interface AsyncRunNotification {
-  runId: string;
-  title: string;
-  executor: string;
-  status: AsyncRunStatus;
-  preview: string;              // 摘要, LLM 第一时间看到
-  outputRef?: { outputId: string };
-}
-
-export interface AsyncRunManager {
-  start(spec: AsyncRunSpec): Promise&lt;AsyncRun&gt;;
-  get(id: string): AsyncRun | undefined;
-  list(): AsyncRun[];
-  cancel(id: string): boolean;
-  // 取走所有未读通知, 队列清空
-  drainNotifications(): AsyncRunNotification[];
-  // 前台工具是否与 running async run 冲突 (例如两个 run 写同一文件)
-  checkForegroundToolConflict(request: { toolName: string; args: Record&lt;string, unknown&gt; }): { blocked: boolean; reason?: string };
-}</code></pre>
-
-<h2 id="loop-integration">loop 接入: 每轮 drain 通知</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-async function run(query: string) {
-  history.add({ role: "user", content: query });
-
-  for (;;) {
-    // 1. drain async run 通知, 转成 reminder
-    const notifications = asyncRunManager.drainNotifications();
-    for (const n of notifications) {
-      const lines = ["Async run updates:"];
-      lines.push(
-        `- run_id: ${n.runId}`,
-        `  title: ${n.title}`,
-        `  status: ${n.status}`,
-        `  preview: ${n.preview}`,
-        n.outputRef?.outputId
-          ? `  full_output: use run_output_read with output_id ${n.outputRef.outputId}`
-          : `  full_output: use run_async_output_read with run_id ${n.runId}`,
-      );
-      const reminder = `&lt;system-reminder source="async-run"&gt;\n${lines.join("\n")}\n&lt;/system-reminder&gt;`;
-      history.add({ role: "user", content: reminder });
-    }
-
-    const messages = history.getMessages();
-    const assistant = await llm.chat(messages);
-    history.add(assistant);
-
-    if (!assistant.tool_calls) return assistant.content;
-
-    for (const call of assistant.tool_calls) {
-      // run_async 特殊处理: 派发到后台, 不阻塞
-      if (call.name === "run_async") {
-        const spec = call.args as AsyncRunSpec;
-        const run = await asyncRunManager.start(spec);
-        history.add({ role: "tool", tool_call_id: call.id,
-          content: `Started async run ${run.id}: ${spec.title}\nThe run will continue in background. You will be notified when it completes.` });
-        continue;
-      }
-
-      // 前台工具: 检查与 running async run 冲突
-      const conflict = asyncRunManager.checkForegroundToolConflict({
-        toolName: call.name, args: call.args,
-      });
-      if (conflict.blocked) {
-        history.add({ role: "tool", tool_call_id: call.id,
-          content: `Blocked: ${conflict.reason}` });
-        continue;
-      }
-
-      // 正常执行
-      const tool = registry.get(call.name);
-      const result = await tool.execute(call.args);
-      history.add({ role: "tool", tool_call_id: call.id, content: result.content });
-    }
-  }
-}</code></pre>
-
-<h2 id="conflict-detection">前台工具与后台任务冲突检测</h2>
+<ol>
+<li>
+<strong>症状</strong>: LLM 调 run_bash("npm test"), 主循环
+    <code>await</code> 卡 10 分钟, 整个 harness 死锁。
+  </li>
+<li>
+<strong>更糟的并发场景</strong>: LLM 想"同时跑 3 个测试套件
+    (frontend / backend / e2e) 节省时间", 但 run_bash 是同步
+    的, 必须一个一个跑, 总共 30 分钟。 应该并发。
+  </li>
+<li>
+<strong>更更糟的资源滥用</strong>: LLM 想"派 20 个子 agent
+    跑 20 个独立 task", 20 个子 agent 同时跑, 把 LLM API
+    quota 烧光, 全部 fail。
+  </li>
+<li>
+<strong>真问题</strong>: 缺少<strong>非阻塞执行层</strong> +
+  <strong>并发限制</strong> + <strong>输出隔离</strong>。 LLM
+    需要的是"启动一个后台 run, 立即拿到 run_id, 继续干别的,
+    完事后用 run_id 读输出"。
+  </li>
+</ol>
 <p>
-  harness 跑后台任务时, 主 loop 仍然会调前台工具 (例如读其他文件)。
-  两者可能写同一文件、修改同一 git branch、跑同一 service。conflict 检测由
-  <code>checkForegroundToolConflict()</code> 实现, 规则:
+  朴素想法 1: "直接用 Node child_process.spawn 不 await?"
+  半对。 spawn 返回子进程 PID 不 await, 但 LLM 不知道什么时候
+  跑完, 怎么读输出, 怎么让用户看到结果。 需要一个 Async Run
+  Manager 集中管理。
 </p>
-<dl class="defs">
-  <dt>写文件冲突</dt>
-  <dd>
-    run_bash / run_write 工具的 args.path 命中 running async run 的 monitored
-    paths, 视为冲突。
-  </dd>
-  <dt>同 tool 并发</dt>
-  <dd>
-    run_bash 同时跑两个, harness 拒绝第二个, 提示 "another run_bash is running
-    in background, wait or cancel first"。
-  </dd>
-  <dt>Git 状态冲突</dt>
-  <dd>
-    async run 在 running 状态下, 前台工具不允许做 git push / git rebase
-    (避免分支状态混乱)。
-  </dd>
-</dl>
-
-<h2 id="trap">反例梯度</h2>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>用 setTimeout 包装长任务, 完成后直接写 history。
-    </p>
-    <p>
-      <strong>为什么错:</strong>无持久化, 进程崩了任务丢; LLM
-      不知道任务何时完成; 无冲突检测。
-    </p>
-    <p>
-      <strong>正确做法:</strong>async run 走持久化, 完成时进通知队列, 每轮 LLM
-      drain。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>通知不 drain, 每轮重复注入。</p>
-    <p>
-      <strong>为什么错:</strong>同一通知 10 轮后变成 10 条消息, 浪费 token, 误导
-      LLM。
-    </p>
-    <p>
-      <strong>正确做法:</strong>drainNotifications() 一次性取走, 队列清空,
-      每条只注入一次。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>不检测前台 / 后台冲突, 两个 run_bash 同时跑。
-    </p>
-    <p>
-      <strong>为什么错:</strong>可能写同一文件、git 状态混乱、service 端口冲突。
-    </p>
-    <p>
-      <strong>正确做法:</strong>checkForegroundToolConflict() 入口检查,
-      冲突时拒绝并写 tool message。
-    </p>
+<p>
+  朴素想法 2: "无限制并发?" 错。 LLM 一次想跑 100 个, 把 API
+  quota 烧光, 用户账号被 ban。 需要<strong>并发限制 3</strong>
+  (经验值), 超过就 reject。
+</p>
+<p>
+  正确做法: 加 <code>src/async-runs.ts</code> — <code>createAsyncRunManager</code>
+  工厂, 内部状态 (records + runningCount + finishedRunIds) 全
+  在闭包。 <code>finishRun</code> 是<strong>所有</strong>执行
+  路径 (命令完成 / 超时 / 异常 / shutdown) 汇合的<strong>唯一</strong>
+  入口, 保证幂等。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L13"><code>src/async-runs.ts</code> 第 13 行的核心正确性保证注释</a>:
+</p>
+<pre><code class="language-typescript">// 核心正确性保证: finishRun() 是所有终态收敛的唯一入口, 确保:
+// 1. 只有 running → 终态的转换有效
+// 2. 第一个进入终态的路径 wins (通过 Set 保证)
+// 3. late result 不能覆盖 timeout
+// 4. 不重复递减 runningCount、不重复推送 notification</code></pre>
+<h2 id="run-vs-task">Async Run vs Task: 执行层 vs 计划层</h2>
+<p>
+  <strong>用途</strong>: Task 是<strong>计划层</strong> (跨会话
+  持久化, 带依赖图, LLM 跑 task_1 等 task_2 ready); Async Run
+  是<strong>执行层</strong> (session 内非阻塞运行, 5 分钟超时,
+  跑完即丢)。 两者职责正交, 不能互相替代。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户让 LLM "跑 5 天迁移"。 LLM 先
+  创建 TaskGroup "migration-001" 含 500 个 task (计划层); 之后
+  每次开 session, LLM 调 <code>async_run_start({executor: "subagent", prompt: "跑 task_51 ~ task_60"})</code>
+  启动 Async Run (执行层)。 Async Run 内部派生独立 sub-agent
+  + 只读工具集, 跑 5 分钟, 完成后更新 task_51 ~ task_60 状态
+  (回到计划层)。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>层间清晰</strong> — Async
+  Run 不持久化, 进程重启丢失; Task 持久化, 跨 session 恢复。
+  Async Run 的 groupId / persistentTaskId 字段是"链接"到
+  Task 的桥, 不复制 Task 的状态。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L7"><code>src/async-runs.ts</code> 第 7-10 行的核心概念注释</a>:
+</p>
+<pre><code class="language-typescript">// 核心概念:
+// - Async Run = 一次非阻塞运行实例, 记录 run_id / status / output / notification
+// - 与 Task Group 不同: Async Run 是运行时执行层, 不是长期计划层
+// - 第一版只支持 command 和 subagent 两种 executor
+// - 第一版最多允许 3 个同时 running 的 async runs
+// - 第一版只允许只读探索和诊断命令</code></pre>
+<div class="figure figure--compare">
+  <div class="figure__title">图 1 · Async Run vs Task 的边界</div>
+  <div class="flow-compare">
+    <div class="flow-compare__col flow-compare__col--good">
+      <div class="flow-compare__head">Async Run · 运行时执行层</div>
+      <div class="flow-compare__body">session 内非阻塞, 5 分钟超时, 3 并发上限。 不持久化, 进程重启丢。 适合"现在跑一个 bash / 派一个子 agent"。</div>
+    </div>
+    <div class="flow-compare__col flow-compare__col--bad">
+      <div class="flow-compare__head">Task Group · 长期计划层</div>
+      <div class="flow-compare__body">跨会话持久化到 <code>.tasks/groups/</code>, 带依赖图 + 状态机。 适合"5 天迁移, 500 个 task"。</div>
+    </div>
   </div>
 </div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>大输出没走 P1 压缩, 直接塞进 tool message。</p>
-    <p>
-      <strong>为什么错:</strong>第 06 章的 P1 即时压缩不复用, async run
-      完成时直接撑爆 context。
-    </p>
-    <p>
-      <strong>正确做法:</strong>async run 完成时调
-      compressor.compressToolResult(), 大输出存文件 + output_id 占位。
-    </p>
-  </div>
-</div>
-
-<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
-<div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · 第 13 章</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>run_async 不阻塞主 loop:</strong>fake asyncRunManager.start 内部
-      sleep 5s, fake LLM 同一 run() 内调 run_async 后继续 generate, 主 loop 不等
-      5s。
-    </p>
-    <p>
-      <strong>通知 drain 不重复:</strong>fake asyncRunManager 预设 1 条
-      未读通知, 跑完第 1 轮 LLM 后 spy 验证 drainNotifications 被调用 1 次,
-      history 含 1 条 reminder; 第 2 轮 LLM 跑完时, history 不再追加这条通知 (已
-      drain)。
-    </p>
-    <p>
-      <strong>P1 压缩 output_id:</strong>fake async run 输出 100k 字符串, 跑完后
-      history reminder 的 content 含 "use run_output_read with output_id=xxx",
-      不含完整输出。
-    </p>
-    <p>
-      <strong>前台 / 后台冲突检测:</strong>fake async run 正在跑 run_bash, LLM
-      同一轮调 run_bash 前台, 写 tool message "Blocked: another run_bash is
-      running", spy 验证前台 run_bash 没被执行。
-    </p>
-    <p>
-      <strong>run_async 必写 tool message:</strong>fake asyncRunManager 返回
-      run_id "abc-123", 跑完后 history 末尾有 tool message "Started async run
-      abc-123: ..."。
-    </p>
+<p>
+  <strong>实现细节</strong>: Async Run 暴露 groupId / persistentTaskId
+  两个可选字段, 让 run 可以"链接"到 Task, 跑完时回调更新 task 状态
+  (虽然 LLM 自己写代码更新, 不用 Async Run 自动)。 链接是<strong>显式</strong>
+  字段, 不隐式行为。
+</p>
+<h2 id="two-executors">2 种 executor: command 和 subagent</h2>
+<p>
+  <strong>用途</strong>: LLM 启动 Async Run 时指定 executor 类型。
+  command = 跑一个 bash 命令 (read-only); subagent = 派一个独立
+  的子 agent (带只读工具集 + 父级 system prompt 快照)。 2 种覆盖
+  90% 后台任务场景。
+</p>
+<p>
+  <strong>真实场景</strong>: user 让 LLM "扫一下项目找所有 TODO 注释",
+  LLM 调 <code>async_run_start({executor: "command", command: "grep -rn 'TODO' src/"})</code>;
+  user 让 LLM "派一个子 agent 调研 React 18 新特性", LLM 调
+  <code>async_run_start({executor: "subagent", prompt: "调研 React 18 新特性", resources: {read_paths: ["docs/"]}})</code>。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>封闭类型, 未来扩展点</strong> —
+  2 种 executor 固定枚举, 不允许动态加第 3 种 (避免混乱); 未来
+  真要加 (如 MCP / 自定义 runner) 走 P2 阶段。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L48"><code>src/async-runs.ts</code> 第 48 行的 <code>AsyncRunExecutor</code> union</a>:
+</p>
+<pre><code class="language-typescript">export type AsyncRunExecutor = "command" | "subagent";</code></pre>
+<div class="figure figure--stack">
+  <div class="figure__title">图 2 · 2 种 executor 的资源差异</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--warn">
+      <div class="flow-stack__label">command · bash 执行器</div>
+      <div class="flow-stack__body">跑 <code>executeBash(command, timeoutMs)</code>, 走 readonly 命令策略 (只允许 ls / cat / grep / find / git status 等只读命令)。 输出写到 output.txt。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">subagent · 子 agent 执行器</div>
+      <div class="flow-stack__body">调 <code>createAgentFn(...)</code> 创建独立 child agent, 派生独立 history / compressor / tools (readPaths 过滤) / 父 system prompt 快照。 maxRounds 默认 8, 上限 20。</div>
+    </div>
   </div>
 </div>
-
-<h2 id="lookback">回望第 00–12 章: 哪些原则在本章兑现了</h2>
+<p>
+  <strong>实现细节</strong>: command 走 <code>launchCommandRunner</code>
+  内部 setTimeout timeout, subagent 走 <code>launchSubagentRunner</code>
+  复用 createAgentFn 工厂 + AbortController (shutdown 时主动 abort)。
+  两个函数返回的 Promise 都不被 <code>start()</code> await, 启动后
+  立即返回 run_id。
+</p>
+<h2 id="concurrency-limit">3 并发上限: 经验值的理由</h2>
+<p>
+  <strong>用途</strong>: LLM 一次启动的 Async Run 不能超过 3 个。
+  超过 3 个 reject, 错误信息明确告诉 LLM "当前并发已满, 请等待
+  现有 run 完"。 这是 Reference 章节 "模式 14 · Concurrent Limit
+  并发限制" 的具体应用。
+</p>
+<p>
+  <strong>真实场景</strong>: LLM 想"同时跑 20 个测试套件节省时间",
+  启动第 4 个时报错 "Maximum concurrent async runs (3) reached"。
+  LLM 知道 "3 是上限", 调整策略: 跑完 3 个再启动下 3 个, 总时间
+  节省 67% 但不会爆 quota。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>经验值 + 教学友好</strong> —
+  3 是经验值, 不需要 LLM 配置; 想"我要 10 个" 改源码改常量。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L208"><code>src/async-runs.ts</code> 第 208 行的 <code>MAX_CONCURRENCY = 3</code></a>:
+</p>
+<pre><code class="language-typescript">const MAX_CONCURRENCY = 3;</code></pre>
+<p>
+  <strong>实现细节</strong>: 检查点在 <code>start()</code> 第 657 行
+  (<code>if (runningCount &gt;= MAX_CONCURRENCY) throw</code>),
+  <code>start()</code> 立刻 reject, 不排队, 不 await。 这条策略叫
+  "fail fast" — 让 LLM 立即知道"现在过载", 不会傻等。
+</p>
+<p>
+  <strong>3 的理由</strong>:
+</p>
 <ul>
-  <li>
-    <strong>tool call 协议沿用:</strong>run_async 是普通工具, 走 Tool interface,
-    派发后写 role: "tool" 消息。
+<li>
+<strong>经验值</strong>: 3 = "够用但不过载"。 1 个太慢, 5+ 个
+    quota 容易爆, 3 是平衡点。
   </li>
-  <li>
-    <strong>P1 压缩复用:</strong>async run 输出调
-    compressor.compressToolResult(), 与第 06 章一致。
+<li>
+<strong>Quota 安全</strong>: 3 个 subagent 同时跑, 假设每个调
+    LLM 5 次, 共 15 次 LLM 调用, 短时间不会触发 rate limit。
   </li>
-  <li>
-    <strong>reminder 标签格式:</strong>通知走 &lt;system-reminder
-    source="async-run"&gt; 标签, 不污染 system prompt。
-  </li>
-  <li>
-    <strong>工厂模式:</strong>asyncRunManager 是工厂, 在 createAgent()
-    闭包内维护当前 run 列表。
+<li>
+<strong>教学友好</strong>: 3 是单数字, 容易记住, 容易测试 (构造
+    3 个 running, 第 4 个 reject)。
   </li>
 </ul>
+<h2 id="finishrun-idiempotent">finishRun 幂等: race condition 的核心防御</h2>
+<p>
+  <strong>用途</strong>: Async Run 跑完有 4 条可能路径 — (a) 命令
+  自然完成; (b) 5 分钟超时; (c) 命令抛错; (d) shutdown 主动
+  abandon。 这 4 条路径可能<strong>竞争</strong> (timeout 和
+  命令完成几乎同时触发), 必须有<strong>唯一收敛点</strong>保证
+  只产生一个终态。
+</p>
+<p>
+  <strong>真实场景</strong>: 跑 <code>npm test</code> 跑了 4 分
+  50 秒, setTimeout 在 5 分钟触发 timeout, 同时 npm test 跑完
+  调回调完成回调。 两个回调都调 <code>finishRun(record, "completed"/"timeout", ...)</code>。
+  没幂等保护, runningCount 减 2 次, notification 推 2 条,
+  output 写 2 次, 状态错乱。 幂等保护让第一个 wins, 第二个
+  no-op。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>单一收敛点 + 幂等 Set</strong> —
+  Reference 章节 "模式 19 · Idempotent 幂等" 的标准应用。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L397"><code>src/async-runs.ts</code> 第 397 行的 <code>finishRun</code></a>:
+</p>
+<pre><code class="language-typescript">function finishRun(
+  record: AsyncRunRecord,
+  nextStatus: Exclude&lt;AsyncRunStatus, "running"&gt;,
+  output?: string,
+  error?: string,
+): boolean {
+  // 只有 running 状态才允许进入终态
+  if (record.status !== "running") return false;
+  // 第一个进入终态的路径 wins (Set 保证幂等)
+  if (finishedRunIds.has(record.id)) return false;
+  finishedRunIds.add(record.id);
+  clearRunRuntime(record.id);
+  // ... 写状态 / 写输出 / 推送 notification / 递减 runningCount
+}</code></pre>
+<p>
+  <strong>实现细节</strong>: 5 条正确性保证 (见注释第 384-389 行):
+</p>
+<ol>
+<li>
+<strong>running → 终态</strong>: 已经终态的 record 拒绝再次
+    收敛。
+  </li>
+<li>
+<strong>第一个 wins</strong>: 用 <code>finishedRunIds: Set</code>
+    标记已收敛, 重复调用 return false。
+  </li>
+<li>
+<strong>late result 不覆盖</strong>: 即使 completed 后 timeout
+    才到, timeout 也被 finishRun 拒绝, 不会把 completed 改成
+    timeout。
+  </li>
+<li>
+<strong>不重复递减</strong>: runningCount 只在第一个 wins 时
+    减 1, 后续不重复减。
+  </li>
+<li>
+<strong>不重复推送</strong>: notification 队列只 push 一次, 不
+    重复通知。
+  </li>
+</ol>
+<h2 id="isolation">输出隔离: 文件 + OutputStore LRU</h2>
+<p>
+  <strong>用途</strong>: 每个 Async Run 的输出独立写到
+  <code>async-runs/&lt;runId&gt;/output.txt</code>, 同时登记到
+  OutputStore (LRU 内存索引), LLM 用 run_id 或 output_id 读。
+  文件 = 长期存档, LRU = 快速查表。
+</p>
+<p>
+  <strong>真实场景</strong>: LLM 跑 3 个并发 Async Run (build /
+  lint / typecheck), 每个写到独立 output.txt, 完事后 LLM 调
+  <code>async_run_check(runId)</code> 拿 preview, 调
+  <code>async_run_output_read(runId, maxBytes)</code> 拿全文。
+  3 个 run 互不污染, 不会把 A 的输出塞给 B。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>独立文件 + LRU 内存索引</strong> —
+  Reference 章节 "模式 10 · Atomic Write 原子写" 的应用 — finishRun
+  写 output.txt 用 writeFileSync, 不追加; OutputStore 记录
+  (runId → outputId) 映射, LRU 淘汰旧 run 的全文 (避免内存爆炸)。
+</p>
+<p>
+  <strong>实现细节</strong>: 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L426"><code>src/async-runs.ts</code> 第 426 行的 OutputStore 登记</a>
+  + 第 446 行的旧 outputPath 写入。 两份同时写 (file + store),
+  file 给 git/archive, store 给快速 LLM 读取。
+</p>
+<h2 id="notification-queue">notification 队列: 后台结果不阻塞当前 LLM</h2>
+<p>
+  <strong>用途</strong>: Async Run 完成后, 不能直接插入当前 LLM
+  调用 (会破坏 OpenAI API 消息格式, 第 08 章延迟注入协议), 也
+  不能阻塞主循环等 run 完。 正确做法: 跑完后 push 一条
+  notification 到队列, 下一轮 LLM 调用前调
+  <code>drainNotifications()</code>, 把 notification 渲染到
+  user message 末尾。
+</p>
+<p>
+  <strong>真实场景</strong>: LLM 启动 build / lint / typecheck 3
+  个 run, 立即拿到 3 个 run_id, 继续干别的。 5 分钟后 3 个 run
+  陆续完成, 3 条 notification 进队列。 LLM 下一次想"现在 build
+  怎么样", 调 <code>async_run_drain()</code> 拿 3 条 notification,
+  看到"build ✓, lint ✗ (1 error), typecheck ✓", 据此决定下一步。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>异步结果回传 = 排队, 不插入</strong> —
+  Reference 章节 "模式 9 · Observer 观察者模式" 的延伸。 notification
+  是<strong>短摘要</strong> (runId + status + preview), 全文靠
+  <code>readOutput</code> 读。 短摘要进 history 不撑爆, 全文不
+  进 history。
+</p>
+<p>
+  <strong>实现细节</strong>: notification 在 finishRun 内 push
+  到 <code>notifications: AsyncRunNotification[]</code> 队列,
+  LLM 调 <code>drainNotifications()</code> 拿所有未读 + 队列
+  清空。 幂等性保证 (第 4 条) 让重复 finishRun 不重复 push。
+</p>
+<h2 id="shutdown">shutdown: 进程退出时把 running 标 abandoned</h2>
+<p>
+  <strong>用途</strong>: harness 进程退出 (ctrl-c / session 关闭
+  / eval cleanup) 时, 仍有 running 的 Async Run。 应该把
+  这些 run 标 abandoned (不是 failed, 是"用户主动放弃"),
+  清内部状态, abort 子 agent。
+</p>
+<p>
+  <strong>真实场景</strong>: user 跑了 3 个 Async Run, 第 2 个跑
+  到一半, user ctrl-c 退出。 期望: harness 优雅退出, 3 个 run
+  全部 abandoned 状态, 子 agent 收到 abort signal 停止
+  LLM/tool 调用, 内存状态清空, 写日志 "Async run ar_xxx
+  abandoned: process shutdown"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>运行时生命周期, 非 LLM 工具</strong> —
+  shutdown 是 harness 内部用的, 不暴露给 LLM 工具。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L164"><code>src/async-runs.ts</code> 第 164 行的 shutdown 注释</a>:
+</p>
+<pre><code class="language-typescript">// 关闭当前进程内仍在 running 的 async runs。
+// 这是运行时生命周期方法, 不是 LLM 工具能力:
+// - 普通完成/失败/超时仍由 finishRun() 统一收敛
+// - 进程关闭或 eval cleanup 时调用 shutdown(), 把剩余 running run 标记为 abandoned
+// - command executor 底层 child_process 仍依赖 executeBash 的 timeout 机制退出;
+//   shutdown 的职责是清理 manager 状态、取消内部 timeout、abort 子 Agent</code></pre>
+<p>
+  <strong>实现细节</strong>: shutdown 调 finishRun(record, "abandoned", undefined, reason)
+  对每个 running record 收敛, 然后 clearRunRuntime 清 timeout
+  + abort 子 agent。 这条保证"进程退出 = 没有 zombie 进程 / 没有
+  内存泄漏"。
+</p>
+<h2 id="foreground-conflict">foreground conflict: run_bash 不和 async_run 冲突</h2>
+<p>
+  <strong>用途</strong>: LLM 想"用 run_bash 跑命令" (前台同步)
+  vs "用 async_run_start 跑命令" (后台异步), 两者可能冲突
+  (前台命令占住 terminal, 后台命令也在跑)。 应该<strong>禁止
+  同一命令前后台并发</strong>。
+</p>
+<p>
+  <strong>真实场景</strong>: LLM 启动 <code>async_run_start({command: "npm test"})</code>,
+  之后又调 <code>run_bash("npm test")</code>。 应该报错"和
+  async run ar_xxx 冲突", 让 LLM 决定"等 async run 完" 或
+  "cancel async run 后再前台跑"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>前后台冲突检测</strong> —
+  看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L174"><code>src/async-runs.ts</code> 第 174 行的 <code>checkForegroundToolConflict</code></a>:
+  manager 暴露这个方法, run_bash 调用前 check, 防止资源
+  竞争。 不主动 throw, 返回 blocked + reason, 让 agent
+  决定如何处理。
+</p>
+<p>
+  <strong>实现细节</strong>: 冲突检测规则: command 字面相同
+  (标准化后) + 都在 running 状态 → 冲突。 简单规则, 教学
+  友好; 工业级要做 AST 级别的"语义冲突" (两个命令读同一
+  文件 + 写同一文件), 太复杂本阶段不做。
+</p>
+<h2 id="loop-integration">主循环集成: start 立即返回, drain 在每轮前</h2>
+<p>
+  <strong>用途</strong>: AsyncRunManager 在 Composition Root 创建,
+  注入 agent + 注册工具 (async_run_start / check / list /
+  read_output / drain)。 主循环集成点 2 个:
+</p>
+<ol>
+<li>
+<strong>async_run_start 工具</strong>: LLM 调, manager 启动
+    run, <strong>立即</strong>返回 record (不 await run 完)。
+    record 含 run_id / status=running / preview。
+  </li>
+<li>
+<strong>async_run_drain 工具 + reminder</strong>: LLM 调或
+    reminder 注入, manager 返回所有未读 notification, 渲染
+    到 user message 末尾。 主循环在每轮 LLM 调用前 drain 一次。
+  </li>
+</ol>
+<p>
+  <strong>设计思想</strong>: <strong>非阻塞 + 延迟回传</strong> —
+  start 立即返回 + drain 主动拉, LLM 主循环不被后台 run 阻塞。
+  这是 Reference 章节 "模式 14 · Concurrent Limit" 的应用。
+</p>
+<p>
+  <strong>实现细节</strong>: agent.ts 在第 3 步 (call LLM) 之前
+  调 <code>asyncRunManager.drainNotifications()</code>, 如果有
+  notification 就拼到 user message 末尾, 让 LLM 看到"上次后台
+  run 跑完了, 结果是这样"。
+</p>
+<h2 id="fake-test">fake test: 模拟 timeout + 命令完成竞态</h2>
+<p>
+  <strong>用途</strong>: AsyncRunManager 测试需要<strong>真 time</strong>
+  (超时靠 setTimeout) + <strong>假 executor</strong> (注入假
+  command runner, 不真跑 bash)。 这两者结合, 可以测"timeout +
+  命令完成" 的 race condition。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户写测试"启动一个 1 秒超时的
+  command, 0.5 秒后手动调 finishRun(..., "completed") 模拟
+  命令提前完成; 然后 1 秒后 timeout 触发, 调 finishRun(..., "timeout")。
+  验证: record.status === "completed" (不是 timeout), runningCount
+  === 0, notification 队列只有 1 条 (不是 2 条)"。
+</p>
+<pre><code class="language-typescript">test("race: timeout 后到不覆盖提前完成", () =&gt; {
+  vi.useFakeTimers();
+  const mgr = createAsyncRunManager({...});
 
+  // 启动一个 1 秒超时的 command
+  const record = mgr.start({ title: "x", executor: "command", command: "echo a", timeoutMs: 1000 });
+
+  // 0.5 秒后手动调 finishRun (模拟命令提前完成)
+  vi.advanceTimersByTime(500);
+  // 这里需要拿到内部 record, 测试可能要 hack 接口
+  // 实际测试通过 createAsyncRunManager 注入一个 fake runner
+
+  // 1 秒后 timeout 触发 (fake timer)
+  vi.advanceTimersByTime(500);
+  // 验证: record.status === "completed"
+  expect(mgr.check(record.id)!.status).toBe("completed");
+  expect(mgr.list({ includeTerminal: true })).toHaveLength(1);
+
+  vi.useRealTimers();
+});
+
+test("并发限制 3: 启动第 4 个 reject", () =&gt; {
+  const mgr = createAsyncRunManager({...});
+  mgr.start({ title: "a", executor: "command", command: "echo a", timeoutMs: 60000 });
+  mgr.start({ title: "b", executor: "command", command: "echo b", timeoutMs: 60000 });
+  mgr.start({ title: "c", executor: "command", command: "echo c", timeoutMs: 60000 });
+  expect(() =&gt; mgr.start({ title: "d", executor: "command", command: "echo d", timeoutMs: 60000 }))
+    .toThrow(/Maximum concurrent async runs/);
+});
+
+test("shutdown 把 running 标 abandoned", () =&gt; {
+  const mgr = createAsyncRunManager({...});
+  const r = mgr.start({ title: "a", executor: "command", command: "echo a", timeoutMs: 60000 });
+  mgr.shutdown!("test shutdown");
+  expect(mgr.check(r.id)!.status).toBe("abandoned");
+});</code></pre>
+<p>
+  <strong>实现细节</strong>: race condition 测试需要
+  <code>vi.useFakeTimers()</code> + 内部 record 暴露 (生产
+  API 不暴露, 测试要 hack)。 一般做法: 在 createAsyncRunManager
+  deps 注入一个 fake <code>setTimeout</code> (用 fake timer),
+  record 通过 <code>check()</code> 接口读, 不用 hack 闭包。
+</p>
+<h2 id="common-confusion">常见误解: Async Run 不是后台进程池</h2>
+<p>
+  <strong>误解 1: "Async Run = 启动一个 Node 子进程?"</strong>
+  错。 command executor 内部用 child_process, 但 Async Run 是
+  <strong>管理层</strong>, 不是进程本身。 LLM 调 start() 拿到
+  record, 不是拿到 PID。
+</p>
+<p>
+  <strong>误解 2: "无限并发, 多多益善?"</strong> 错。 3 是上限,
+  超就 reject。 LLM 想"再快也要 3 个一组, 跑完再起下一组"。
+</p>
+<p>
+  <strong>误解 3: "timeout 一定赢?"</strong> 错。 谁先到谁赢,
+  不分 timeout / completed / failed。 命令提前完成 → completed;
+  timeout 先到 → timeout; 都可能, 看时序。
+</p>
+<p>
+  <strong>误解 4: "Async Run 持久化?"</strong> 错。 session 内
+  内存, 进程重启丢。 跨会话跟踪用 Task (第 12 章)。
+</p>
+<h2 id="trap">反例梯度: 4 个常见错误</h2>
+<div class="cards-grid">
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 1 · 没有 finishRun 幂等</span></div>
+    <div class="card__body">
+      <p>让 timeout 和命令完成都直接改 record.status, 没有
+        Set 标记。 race condition 时 runningCount 减 2 次,
+        notification 推 2 条, output 写 2 次。 错。 正确:
+        <code>finishRun</code> 是唯一收敛点, 用
+        <code>finishedRunIds: Set</code> 保证幂等, 第二个
+        调用 return false。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 2 · 没有并发限制</span></div>
+    <div class="card__body">
+      <p>start() 不检查 runningCount, LLM 一次想跑 100 个就
+        真跑 100 个, 把 LLM API quota 烧光。 错。 正确:
+        <code>if (runningCount &gt;= MAX_CONCURRENCY) throw</code>
+        fail fast, 让 LLM 立即知道过载。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 3 · 输出直接进 history</span></div>
+    <div class="card__body">
+      <p>Async Run 跑完直接把 output 字符串 append 到 history。
+        错。 破坏 LLM API 消息格式 (tool_call 后立即 user message,
+        第 08 章延迟注入), 也撑爆 history。 正确: 输出写到
+        output.txt + OutputStore, LLM 主动调
+        <code>readOutput(runId, maxBytes)</code> 拉取。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 4 · shutdown 不 abort 子 agent</span></div>
+    <div class="card__body">
+      <p>shutdown() 只清 manager 状态, 不 abort 子 agent 内部
+        的 LLM/tool 调用。 子 agent 继续跑, 写日志, 调 LLM API,
+        进程退出时这些调用全 mid-write 报错。 错。 正确: 持有
+        <code>abortControllers: Map&lt;runId, AbortController&gt;</code>,
+        shutdown 时对每个 running run 调 <code>abortController.abort()</code>,
+        子 agent 内部 LLM client 收到 abort signal 停止新调用。</p>
+    </div>
+  </div>
+</div>
+<h2 id="validate">Validation: 4 条不变量检验</h2>
+<ol>
+<li>
+<strong>finishRun 幂等</strong>: 对同一 record 调 finishRun 2
+    次, 第二次 return false, record 状态不变化, runningCount
+    不重复减。 验证: 模拟 race condition (timeout 和 completed
+    同时触发), 跑测试断言。
+  </li>
+<li>
+<strong>并发限制</strong>: 启动 4 个 run, 第 4 个 throw "Maximum
+    concurrent async runs (3) reached"。 验证: 单测 start 3
+    个 + start 第 4 个 expect throw。
+  </li>
+<li>
+<strong>状态机合法</strong>: running → 4 个终态 (completed /
+    failed / timeout / abandoned) 合法, 终态 → 终态不合法。
+    验证: 单测, 终态后 start 一条 new task 想覆盖 status, expect
+    throw / no-op。
+  </li>
+<li>
+<strong>shutdown 清干净</strong>: 启动 3 个 run, shutdown,
+    所有 run 状态 abandoned, abortControllers / timeoutIds
+    清空, runningCount === 0。 验证: 跑 shutdown 后调
+    list({includeTerminal: true}) 全是 abandoned 状态。
+  </li>
+</ol>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
+<ul>
+<li>
+<strong>单一收敛点 + 幂等</strong>: finishRun 是 4 条执行路径
+    的唯一汇合, Set 保证幂等, race condition 安全。
+  </li>
+<li>
+<strong>fail fast</strong>: 并发限制 3 超就 reject, 不排队不
+    await, LLM 立即知道过载。
+  </li>
+<li>
+<strong>异步结果回传 = 排队</strong>: notification 队列, 不
+    插入当前 LLM, 延迟到下一轮 drain。
+  </li>
+<li>
+<strong>运行时生命周期</strong>: shutdown 是 harness 内部用,
+    不暴露 LLM 工具, abort 子 agent 避免 zombie。
+  </li>
+<li>
+<strong>执行层 vs 计划层</strong>: Async Run 内存不持久, Task
+    持久化, groupId 字段桥接两者。
+  </li>
+</ul>
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
-  <dt>async run 跨进程</dt>
-  <dd>
-    第 14 章 schedule 触发的任务本质上是 async run, scheduleManager 内部复用
-    asyncRunManager。
+<dt>定时跑 Async Run</dt>
+<dd>
+    当前 Async Run 是 LLM 手动触发, 想"每天 9 点跑一次全项目
+    测试" 是第 14 章 Schedule 的范畴, 复用 Async Run 作为
+    执行单元, scheduler 负责定时触发。
   </dd>
-  <dt>async run 输出存档</dt>
-  <dd>第 15 章 transcript 记录 async run 的启动 / 完成 / 失败, 用于审计。</dd>
-  <dt>async run 与 task 协作</dt>
-  <dd>
-    async run 完成时自动更新 task 状态 (例如 run_bash("npm test") 完成后把 task
-    "跑测试" 标 completed)。
+<dt>跨进程 Async Run 协调</dt>
+<dd>
+    当前 Async Run 进程内, 进程退出全 abandoned。 想要
+    "harness 进程退出, run 仍跑, 进程回来能 drain 通知"
+    是分布式范畴, 留 P2 阶段。
   </dd>
-  <dt>async run 与 permission 协作</dt>
-  <dd>
-    async run 派发时仍然过 permission, 危险命令 deny, 写 tool message,
-    不在后台偷偷跑。
+<dt>取消正在跑的 Async Run</dt>
+<dd>
+    当前没有 cancel API, 只能等 timeout 或自然完成。 实战中
+    user 想"立刻停掉跑得太慢的 run", 留 P2 加 cancel(runId)
+    调 abortController.abort()。
   </dd>
 </dl>
-
-<h2 id="vibe-coding-13">本次如何 vibe code: 第 13 章的三件套</h2>
-
-<h3 id="vibe-feed-13">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>AsyncRunSpec</code> /
-    <code>AsyncRun</code> / <code>AsyncRunNotification</code> /
-    <code>AsyncRunManager</code> 四个 interface。本轮不写实现, 重点钉"通知 drain
-    不重复" 和"run_id 由 harness 生成"。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
-    <code>createAsyncRunManager()</code> 是 stub (start 永远返回固定 run),
-    agent.run 不接入 drain。本轮 review 重点: asyncRunManager 实例在
-    <code>index.ts</code> 只 new 一次。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createAsyncRunManager + run_async
-    工具 + agent.run 接入 drain + 冲突检测。本轮 review 重点: drain 一次性取走,
-    冲突检测入口写, P1 压缩复用第 06 章。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。让 LLM 写
-    <code>test/async-runs.test.ts</code>。本轮 review 重点: "通知 drain 不重复"
-    和 "前台 / 后台冲突检测" 两条必须有 spy 验证。
-  </li>
-</ol>
-
-<h3 id="vibe-review-13">Review: 第 13 章专属 checklist</h3>
-<ol>
-  <li>
-    <strong>通知 drain 一次性取走。</strong>验证: drainNotifications()
-    调用后队列清空, 下次调用返回空数组。
-  </li>
-  <li>
-    <strong>run_id 由 harness 生成。</strong>LLM 不允许自创 id。验证:
-    <code>grep -n 'crypto.randomUUID\|uuidv4' src/async-runs.ts</code> ≥ 1 行。
-  </li>
-  <li>
-    <strong>run_async 必写 tool message。</strong>验证: 工具 execute 末尾
-    <code>history.add({role: "tool", ...})</code> 含 "Started async run"。
-  </li>
-  <li>
-    <strong>冲突检测在 execute 之前。</strong>验证: agent.ts 工具执行分支中,
-    conflict 检查在 tool.execute 之前。
-  </li>
-  <li>
-    <strong>P1 压缩复用第 06 章。</strong>验证:
-    <code>grep -n 'compressor.compressToolResult' src/async-runs.ts</code> ≥ 1
-    行。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-13">调试: 第 13 章典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · 通知不 drain, getAllNotifications 替代。</strong>症状:
-    通知每轮 LLM 都重新注入, history 增长 10 倍。验证: Validation 卡片"通知
-    drain 不重复" 那条测试通过。
-  </li>
-  <li>
-    <strong>伪装 B · run_async 走前台 await, 阻塞主 loop。</strong>症状: start()
-    内部 await exec(...), 主 loop 等待。验证: Validation 卡片"run_async 不阻塞主
-    loop" 那条测试通过 (fake start 内部 sleep 5s, 主 loop 跑通)。
-  </li>
-  <li>
-    <strong>伪装 C · 不检测冲突, 两个 run_bash 同时跑。</strong>症状: agent.run
-    不调 checkForegroundToolConflict。验证: Validation 卡片"前台 / 后台冲突检测"
-    那条测试通过。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-13">迭代: 第 13 章 4 个 commit 节点</h3>
-<ol>
-  <li>
-    <code
-      >feat(ch13): 钉 AsyncRunSpec / AsyncRun / AsyncRunNotification /
-      AsyncRunManager 接口</code
-    >
-    —— tsc 通过, 无实现。
-  </li>
-  <li>
-    <code>feat(ch13): createAsyncRunManager 工厂 + run_async 工具 stub</code> ——
-    tsc 通过, start 永远同步返回。
-  </li>
-  <li>
-    <code>feat(ch13): drain 通知 + 冲突检测 + P1 压缩复用 + run_id 生成</code>
-    —— 跑通 Validation 卡片前 4 条。
-  </li>
-  <li>
-    <code
-      >test(ch13): run_async 必写 tool message + run_id 由 harness 生成</code
-    >
-    —— 全绿。
-  </li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
   <div class="card__head">
     <span class="card__tag">Prompt Card · 第 13 章</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
+    <button class="card__copy" data-copy-card="" type="button">复制</button>
   </div>
   <div class="card__body">
-    <p>
-      <strong>目标:</strong>实现 Async Run 模块, 让 harness 在跑长任务时不阻塞主
-      loop, 完成后通过 reminder 通知 LLM。
-    </p>
-    <p>
-      <strong>场景:</strong>用户说"跑测试, 跑完后告诉我", LLM 调
-      run_async("run_bash", {cmd: "npm test"}), 主 loop 继续, 5
-      分钟后后台任务完成, 第 N 轮 LLM 调用前 reminder 注入, LLM
-      看到结果后告诉用户。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/async-runs.ts</code> (新) 暴露
-      <code>createAsyncRunManager()</code>;
-      <code>src/tools/run_async.ts</code> (新) 实现工具;
-      <code>src/agent.ts</code> 每轮 LLM 调用前 drain 通知 + 冲突检测;
-      <code>src/index.ts</code> 接线 asyncRunManager。
-    </p>
+    <p><strong>目标:</strong> 给 harness 加 Async Run 系统, LLM 启动
+      非阻塞后台执行, 立即拿 run_id, 完成后通过 notification 队列
+      回传。</p>
+    <p><strong>场景:</strong> LLM 跑大型 monorepo fix, 想"同时跑
+      build / lint / typecheck", 启动 3 个 Async Run (命令) +
+      派 1 个子 agent 调研 (subagent), 立即拿到 4 个 run_id,
+      继续干别的。 5 分钟后 3 个 build / lint / typecheck 陆续
+      完成, 通知进队列, LLM 下一轮 drain 看到结果。</p>
+    <p><strong>模块:</strong> <code>src/async-runs.ts</code> (新)
+      暴露 <code>createAsyncRunManager(deps)</code>; 工具
+      <code>src/tools/async-run-*.ts</code> (新) 包装 LLM 接口;
+      <code>src/agent.ts</code> (改) 第 3 步前 drain notifications;
+      <code>src/index.ts</code> (改) Composition Root 创建 +
+      shutdown 钩子。</p>
     <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
     <ul>
-      <li>通知 drain 一次性取走, 队列清空, 同条通知不重复注入</li>
-      <li>run_id 由 harness 生成 (UUID), LLM 不允许自创</li>
-      <li>run_async 必写 role: "tool" 消息含 run_id</li>
-      <li>前台工具执行前过冲突检测, 冲突拒绝写 tool message</li>
-      <li>大输出走 P1 压缩 (复用第 06 章 compressor)</li>
+      <li>2 种 executor 固定枚举 command / subagent, 不可新增第 3 种</li>
+      <li>3 并发上限, 超就 reject throw, fail fast 不排队</li>
+      <li>5 分钟超时 (MAX_TIMEOUT_MS = 300_000), 超时和命令完成竞争由 finishRun 收敛</li>
+      <li>finishRun 是所有终态收敛的唯一入口, 用 Set 幂等, 重复调用 return false</li>
+      <li>输出隔离: 写到 output.txt + OutputStore LRU, 不进 history</li>
+      <li>notification 队列短摘要, LLM 主动 drain, 不插入当前 LLM 调用</li>
+      <li>shutdown 调 finishRun(record, "abandoned") + abortController.abort(), 进程退出不留 zombie</li>
+      <li>前后台冲突检测: command 字面相同 + 都在 running → 拒绝, 错误含 "conflict"</li>
     </ul>
-    <p>
-      <strong>验证 (用 fake asyncRunManager + spy, 逐条落到 vitest):</strong>
-    </p>
+    <p><strong>验证 (用 fake timer + fake executor + vitest, 逐条断言):</strong></p>
     <ul>
-      <li>
-        fake start 内部 sleep 5s, run_async 调用后主 loop 不等 5s, 继续调 LLM
-      </li>
-      <li>
-        fake 预设 1 条通知, 第 1 轮 LLM 后 spy 验证 drainNotifications 被调用 1
-        次, 第 2 轮 LLM 后 history 不再追加这条通知
-      </li>
-      <li>
-        fake async run 输出 100k 字符串, history reminder 含 "output_id=xxx"
-        占位
-      </li>
-      <li>
-        fake async run 正在跑 run_bash, LLM 调 run_bash 前台, 写 tool message
-        "Blocked", spy 验证前台没执行
-      </li>
-      <li>
-        fake start 返回 run_id "abc-123", history 含 "Started async run abc-123"
-      </li>
+      <li>finishRun 幂等: 同一 record 调 2 次, 第二次 return false, 状态不重复写</li>
+      <li>并发限制: 启动 3 个后第 4 个 throw "Maximum concurrent async runs"</li>
+      <li>race condition: timeout + completed 竞争, 第一个 wins, 第二个 no-op</li>
+      <li>shutdown: 3 个 running → 全部 abandoned, abortControllers 清空</li>
+      <li>notification 队列: 完成 3 个 run, drain 返回 3 条, 重复 drain 返回 0</li>
     </ul>
   </div>
 </div>
-
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    故意把 start() 内部 await 5s, 跑测试, 看"run_async 不阻塞主 loop" 是否抓到
-    (主 loop 会卡 5s)。
+<li>
+    故意去掉 <code>finishedRunIds</code> Set, 跑 race condition
+    测试 (timeout + completed 同时触发), 看"幂等" 是否抓到
+    (runningCount 减 2 次, notification 推 2 条 vs. 1 条)。
   </li>
-  <li>
-    在 drain 后忘记清空队列, 跑测试, 看"通知 drain 不重复" 是否抓到 (第 2 轮
-    history 仍追加)。
+<li>
+    故意去掉 <code>if (runningCount &gt;= MAX_CONCURRENCY) throw</code>
+    检查, 启动 5 个 run, 看"并发限制" 是否抓到 (5 个全跑 vs.
+    第 4 个 throw)。
   </li>
-  <li>
-    在冲突检测通过后忘记拒绝, 跑测试, 看"前台 / 后台冲突检测" 是否抓到 (spy
-    验证前台被执行了)。
+<li>
+    故意让 Async Run 跑完直接 append output 到 history, 跑测试
+    断言 OpenAI API 消息格式, 看"输出隔离" 是否抓到 (消息格式
+    错误 vs. 写到 output.txt + LRU store)。
+  </li>
+<li>
+    故意不 abort 子 agent, 跑 shutdown 测试, 看"shutdown abort"
+    是否抓到 (子 agent 内部 LLM 调用 mid-write 报错 vs. abort
+    signal 干净退出)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本章给 harness 加了 Async Run 模块, 让长任务派发到后台, 主 loop
-  继续等用户输入。通知走 reminder 标签, 不污染 system prompt; 大 输出走 P1
-  压缩复用第 06 章; 冲突检测防止前台 / 后台写同一文件。 下一章 (第 14 章)
-  我们会处理"定时触发 agent" 的问题——Schedule, 让 harness 每天自动跑一次代码
-  review 报告。
+  Async Run 是给后台执行的<strong>非阻塞运行层</strong>, 区别
+  于 Task 的长期计划层。 核心是 5 个设计:
 </p>
-
-<h2 id="next">下一章伏笔</h2>
+<ul>
+<li>
+<strong>2 种 executor</strong>: command (只读 bash) / subagent
+    (派生独立 child agent), 固定枚举, 不可新增。
+  </li>
+<li>
+<strong>3 并发上限</strong>: 经验值, 超就 reject, fail fast
+    不排队。
+  </li>
+<li>
+<strong>finishRun 幂等</strong>: 4 条执行路径 (完成 / 超时 /
+    失败 / abandoned) 唯一收敛点, Set 标记, race condition 安全。
+  </li>
+<li>
+<strong>输出隔离</strong>: output.txt + OutputStore LRU, 不
+    进 history, LLM 主动 read。
+  </li>
+<li>
+<strong>notification 队列</strong>: 短摘要, 不插入当前 LLM,
+    延迟到下一轮 drain。
+  </li>
 <p>
-  第 13 章让 harness 能跑后台任务, 但任务必须由 LLM 在会话内主动调 run_async
-  才能跑。下一章 Schedule 模块让 harness 按时间自动触发 任务 (例如"每天 8
-  点跑一次测试"), 任务本质上是 async run, scheduleManager 内部复用
-  asyncRunManager。这是 harness 第一次 具备"定时运行" 能力, 也是后台 agent +
-  task 系统的最终拼接。
+  下一章 (第 14 章) 展开 Async Run 的<strong>定时触发</strong>
+  — 复用 Async Run 作为执行单元, ScheduleManager 负责"每天 9 点
+  跑一次" / "每周一 10 点跑一次" 的 cron-like 调度, 用 ID 去重
+  保证不重复跑。
 </p>

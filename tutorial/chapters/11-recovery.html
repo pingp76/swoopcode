@@ -1,570 +1,741 @@
-<p class="article__eyebrow">第 11 章 · LLM 出错时不要崩</p>
-<h1 class="article__title">Recovery: 在不确定的 LLM 面前保持持续工作</h1>
+<p class="article__eyebrow">第 11 章 · 跑生产时的异常恢复</p>
+<h1 class="article__title">Recovery: 7 类错误 × 4 种恢复动作的纯函数决策</h1>
 <p class="article__lede">
-  前面十章让 harness 在正常路径下能聊天、调工具、跑子任务、压缩、拦权限、 留
-  hook、记 memory、cache 友好。但 LLM 调用本身可能失败: rate limit、
-  timeout、context overflow、JSON 损坏、输出截断。这一章给 harness 加 Recovery
-  模块, 分类失败模式, 在不同失败下采取不同策略, 让 harness 在面对不确定的 LLM
-  时仍然能持续工作。
+  前 10 章的 harness 在 happy path 上很顺, 但生产里 LLM 一定会
+  报错: 网络抖 / 限流 / 余额耗尽 / 上下文撑爆 / 输出被截断 /
+  认证失效 / 协议错误。 每种错误对应不同的恢复动作 (backoff /
+  compact / continue / fail), 决策错一次就是几小时的挂机等待
+  或几万的 token 浪费。 这一章加 <code>src/recovery.ts</code> 模块
+  — 7 类错误统一分类 (classifyLLMError) + 4 种恢复动作决策
+  (decideRecovery, 纯函数) + 3 段提示文案 (recovery notice /
+  failure message) + 1 个 sleep 工具。 读完后, 你能讲清"为什么
+  context_length 用 compact 而不是 backoff" 和"为什么 decideRecovery
+  不在内部修改 state", 并能用纯函数测试覆盖 4 种动作的边界。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-10">在第 10 章基础上改了什么</h2>
+<nav aria="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="real-failure">真实失败故事: LLM 限流 1 小时, harness 傻等</h2>
 <p>
-  这一章在 agent.run() 主循环里包一层 try/catch + classify + decide。 每次
-  LLM.chat() 失败时, classifyLLMError() 识别失败模式 (rate_limit / timeout /
-  context_overflow / parse_error / truncation), decideRecovery()
-  根据失败模式返回决策 (retry_with_backoff / compact_and_retry /
-  inject_continuation / abort / noop), harness 根据决策执行。 对应到代码,
-  改动集中在 2 个文件: <code>src/recovery.ts</code> (新)、
-  <code>src/agent.ts</code> (改主循环包 try/catch)。
+  写代码之前, 先看一个真实痛点。 用户的 team 上线 harness 跑
+  生产, 周一早上 9 点全公司 30 个用户同时跑, OpenAI 限流 429。
 </p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/recovery.ts: 失败分类与决策 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/agent.ts: 主循环包 try/catch + recovery 决策</a
-  >
+<ol>
+<li>
+<strong>症状</strong>: 30 个 user 同时被 429 限流, harness 傻傻
+    同步等待 60 秒 (硬编码 backoff), 一个一个 retry, 跑 1 小时
+    才把队列清完。
+  </li>
+<li>
+<strong>更深的问题</strong>: 限流 5 次后, harness 应该 fail 让
+    用户知道"现在过载了, 稍后再试", 而不是继续 retry。 傻等
+    让 30 个用户全部卡死, 没人能 ctrl-c。
+  </li>
+<li>
+<strong>类似的惨案</strong>: context_length 错误 (413) 应该
+    compact 上下文, 但团队写了通用 backoff, 每次都带同样长的
+    上下文重试, 反复 413, 浪费 5 次重试 budget 才 fail。
+  </li>
+<li>
+<strong>真问题</strong>: 错误分类 + 恢复决策写进 if/else, 散在
+    agent.ts 各处, 改一次要重读 200 行。 应该集中到 recovery
+    模块, 纯函数决策, agent 只调 <code>decideRecovery(...)</code>。
+  </li>
+</ol>
+<p>
+  朴素想法 1: "所有错误都 retry 一下?" 错。 401 认证错误 retry
+  100 次还是 401; quota 耗尽 retry 100 次还是耗尽; context_length
+  retry 100 次还是太长。 不同错误需要不同<strong>动作</strong>,
+  不是"重试次数" 的差异。
+</p>
+<p>
+  朴素想法 2: "重试 budget 全局共享?" 错。 1 个 user 的
+  rate_limit 不应该消耗下一个 user 的 budget。 重试计数必须
+  <strong>per-request</strong>, 每次 <code>agent.run(query)</code>
+  重建 RecoveryState。
+</p>
+<p>
+  正确做法: 加 <code>src/recovery.ts</code> — <code>classifyLLMError</code>
+  把任何 LLM 错误归并到 7 种类型, <code>decideRecovery</code>
+  纯函数决策 4 种动作, <code>formatFailureMessage</code> 给用户
+  可读的中文提示。 这是 Reference 章节 "模式 13 · Error→Action
+  错误转动作" + "模式 19 · Idempotent 幂等" 的具体应用。
+</p>
+<h2 id="seven-kinds">7 类错误: 不可恢复的先识别</h2>
+<p>
+  <strong>用途</strong>: 实际 LLM 调用失败的原因可能几十种 (HTTP
+  401/403/413/429/500/502/503/504, SDK 异常, 网络 timeout, DNS
+  失败, 协议错误, 余额耗尽...), 但 agent 主循环不应该认识所有。
+  应该先<strong>归并</strong>成少数几类, 每类对应一种恢复策略。
+</p>
+<p>
+  <strong>真实场景</strong>: user 看到 "Error: Request failed with
+  status code 429", harness 应该知道这是 rate_limit, 走 backoff;
+  看到 "Error: Invalid API key", harness 知道这是 credential,
+  直接 fail 不 retry。 不同错误对应不同动作, 决策不能错。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>收敛 + 顺序</strong> — 把
+  几十种 provider 方言收敛成 7 种领域类型; 分类顺序很重要
+  (credential / quota 这种"不可恢复" 必须先识别, 不然浪费
+  重试 budget)。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L22"><code>src/recovery.ts</code> 第 22 行的 <code>LLMErrorKind</code> union</a>:
+</p>
+<pre><code class="language-typescript">export type LLMErrorKind =
+  | "network"
+  | "rate_limit"
+  | "credential"
+  | "quota"
+  | "context_length"
+  | "output_interrupted"
+  | "unknown";</code></pre>
+<div class="figure figure--stack">
+  <div class="figure__title">图 1 · 7 类错误的分类顺序与对应动作</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">1. credential (401/403) · 不可恢复</div>
+      <div class="flow-stack__body">API key 错 / 权限不够。 fail, 提示用户检查 LLM_PROVIDER / API key / baseURL。 永远不 retry。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">2. quota (429 + quota/billing) · 不可恢复</div>
+      <div class="flow-stack__body">账户余额耗尽。 fail, 提示"token 额度或账户余额不足"。 等不回来, 充值才行。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--warn">
+      <div class="flow-stack__label">3. rate_limit (其他 429) · 临时</div>
+      <div class="flow-stack__body">限流, 临时性。 backoff 3 秒 × 5 次。 5 次后 fail, 提示"LLM 服务暂时不可用"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--warn">
+      <div class="flow-stack__label">4. context_length (413) · 上下文过长</div>
+      <div class="flow-stack__body">上下文撑爆模型窗口。 compact 压缩历史, 1 次。 1 次后仍 fail。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--warn">
+      <div class="flow-stack__label">5. network (5xx/timeout) · 网络抖动</div>
+      <div class="flow-stack__body">服务器临时挂或网络抖。 backoff 3 秒 × 5 次。 5 次后 fail。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--warn">
+      <div class="flow-stack__label">6. output_interrupted · 输出被截断</div>
+      <div class="flow-stack__body">流式输出中途断开。 continue (从断点续), 2 次。 2 次后 fail。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">7. unknown · 协议错误 / 代码 bug</div>
+      <div class="flow-stack__body">无法识别。 fail, 输出原始 error message。 不盲目重试, 防止 bug 放大。</div>
+    </div>
+  </div>
 </div>
+<p>
+  <strong>实现细节</strong>: 分类顺序刻意设计 — 先识别 credential
+  (401/403 + 关键字), 再识别 quota (429 + quota/billing 关键字),
+  再识别 rate_limit (其他 429), 再识别 context_length, 再识别
+  network, 最后 unknown。 顺序错了, credential 会被误判为
+  rate_limit, 浪费 5 次 retry budget。
+</p>
+<h2 id="classify">classifyLLMError: 不依赖 OpenAI SDK 类型</h2>
+<p>
+  <strong>用途</strong>: 分类函数必须<strong>不依赖</strong>具体
+  LLM SDK 的类型, 只通过宽松结构 (<code>error.status</code> /
+  <code>error.code</code> / <code>error.message</code>) 读取。
+  这样换 provider (OpenAI / Anthropic / 自部署 / Kimi) 都不用
+  改分类函数。
+</p>
+<p>
+  <strong>真实场景</strong>: team 原本用 OpenAI SDK, 后来加
+  Anthropic SDK, 又加自部署 vLLM。 三个 SDK 的 error 类型不同
+  (OpenAI 是 <code>APIError</code>, Anthropic 是
+  <code>AnthropicError</code>, vLLM 直接抛 <code>Error</code>)。
+  如果 classifyLLMError 用 <code>instanceof OpenAI.APIError</code>,
+  换 provider 就崩。 应该用 duck typing, 读
+  <code>error.status</code> 这种宽松字段。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>鸭子类型 + 启发式</strong> —
+  不强求特定 SDK 类型, 只读常见字段; 不是完美真理, 启发式分类
+  已经覆盖 99% 场景。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L109"><code>src/recovery.ts</code> 第 109 行的 <code>classifyLLMError</code></a>:
+</p>
+<pre><code class="language-typescript">export function classifyLLMError(error: unknown): LLMErrorKind {
+  const status = extractNumber(error, "status");
+  const message = extractString(error, "message").toLowerCase();
 
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    harness 跑到第 30 轮, LLM 突然 429 rate limit, 主 loop 立即抛异常,
-    用户体验断崖式下跌。现象是"harness 把 LLM 当成确定接口, 没考虑 LLM
-    的不确定失败模式"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"LLM 失败时整段重试"。这有两个问题: 一是 rate limit
-    立即重试只会更糟, 应该退避; 二是 context overflow 重试只会再 overflow,
-    应该压缩; 三种失败模式需要不同策略。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口:
-    <code>interface RecoveryDecision { action, retryAfter, reason }</code>。
-    不变量三条: (1) recovery 决策不修改 history, 只追加新消息 (例如 "your
-    previous output was truncated, continue"), (2) recovery state 不跨 run()
-    共享 (本轮的退避计数不污染下一轮), (3) 同一种失败连续 N 次后必须放弃,
-    不能无限重试。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    fake LLM 前两次抛 rate_limit 异常, 第三次返回正常响应, 验证 harness
-    退避重试后跑通; fake LLM 抛 context_overflow, 验证 harness 触发第 06 章的
-    compact 后重试; fake LLM 永远抛 rate_limit, 跑 N 次后 agent.run() 返回
-    "Recovery failed" 字符串。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
-
-<div class="note">
-  <p class="note__title">观察 1 · 失败立即重试</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-let response;
-try {
-  response = await llm.chat(messages);
-} catch (err) {
-  response = await llm.chat(messages);  // 错误: 立即重试
-}</code></pre>
-  <p><strong>问:</strong>为什么不立即重试?</p>
-  <p>
-    <strong>答:</strong>rate limit / 5xx 立即重试只会更糟, 应当按指数退避 (1s,
-    2s, 4s, 8s) 后再试; context overflow 重试只会再 overflow,
-    应当先压缩再重试。两种失败需要不同策略, 不能"一把梭" 重试。
-  </p>
-</div>
-
-<div class="note">
-  <p class="note__title">观察 2 · recovery state 跨 run 共享</p>
-  <pre class="code-block"><code>// 教学简化版
-let retryCount = 0;  // 错误: module-level
-
-async function run(query) {
-  try {
-    return await llm.chat(messages);
-  } catch (err) {
-    retryCount++;
-    if (retryCount &gt; 5) throw err;
+  // 1. credential: 401/403 或认证关键字
+  if (status === 401 || status === 403 ||
+      message.includes("api key") || message.includes("unauthorized") ||
+      message.includes("forbidden") || message.includes("credential")) {
+    return "credential";
   }
+  // 2. quota: 429 + 额度关键字 (rate_limit 之前先识别)
+  if (status === 429 &amp;&amp; (message.includes("quota") || ...)) {
+    return "quota";
+  }
+  // 3. rate_limit: 其他 429
+  if (status === 429) return "rate_limit";
+  // 4. context_length: 413 或上下文长度关键字
+  if (status === 413 || message.includes("context length") || ...) {
+    return "context_length";
+  }
+  // 5. network: 5xx 或网络关键字
+  if (status &gt;= 500 &amp;&amp; status &lt;= 504 ||
+      message.includes("timeout") || message.includes("econnreset") || ...) {
+    return "network";
+  }
+  return "unknown";
 }</code></pre>
-  <p><strong>问:</strong>为什么 retryCount 不放 module-level?</p>
-  <p>
-    <strong>答:</strong>用户两次 run() 之间本应独立。某次 run() 触发了 rate
-    limit 重试 5 次, 下次 run() 应当从 0 开始计数。共享会让"上一轮 失败过"
-    污染下一轮, 体验差。
-  </p>
+<p>
+  <strong>实现细节</strong>: 用 <code>extractNumber</code> /
+  <code>extractString</code> 内部辅助函数 (第 326/334 行) 安全
+  提取字段, 不依赖 SDK 形状。 message 全部 <code>.toLowerCase()</code>
+  做大小写不敏感匹配, 覆盖 "API Key" / "api key" / "Api Key" 各种
+  写法。
+</p>
+<h2 id="four-actions">4 种恢复动作: continue / compact / backoff / fail</h2>
+<p>
+  <strong>用途</strong>: 7 类错误 → 4 种动作, 一一映射, 决策不能
+  含糊。 continue = 输出续; compact = 压缩重试; backoff = 等
+  重试; fail = 停止。 4 种动作覆盖<strong>所有</strong>可恢复 +
+  不可恢复场景。
+</p>
+<p>
+  <strong>真实场景</strong>: LLM 流式输出跑到 8k token 时网络抖
+  断了, 错误是 output_interrupted, 动作 = continue (从 8k
+  断点续, 不从头来); LLM 返回 413, 动作 = compact (压缩历史
+  后重试, 同等长度仍太长才 fail); LLM 返回 401, 动作 = fail
+  (config 错误, 永远不重试)。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>动作类型枚举</strong> — 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L39"><code>src/recovery.ts</code> 第 39 行的 <code>RecoveryAction</code> union</a>:
+</p>
+<pre><code class="language-typescript">export type RecoveryAction = "continue" | "compact" | "backoff" | "fail";</code></pre>
+<div class="figure figure--compare">
+  <div class="figure__title">图 2 · 4 种恢复动作的语义对比</div>
+  <div class="flow-compare">
+    <div class="flow-compare__col flow-compare__col--good">
+      <div class="flow-compare__head">continue · 输出续</div>
+      <div class="flow-compare__body">针对 output_interrupted, 追加 continuation reminder 后再调 LLM, 期望从断点继续。 不修改历史, 节省 token。</div>
+    </div>
+    <div class="flow-compare__col flow-compare__col--warn">
+      <div class="flow-compare__head">compact · 压缩重试</div>
+      <div class="flow-compare__body">针对 context_length, 强制压缩历史 (第 06 章 P0/P1/P2) 再调 LLM。 1 次 budget, 仍过长就 fail。</div>
+    </div>
+    <div class="flow-compare__col flow-compare__col--good">
+      <div class="flow-compare__head">backoff · 等重试</div>
+      <div class="flow-compare__body">针对 network / rate_limit, sleep retryDelayMs (默认 3 秒) 后重试同一次 LLM 调用。 最多 5 次。</div>
+    </div>
+    <div class="flow-compare__col flow-compare__col--bad">
+      <div class="flow-compare__head">fail · 停止</div>
+      <div class="flow-compare__body">针对 credential / quota / unknown, 或 budget 用完。 停止 run(), 返回用户可读中文提示。</div>
+    </div>
+  </div>
 </div>
-
-<h2 id="classification">失败分类</h2>
-<dl class="defs">
-  <dt>rate_limit</dt>
-  <dd>
-    HTTP 429, 或 provider 返回 "rate_limit_exceeded"。决策:
-    退避后重试。退避时间由 retryAfter header 或指数退避 (1s, 2s, 4s) 决定。
-  </dd>
-  <dt>timeout</dt>
-  <dd>
-    请求超过 timeout 限制 (例如 30s 未响应)。决策: 退避后重试。
-    连续超时可能意味着 provider 故障, 跑 N 次后放弃。
-  </dd>
-  <dt>context_overflow</dt>
-  <dd>
-    HTTP 400 + "context_length_exceeded", 或 provider 返回 "too many tokens"。
-    决策: 触发第 06 章的 compact (force compact, 不等阈值), 重新拼 messages
-    后重试。
-  </dd>
-  <dt>parse_error</dt>
-  <dd>
-    LLM 返回的内容无法解析 (例如 tool_calls JSON 损坏)。决策: 写一条 user
-    message 告诉 LLM "你的上一次输出解析失败, 请重试", 重新调 LLM。
-    这是"软错误", LLM 通常能改正。
-  </dd>
-  <dt>truncation</dt>
-  <dd>
-    LLM 输出因长度限制被截断 (finishReason === "length")。决策: 注入
-    continuation reminder, 调 LLM 续写, 累积多段输出。
-  </dd>
-  <dt>unknown</dt>
-  <dd>
-    其他异常 (网络断开、provider 5xx 等)。决策: 退避后重试, 跑 N 次 后放弃。
-  </dd>
-</dl>
-
-<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export type LLMErrorKind =
-  | "rate_limit" | "timeout" | "context_overflow" | "parse_error" | "truncation" | "unknown";
-
-export type RecoveryAction =
-  | { kind: "retry"; retryAfter: number }      // 退避后重试
-  | { kind: "compact_and_retry" }              // 压缩后重试
-  | { kind: "inject_continuation" }            // 注入续写 reminder
-  | { kind: "abort"; reason: string };         // 放弃
-  | { kind: "noop" };                          // 继续 (无失败)
-
-export function classifyLLMError(err: unknown): LLMErrorKind;
-export function decideRecovery(
+<p>
+  <strong>实现细节</strong>: 4 种动作的<strong>协议</strong> —
+  continue / compact 在 agent.ts 调 LLM 之前, 由调用方负责执行
+  动作; backoff 在 LLM 调用之间, 调用 sleep(); fail 在最外层
+  try/catch 里 throw 或 return, 由 repl.ts 渲染中文提示。
+</p>
+<h2 id="decide">decideRecovery 纯函数: 不在内部修改 state</h2>
+<p>
+  <strong>用途</strong>: 决策函数必须<strong>纯</strong> — 同样
+  输入永远同样输出, 不修改 state, 不调外部 API, 不读时间。
+  这才能单元测试覆盖。
+</p>
+<p>
+  <strong>真实场景</strong>: 测试想验证"network + retry 5/5
+  → fail", 但如果 decideRecovery 内部 <code>state.apiRetryCount++</code>,
+  测一次后 state 变了, 第二次跑同样的输入, 期望 fail 但实际
+  backoff, 测试 flaky。 纯函数没这个问题, 同样的输入两次
+  都返回同样的动作。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>决策 vs 执行分离</strong> —
+  decideRecovery 只<strong>算</strong>"应该做什么", 调方负责
+  "做" 和 "state++"。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L198"><code>src/recovery.ts</code> 第 198 行的 <code>decideRecovery</code></a>:
+</p>
+<pre><code class="language-typescript">export function decideRecovery(
   kind: LLMErrorKind,
   state: RecoveryState,
-): RecoveryAction;</code></pre>
-
-<h2 id="state">RecoveryState: 本轮内闭包, 不跨 run 共享</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export interface RecoveryState {
-  attempt: number;          // 当前 run() 内重试次数
-  lastError?: LLMErrorKind; // 上一次失败类型
-  accumulatedTruncation: string;  // 累积因 truncation 截断的多段输出
-}
-
-export function createRecoveryState(): RecoveryState {
-  return { attempt: 0, accumulatedTruncation: "" };
-}</code></pre>
-<p>
-  <code>createRecoveryState()</code> 在每次 <code>agent.run()</code> 入口
-  调用一次, 状态是闭包内的临时态。这与第 04 章 subagent 的"每次 创建独立
-  history" 同一套工厂模式, 防止跨调用污染。
-</p>
-
-<h2 id="loop-integration">loop 接入: try/catch + classify + decide</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-async function run(query: string) {
-  history.add({ role: "user", content: query });
-  const recoveryState = createRecoveryState();
-
-  for (;;) {
-    const messages = history.getMessages();
-    let assistant;
-
-    try {
-      assistant = await llm.chat(messages);
-    } catch (err) {
-      const kind = classifyLLMError(err);
-      recoveryState.lastError = kind;
-      recoveryState.attempt++;
-
-      const decision = decideRecovery(kind, recoveryState);
-      switch (decision.kind) {
-        case "retry":
-          await sleep(decision.retryAfter);
-          continue;  // 回到 loop 顶部重试
-        case "compact_and_retry":
-          compactCurrentHistoryForRecovery(timing);  // 强制压缩
-          continue;
-        case "abort":
-          return `[Recovery aborted] ${decision.reason}`;
-        case "noop":
-          break;
-      }
-    }
-
-    // 处理 truncation (不是异常, 是 finishReason === "length")
-    if (assistant.finishReason === "length") {
-      recoveryState.accumulatedTruncation += assistant.content;
-      appendContinuationReminder(timing);
-      continue;  // 续写
-    }
-    if (recoveryState.accumulatedTruncation) {
-      // 续写完成, 拼上累积的输出
-      assistant.content = recoveryState.accumulatedTruncation + assistant.content;
-      recoveryState.accumulatedTruncation = "";
-    }
-
-    history.add(assistant);
-    if (!assistant.tool_calls) return assistant.content;
-    // ... tool execution ...
+  config: RecoveryConfig = DEFAULT_RECOVERY_CONFIG,
+): RecoveryAction {
+  switch (kind) {
+    case "network":
+      return state.apiRetryCount &lt; config.maxApiRetries ? "backoff" : "fail";
+    case "rate_limit":
+      return state.apiRetryCount &lt; config.maxApiRetries ? "backoff" : "fail";
+    case "context_length":
+      return state.compactRetryCount &lt; config.maxCompactRetries
+        ? "compact" : "fail";
+    case "output_interrupted":
+      return state.continueRetryCount &lt; config.maxContinueRetries
+        ? "continue" : "fail";
+    case "credential":
+    case "quota":
+    case "unknown":
+      return "fail";
   }
 }</code></pre>
-
-<h2 id="trap">反例梯度</h2>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>失败立即重试, 不分类。</p>
-    <p>
-      <strong>为什么错:</strong>rate limit 立即重试更糟, context overflow
-      重试仍然 overflow。
-    </p>
-    <p>
-      <strong>正确做法:</strong>classifyLLMError + decideRecovery,
-      不同失败不同策略。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>recovery state 写到 module-level 单例。</p>
-    <p><strong>为什么错:</strong>跨 run 污染, 本轮失败计数影响下一轮。</p>
-    <p>
-      <strong>正确做法:</strong>createRecoveryState() 工厂, run() 入口创建,
-      闭包内使用。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>truncation 时丢弃已生成的半段输出。</p>
-    <p>
-      <strong>为什么错:</strong>LLM 已经想好思路, 丢弃后下次从空白开始,
-      内容衔接不上。
-    </p>
-    <p>
-      <strong>正确做法:</strong>累积因 truncation 截断的多段输出,
-      续写完成后拼回去。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>context overflow 触发 compact, 但 compact
-      失败时无限重试。
-    </p>
-    <p>
-      <strong>为什么错:</strong>compact 自身可能因 LLM 调用失败而失败, 死循环。
-    </p>
-    <p>
-      <strong>正确做法:</strong>compact 失败时降级为截断 messages, 截断仍失败时
-      abort。
-    </p>
-  </div>
-</div>
-
-<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
-<div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · 第 11 章</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>rate_limit 退避重试:</strong>fake LLM 前 2 次抛 rate_limit, 第 3
-      次返回正常响应, agent.run() 跑通, spy 验证 sleep 被调用 2 次
-      (退避后重试)。
-    </p>
-    <p>
-      <strong>context_overflow 触发 compact:</strong>fake LLM 抛
-      context_overflow, 跑完后第 06 章的 compactCurrentHistoryForRecovery 被调用
-      1 次, agent.run() 继续重试。
-    </p>
-    <p>
-      <strong>truncation 续写累积:</strong>fake LLM 第 1 轮 finishReason ===
-      "length" 返回半段, 第 2 轮 finishReason === "stop" 返回剩余, 最终
-      history.add(assistant).content 是完整输出。
-    </p>
-    <p>
-      <strong>retry 上限放弃:</strong>fake LLM 永远抛 rate_limit, 跑
-      DEFAULT_RECOVERY_CONFIG.maxRetries (例如 5) 次后, agent.run() 返回
-      "[Recovery aborted] ..." 字符串。
-    </p>
-    <p>
-      <strong>recovery state 不跨 run 共享:</strong>第 1 次 run() 触发
-      rate_limit 重试 3 次后 abort, 第 2 次 run() 的 recoveryState.attempt
-      应当从 0 开始。
-    </p>
-  </div>
-</div>
-
-<h2 id="lookback">回望第 00–10 章: 哪些原则在本章兑现了</h2>
+<p>
+  <strong>实现细节</strong>: <strong>故意不在内部 ++</strong> —
+  注释里明确说"decideRecovery 是纯函数, 故意不在内部递增
+  state, 这样调用方能清楚控制什么时候消耗一次重试预算, 测试
+  也更容易覆盖。 常见坑: 在决策函数里顺手修改计数, 导致日志
+  显示次数和真实次数错位。"
+</p>
+<p>
+  默认参数 <code>config = DEFAULT_RECOVERY_CONFIG</code> 让调用方
+  不传 config 也能用 (用默认值), 但测试时显式传 small config
+  (maxApiRetries: 0) 验证"立即 fail" 边界。
+</p>
+<h2 id="state-scope">RecoveryState 作用域: per-request, 不全局</h2>
+<p>
+  <strong>用途</strong>: 重试 budget 必须<strong>每次 agent.run()</strong>
+  重建, 不持久化, 不全局共享。 1 个 user 的 rate_limit 不应该
+  消耗下一个 user 的 budget。
+</p>
+<p>
+  <strong>真实场景</strong>: 30 个 user 同时用 harness, user A
+  触发 rate_limit 重试 5 次后 fail, 但 user B 的 budget 也耗尽了
+  (因为全局共享), user B 第一次 LLM 调用就 fail。 这就是
+  "重试 budget 全局" 的惨案。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>作用域清晰</strong> — RecoveryState
+  的注释里明确写"单次 agent.run() 的恢复计数器, 不应该跨
+  user turn 复用"。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L86"><code>src/recovery.ts</code> 第 86 行的 <code>createRecoveryState</code></a>:
+</p>
+<pre><code class="language-typescript">export function createRecoveryState(): RecoveryState {
+  // RecoveryState 是"单次 agent.run() 的恢复计数器", 不应该跨 user turn 复用。
+  // 如果把它做成全局状态, 一个用户请求触发的 rate limit 可能导致下一个请求直接 fail。
+  return { apiRetryCount: 0, compactRetryCount: 0, continueRetryCount: 0 };
+}</code></pre>
+<p>
+  <strong>实现细节</strong>: 工厂函数而非全局变量, 强制"每次
+  新建"。 agent.run(query) 第一行 <code>const recovery = createRecoveryState()</code>,
+  整个 run() 期间所有 retry 共享这一个 instance, run() 返回时
+  销毁。 这是 Reference 章节 "模式 1 · 工厂 + 闭包" 的应用 —
+  状态在闭包内, 外部不能 "误改全局"。
+</p>
+<h2 id="config">DEFAULT_RECOVERY_CONFIG: 5/1/2/3 秒的经验值</h2>
+<p>
+  <strong>用途</strong>: 给 4 个数字合理的默认值, 用户不传也能用。
+  教学项目优先<strong>直观</strong>而非<strong>通用</strong>, 把
+  经验值写死, 不开放配置中心。
+</p>
+<p>
+  <strong>真实场景</strong>: 默认 maxApiRetries=5, retryDelayMs=3000。
+  user 跑 5 次 retry × 3 秒 = 15 秒后 fail, 给用户"现在过载" 提示,
+  不傻等 1 小时。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>经验值 + 教学优先</strong> —
+  看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L75"><code>src/recovery.ts</code> 第 75 行的 <code>DEFAULT_RECOVERY_CONFIG</code></a>:
+</p>
+<pre><code class="language-typescript">export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
+  maxApiRetries: 5,
+  maxCompactRetries: 1,
+  maxContinueRetries: 2,
+  retryDelayMs: 3000,
+};</code></pre>
+<p>
+  <strong>实现细节</strong>: 4 个数字的<strong>理由</strong>:
+</p>
 <ul>
-  <li>
-    <strong>工厂模式再次回报:</strong>createRecoveryState() 工厂, 闭包内状态,
-    不跨 run 污染。
+<li>
+<strong>maxApiRetries=5</strong>: 网络抖 5 次仍 fail 几乎都是真
+    挂了 (不是临时问题), 5 次 ≈ 15 秒 (含 3 秒 sleep × 5), 用户
+    不会觉得太慢。
   </li>
-  <li>
-    <strong>错误降级原则:</strong>第 08 章 Hook 抛错降级, 本章 LLM 抛错也降级,
-    一致的设计哲学。
+<li>
+<strong>maxCompactRetries=1</strong>: 压缩 1 次仍过长 = 历史太
+    长, 继续压缩会丢关键信息, 1 次够。
   </li>
-  <li>
-    <strong>事实与视图分离:</strong>recovery 决策不修改 history 已有消息,
-    只追加新消息 (reminder / abort 通知), 维持 history 的 append-only 性质。
+<li>
+<strong>maxContinueRetries=2</strong>: 输出截断 2 次仍截断 = 模型
+    输出超长 (本身有问题), 2 次够。
   </li>
-  <li>
-    <strong>prepareMessages 复用:</strong>compact_and_retry 复用第 06
-    章的压缩管道, 不重新发明压缩逻辑。
+<li>
+<strong>retryDelayMs=3000</strong>: 3 秒是经验值, 太短仍触发
+    rate_limit, 太长用户体验差。 想要 jitter (随机化) 留 P2 阶段。
   </li>
 </ul>
+<h2 id="prompt">3 段提示文案: notice / failure / reason</h2>
+<p>
+  <strong>用途</strong>: 用户在 REPL 看到的中文提示必须<strong>人话</strong>,
+  不能"Error: 429"。 3 段不同用途的提示:
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 3 · 3 段提示文案的边界</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--warn">
+      <div class="flow-stack__label">formatRecoveryNotice · 恢复中</div>
+      <div class="flow-stack__body">"LLM 调用失败, 正在重试 3/5, 3 秒后继续..." — 走 logger.warn, 用户看到"系统在等, 别急"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">formatFailureMessage · 最终失败</div>
+      <div class="flow-stack__body">"LLM token 额度或账户余额不足, 请稍后或补充额度后再试。" — 走 repl.ts 渲染, 给用户具体行动指引。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">error.message · 原始 SDK 错误</div>
+      <div class="flow-stack__body">"Request failed with status code 429" — 附加在 failure message 括号里, 给开发者看, 用户看不懂。</div>
+    </div>
+  </div>
+</div>
+<p>
+  <strong>实现细节</strong>: 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L242"><code>src/recovery.ts</code> 第 242 行的 <code>formatRecoveryNotice</code></a>
+  + 第 276 行的 <code>formatFailureMessage</code>。 failure message
+  故意分 7 类, 每类一句中文, 不复用通用模板, 因为 credential 和
+  quota 的"用户应该做什么" 完全不同。
+</p>
+<h2 id="sleep">sleep: 单独导出, 测试可 mock</h2>
+<p>
+  <strong>用途</strong>: backoff 动作需要 sleep, 但单测不应该
+  真等 3 秒。 把 sleep 单独导出, 测试用 <code>vi.useFakeTimers()</code>
+  mock, 跑 1000 个 retry 测试也不会真等。
+</p>
+<p>
+  <strong>真实场景</strong>: 测试"network 重试 5 次, 第 6 次
+  succeed", 不 mock sleep 就要等 5×3=15 秒, vitest 跑 100 个
+  recovery 测试要 25 分钟。 mock 之后瞬时跑完。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>副作用提出来</strong> — sleep
+  是副作用, 应该<strong>可替换</strong>, 不内联在 backoff
+  流程里。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L318"><code>src/recovery.ts</code> 第 318 行的 <code>sleep</code></a>:
+</p>
+<pre><code class="language-typescript">export function sleep(ms: number): Promise&lt;void&gt; {
+  return new Promise((resolve) =&gt; setTimeout(resolve, ms));
+}</code></pre>
+<p>
+  <strong>实现细节</strong>: agent.ts 调
+  <code>if (action === "backoff") await sleep(retryDelayMs)</code>,
+  简单, 可读, 可测试。 这是 Reference 章节 "模式 17 · Test Doubles
+  测试替身" 的应用 — 副作用函数单独导出, 测试时换实现。
+</p>
+<h2 id="loop-integration">主循环集成: 4 个恢复点</h2>
+<p>
+  <strong>用途</strong>: recovery 模块在 agent.ts 集成有 4 个点:
+</p>
+<ol>
+<li>
+<strong>LLM 调用前</strong>: try/catch 包住 <code>llm.chat()</code>,
+    catch 后调 <code>classifyLLMError</code> → <code>decideRecovery</code>
+    → 执行动作。
+  </li>
+<li>
+<strong>backoff 执行</strong>: 调 <code>sleep(retryDelayMs)</code>,
+    <code>state.apiRetryCount++</code>, continue 循环。
+  </li>
+<li>
+<strong>compact 执行</strong>: 调
+    <code>compressor.compress(history, level: "aggressive")</code>,
+    <code>state.compactRetryCount++</code>, continue 循环。
+  </li>
+<li>
+<strong>continue 执行</strong>: append 一条 user message "请从断点
+    继续", <code>state.continueRetryCount++</code>, continue 循环。
+  </li>
+</ol>
+<p>
+  <strong>设计思想</strong>: <strong>4 个动作 4 个分支</strong> —
+  每个动作的执行逻辑不同, 用 switch 处理, 不混在 if/else 链里。
+  公共部分 (state 递增 + 日志) 提到 switch 之前。
+</p>
+<p>
+  <strong>实现细节</strong>: agent.ts 第 3 步 (call LLM) 的伪代码:
+  <code>while (true) { try { return await llm.chat(messages, tools); } catch (err) { const kind = classifyLLMError(err); const action = decideRecovery(kind, recovery, config); logger.warn(formatRecoveryNotice(action, kind, recovery, config)); switch (action) { case "backoff": await sleep(config.retryDelayMs); recovery.apiRetryCount++; continue; case "compact": ...; case "continue": ...; case "fail": throw new Error(formatFailureMessage(kind, err)); } } }</code>。
+</p>
+<h2 id="fake-test">fake test: 纯函数覆盖 4 种动作</h2>
+<p>
+  <strong>用途</strong>: recovery 模块的测试<strong>不需要</strong>
+  LLM, 纯函数测试, 输入错误 + state, 期望动作。 这是教学版
+  最大优势 — 业务逻辑和副作用彻底分离, 测业务逻辑零成本。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户写测试覆盖 4 种动作的 12 个
+  边界 (4 动作 × 3 状态), 加上 classifyLLMError 的 7 类错误
+  分类测试, 总共 20 个单测覆盖 recovery 模块, 5 分钟跑完。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>纯函数 = 单元测试黄金</strong> —
+  decideRecovery / classifyLLMError 都是纯函数, 同样输入永远同样
+  输出, 测试不需要 setup/teardown。 看测试示例:
+</p>
+<pre><code class="language-typescript">test("network + 0/5 -&gt; backoff", () =&gt; {
+  expect(decideRecovery("network", { apiRetryCount: 0, compactRetryCount: 0, continueRetryCount: 0 }))
+    .toBe("backoff");
+});
 
+test("network + 5/5 -&gt; fail", () =&gt; {
+  expect(decideRecovery("network", { apiRetryCount: 5, compactRetryCount: 0, continueRetryCount: 0 }))
+    .toBe("fail");
+});
+
+test("context_length + 0/1 -&gt; compact", () =&gt; {
+  expect(decideRecovery("context_length", { apiRetryCount: 0, compactRetryCount: 0, continueRetryCount: 0 }))
+    .toBe("compact");
+});
+
+test("credential 任何 state 都 fail", () =&gt; {
+  expect(decideRecovery("credential", { apiRetryCount: 0, compactRetryCount: 0, continueRetryCount: 0 }))
+    .toBe("fail");
+  expect(decideRecovery("credential", { apiRetryCount: 5, compactRetryCount: 0, continueRetryCount: 0 }))
+    .toBe("fail");
+});
+
+test("classifyLLMError: 401 -&gt; credential, 429 + quota -&gt; quota, 其他 429 -&gt; rate_limit", () =&gt; {
+  expect(classifyLLMError({ status: 401, message: "" })).toBe("credential");
+  expect(classifyLLMError({ status: 403, message: "forbidden" })).toBe("credential");
+  expect(classifyLLMError({ status: 429, message: "insufficient_quota" })).toBe("quota");
+  expect(classifyLLMError({ status: 429, message: "rate limit exceeded" })).toBe("rate_limit");
+  expect(classifyLLMError({ status: 413, message: "context length exceeded" })).toBe("context_length");
+  expect(classifyLLMError({ status: 500, message: "" })).toBe("network");
+  expect(classifyLLMError(new Error("weird thing"))).toBe("unknown");
+});
+
+test("decideRecovery 是纯函数: 同样输入多次调用结果相同", () =&gt; {
+  const state = { apiRetryCount: 3, compactRetryCount: 0, continueRetryCount: 0 };
+  const r1 = decideRecovery("network", state);
+  const r2 = decideRecovery("network", state);
+  expect(r1).toBe(r2);
+  expect(state.apiRetryCount).toBe(3);   // 内部没修改 state
+});</code></pre>
+<p>
+  <strong>实现细节</strong>: 6 个测试覆盖 4 动作 + 7 类分类 +
+  纯函数性质。 不需要 mock, 不需要 fake timer (sleep 单独
+  测试, 走 vi.useFakeTimers), 全程 <1ms 跑完。
+</p>
+<h2 id="common-confusion">常见误解: 4 种动作 ≠ 重试次数</h2>
+<p>
+  <strong>误解 1: "所有错误都 retry N 次?"</strong> 错。 4 种
+  动作<strong>类型</strong>不同, 不是次数不同。 context_length
+  retry 5 次 = 浪费 5 次 budget 在不可能成功的请求上, 应该
+  compact 1 次仍 fail 就 fail。
+</p>
+<p>
+  <strong>误解 2: "quota 等一下就好?"</strong> 错。 quota = 余额
+  耗尽, 等 1 小时还是耗尽, 必须 fail 提示用户充值。 rate_limit
+  ≠ quota, 两者都可能是 429, 但 message 含 quota/billing 关键字
+  是 quota, 否则是 rate_limit。
+</p>
+<p>
+  <strong>误解 3: "decideRecovery 应该自己 +1?"</strong> 错。
+  决策和执行分离 — decide 只算"应该做什么", 调用方负责"做"
+  和 "state++"。 内置 ++ 会让日志和真实次数错位, 测试也难。
+</p>
+<p>
+  <strong>误解 4: "formatFailureMessage 是装饰, 可选?"</strong>
+  错。 用户<strong>看不懂</strong> "Error: 429", 必须有
+  中文 failure message 告诉用户"现在过载, 等下再试" 或
+  "余额不足, 去充值"。 这不是 nice-to-have, 是核心功能。
+</p>
+<h2 id="trap">反例梯度: 4 个常见错误</h2>
+<div class="cards-grid">
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 1 · 所有错误都 backoff 5 次</span></div>
+    <div class="card__body">
+      <p>用户写 <code>if (error) { for (let i = 0; i &lt; 5; i++) { await sleep(3000); return await llm.chat(...); } }</code>。
+        错。 context_length 错误 5 次重试, 每次都带同样长的上下文,
+        全部 413 失败, 浪费 15 秒 + 5 次 token 浪费。 正确: 先
+        classify → decide, context_length 走 compact 1 次, 仍 fail
+        才放弃。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 2 · 错误分类顺序错</span></div>
+    <div class="card__body">
+      <p>先判断 <code>status === 429</code> 返回 rate_limit, 再
+        判断 message 含 quota。 错。 顺序反了, quota (429 +
+        "insufficient_quota") 会被先识别为 rate_limit, 走 backoff
+        5 次, 5 次后 fail 提示"LLM 服务暂时不可用", 但真实是
+        "余额不足"。 正确顺序: credential → quota → rate_limit。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 3 · RecoveryState 全局</span></div>
+    <div class="card__body">
+      <p>把 <code>let apiRetryCount = 0</code> 放在模块顶层, 所有
+        agent.run 共享。 错。 user A 触发 rate_limit 重试 5 次, 把
+        全局 budget 用完, user B 第一次 LLM 调用就 fail。 正确:
+        <code>createRecoveryState()</code> 在 agent.run 第一行调用,
+        run() 返回时销毁。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 4 · 输出中文 "未知错误"</span></div>
+    <div class="card__body">
+      <p>对 unknown 错误, 给用户显示 "未知错误, 请稍后重试"。
+        错。 unknown 错误可能是协议错误 / SDK bug, 用户重试 100
+        次还是 fail。 正确: 输出 "LLM 调用出现未知错误: ${errMsg}",
+        把原始 error.message 暴露给开发者, 同时引导用户 "请提
+        issue"。</p>
+    </div>
+  </div>
+</div>
+<h2 id="validate">Validation: 4 条不变量检验</h2>
+<ol>
+<li>
+<strong>分类顺序正确</strong>: 同样的 error (status=429 +
+    message="insufficient_quota") 永远返回 quota, 不会先识别为
+    rate_limit。 验证: 单测覆盖 4 个互斥 case (401/429+quota/429
+    普通/413), 看返回值。
+  </li>
+<li>
+<strong>纯函数性质</strong>: 同样输入 (kind + state) 多次调用
+    decideRecovery, 返回值永远相同, state 内部不被修改。 验证:
+    单测, 调用 2 次, state 字段对比。
+  </li>
+<li>
+<strong>budget 上限</strong>: 4 种动作的 budget 用完后, 必须
+    返回 fail, 不能继续 retry。 验证: 单测覆盖 (5,0,0) → fail,
+    (0,1,0) → fail, (0,0,2) → fail。
+  </li>
+<li>
+<strong>credential/quota/unknown 立即 fail</strong>: 这 3 类
+    任何 state 都返回 fail, 不消耗 budget。 验证: 单测 (0,0,0) 和
+    (5,1,2) 都 expect fail。
+  </li>
+</ol>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
+<ul>
+<li>
+<strong>错误转动作</strong>: 7 类错误 → 4 种动作, 一一映射, 决策
+    纯函数, 不混执行。
+  </li>
+<li>
+<strong>决策 vs 执行分离</strong>: decideRecovery 只算"应该
+    做什么", 调方负责 "做" 和 "state++"。
+  </li>
+<li>
+<strong>作用域清晰</strong>: RecoveryState 每次 agent.run() 重建,
+    不全局共享。
+  </li>
+<li>
+<strong>人话提示</strong>: 中文 failure message 告诉用户具体
+    行动 (充值 / 改 config), 不输出 "Error: 429"。
+  </li>
+<li>
+<strong>副作用可替换</strong>: sleep 单独导出, 测试用 fake
+    timer mock。
+  </li>
+</ul>
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
-  <dt>recovery 决策落盘</dt>
-  <dd>
-    第 15 章 transcript 会记录"LLM 调用何时失败、何时 retry、retry 多少次",
-    用于调试和 eval。
+<dt>Tool throw 错误</dt>
+<dd>
+    本章只覆盖 LLM 调用错误。 tool 内部 throw (如 fs.readFile
+    ENOENT) 走另一套恢复 — write "Tool error" tool message 不
+    fail, 让 LLM 自己决定重试或换工具。 错误分类不能把 tool
+    error 和 LLM error 混在一起。
   </dd>
-  <dt>recovery 与 async run 协作</dt>
-  <dd>
-    第 13 章 async run 会在主 loop 阻塞等后台任务时, 同时跑 recovery 退避,
-    不浪费主 loop 时间。
+<dt>用户主动取消 (ctrl-c)</dt>
+<dd>
+    user 按 ctrl-c 取消当前 run(), 应该 graceful shutdown —
+    保存 history + 释放 lock, 不应该 mid-write 文件导致 half
+    state。 这是 OS 信号的捕获, 不是 recovery 范畴, 但和
+    fail 动作的"立即停止" 边界要切清。
   </dd>
-  <dt>recovery 与 schedule 协作</dt>
-  <dd>
-    第 14 章 schedule 触发的任务, recovery 策略可能不同 (例如更激进地放弃,
-    因为是后台任务)。
-  </dd>
-  <dt>recovery 配置热更新</dt>
-  <dd>
-    DEFAULT_RECOVERY_CONFIG 应当支持热更新 (运行时改退避策略), 不需要重启
-    harness。
+<dt>Subagent 错误传播</dt>
+<dd>
+    子 agent 抛 credential 错误, 父 agent 应该 fail 还是继续?
+    当前策略: 父 agent 把子 agent 错误包成 tool message "Subagent
+    failed: ${reason}", 让 LLM 自己决定重试或换子 agent 任务。
+    这是 Reference 章节 "模式 14 · Concurrent Limit" 的延伸。
   </dd>
 </dl>
-
-<h2 id="vibe-coding-11">本次如何 vibe code: 第 11 章的三件套</h2>
-
-<h3 id="vibe-feed-11">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。让 LLM 给出
-    <code>classifyLLMError()</code> / <code>decideRecovery()</code> /
-    <code>createRecoveryState()</code> 三个函数签名, 以及 6 种 LLMErrorKind
-    的对照表。本轮不写实现, 重点钉"不同失败不同策略"。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 agent.run() 主循环的 stub, 包
-    try/catch 但永远走 noop 分支 (catch 块为空)。本轮 review 重点: recoveryState
-    在 run() 入口创建, 闭包内使用。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。让 LLM 写 classify + decide +
-    主循环接入。本轮 review 重点: recovery 不修改已有 history 消息, truncation
-    累积, retry 上限。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。让 LLM 写
-    <code>test/recovery.test.ts</code>。本轮 review 重点: "rate_limit 退避重试"
-    和 "retry 上限放弃" 两条必须有 spy 验证。
-  </li>
-</ol>
-
-<h3 id="vibe-review-11">Review: 第 11 章专属 checklist</h3>
-<ol>
-  <li>
-    <strong>recovery state 工厂化。</strong>createRecoveryState() 在 run()
-    入口创建, 不在 module-level。验证:
-    <code>grep -n 'let retryCount\|^let attempt' src/agent.ts</code> 应当 0 行。
-  </li>
-  <li>
-    <strong>recovery 不修改 history 已有消息。</strong>catch 块只能 history.add
-    新消息, 不调 history.replaceEntries / remove。验证:
-    <code>grep -n 'history.replaceEntries' src/agent.ts</code> 在 catch 块内应当
-    0 行。
-  </li>
-  <li>
-    <strong>retry 有上限。</strong>decideRecovery 收到 attempt &gt; maxRetries
-    时返回 abort。验证: Validation 卡片"retry 上限放弃" 那条测试通过。
-  </li>
-  <li>
-    <strong>truncation 累积输出。</strong>finishReason === "length" 时
-    appendContinuationReminder, 不丢弃已生成内容。验证: Validation
-    卡片"truncation 续写累积" 那条测试通过。
-  </li>
-  <li>
-    <strong>compact_and_retry 复用第 06 章。</strong>不重新发明压缩。验证:
-    <code>grep -n 'compactCurrentHistoryForRecovery' src/agent.ts</code> ≥ 1
-    行。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-11">调试: 第 11 章典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · 失败立即重试。</strong>症状: catch 块内
-    <code>await llm.chat(messages); continue;</code>。验证: Validation
-    卡片"rate_limit 退避重试" 那条, spy 验证 sleep 被调用。
-  </li>
-  <li>
-    <strong>伪装 B · retry state 跨 run 共享。</strong>症状: module-level
-    <code>let attempt = 0</code>。验证: Validation 卡片"recovery state 不跨 run
-    共享" 那条, 第二次 run() 的 attempt 应当从 0 开始。
-  </li>
-  <li>
-    <strong>伪装 C · truncation 丢弃半段输出。</strong>症状:
-    <code>if (assistant.finishReason === "length") continue;</code> 直接续写,
-    不累积之前的内容。验证: 最终 assistant.content 不含第一段已生成内容。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-11">迭代: 第 11 章 4 个 commit 节点</h3>
-<ol>
-  <li>
-    <code
-      >feat(ch11): 钉 classifyLLMError / decideRecovery / createRecoveryState
-      接口与 6 种失败分类</code
-    >
-    —— tsc 通过, 无实现。
-  </li>
-  <li>
-    <code
-      >feat(ch11): agent.run 主循环 try/catch stub + createRecoveryState</code
-    >
-    —— tsc 通过, catch 永远 noop。
-  </li>
-  <li>
-    <code
-      >feat(ch11): classify + decide + retry 上限 + truncation 累积 +
-      compact_and_retry 复用第 06 章</code
-    >
-    —— 跑通 Validation 卡片前 4 条。
-  </li>
-  <li>
-    <code>test(ch11): recovery state 不跨 run 共享 + retry 上限 abort</code> ——
-    全绿。
-  </li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
   <div class="card__head">
     <span class="card__tag">Prompt Card · 第 11 章</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
+    <button class="card__copy" data-copy-card="" type="button">复制</button>
   </div>
   <div class="card__body">
-    <p>
-      <strong>目标:</strong>实现 Recovery 模块, 分类 LLM 失败模式,
-      不同失败采取不同策略, 让 harness 在不确定的 LLM 面前持续工作。
-    </p>
-    <p>
-      <strong>场景:</strong>长任务跑到第 30 轮, LLM 突然 429 rate limit, harness
-      退避后重试 3 次, 第 4 次跑通, 主 loop 不中断; 另一种: context overflow
-      触发, harness 强制压缩后重试。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/recovery.ts</code> (新) 暴露
-      <code>classifyLLMError()</code> / <code>decideRecovery()</code> /
-      <code>createRecoveryState()</code>; <code>src/agent.ts</code> 主循环包
-      try/catch + recovery 决策。
-    </p>
+    <p><strong>目标:</strong> 给 harness 加 recovery 模块, 7 类错误
+      分类 + 4 种恢复动作 + 3 段提示文案, agent 主循环按动作
+      走分支。</p>
+    <p><strong>场景:</strong> 30 个 user 同时用 harness, OpenAI 限
+      流 429, 每个 user 走 backoff 5 次 × 3 秒 = 15 秒, 5 次后
+      fail 提示"LLM 服务暂时不可用", user ctrl-c 不卡死。</p>
+    <p><strong>模块:</strong> <code>src/recovery.ts</code> (新) 暴露
+      <code>classifyLLMError(error)</code> / <code>decideRecovery(kind, state, config)</code> /
+      <code>formatRecoveryNotice(...)</code> / <code>formatFailureMessage(...)</code>
+      / <code>sleep(ms)</code> / <code>createRecoveryState()</code>;
+      <code>src/agent.ts</code> (改) 第 3 步 try/catch, 按动作
+      走分支。</p>
     <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
     <ul>
-      <li>recovery state 工厂化, run() 入口创建, 不跨 run 共享</li>
-      <li>recovery 不修改 history 已有消息, 只追加新消息</li>
-      <li>retry 有上限, 默认 5 次, 超过后 abort 返回字符串</li>
-      <li>truncation 累积半段输出, 续写完成后拼回</li>
-      <li>compact_and_retry 复用第 06 章的压缩管道</li>
+      <li>7 类错误固定枚举, 分类顺序 credential → quota → rate_limit → context_length → network → unknown</li>
+      <li>4 种动作 continue / compact / backoff / fail, 一一映射, 不可新增</li>
+      <li>decideRecovery 纯函数, 不在内部修改 state, 调方负责 ++</li>
+      <li>RecoveryState 每次 agent.run() 重建, 不全局共享</li>
+      <li>credential / quota / unknown 任何 state 都 fail, 不消耗 budget</li>
+      <li>failure message 必须是中文, 告诉用户具体行动, 不输出 "Error: 429"</li>
+      <li>sleep 单独导出, 测试用 fake timer mock, 不内联在 backoff 流程</li>
     </ul>
-    <p><strong>验证 (用 fake LLM + spy sleep, 逐条落到 vitest):</strong></p>
+    <p><strong>验证 (用纯函数 + vitest, 逐条断言):</strong></p>
     <ul>
-      <li>
-        fake LLM 前 2 次抛 rate_limit, 第 3 次返回正常, agent.run() 跑通, spy
-        验证 sleep 被调用 2 次
-      </li>
-      <li>
-        fake LLM 抛 context_overflow, 第 06 章 compact 被调用 1 次, agent.run()
-        继续重试
-      </li>
-      <li>
-        fake LLM 第 1 轮 finishReason === "length", 第 2 轮 finishReason ===
-        "stop", 最终 content 是完整输出
-      </li>
-      <li>
-        fake LLM 永远抛 rate_limit, 跑 5 次后, agent.run() 返回 "[Recovery
-        aborted] ..." 字符串
-      </li>
-      <li>第 2 次 run() 的 recoveryState.attempt 从 0 开始 (不跨 run 共享)</li>
+      <li>classifyLLMError 覆盖 7 类输入, 输出对应 kind</li>
+      <li>decideRecovery 覆盖 4 动作 × 3 state 边界 (0/budget/budget+1)</li>
+      <li>credential / quota / unknown 任何 state 都 fail</li>
+      <li>decideRecovery 是纯函数: 同输入 2 次返回相同, state 不变</li>
+      <li>sleep 单独测试, 用 vi.useFakeTimers 验证 1000 次不真等</li>
     </ul>
   </div>
 </div>
-
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    故意在 catch 块内立即重试 (不 sleep), 跑测试, 看"rate_limit 退避重试"
-    是否抓到 (spy 验证 sleep 没被调用)。
+<li>
+    故意把所有错误都 backoff 5 次 (不分类), 跑 rate_limit 场景
+    测试, 看"统一重试" 是否抓到 (5 次后 fail 但浪费 5 次 budget
+    在不可能成功的请求上)。
   </li>
-  <li>
-    把 retryCount 提到 module-level, 跑测试, 看"recovery state 不跨 run 共享"
-    是否抓到。
+<li>
+    故意把分类顺序写错 (先 429, 再 quota), 跑
+    <code>classifyLLMError({status: 429, message: "insufficient_quota"})</code>
+    测试, 看"quota 应该不被识别为 rate_limit" 是否抓到。
   </li>
-  <li>
-    在 truncation 路径上丢弃 assistant.content, 跑测试, 看"truncation 续写累积"
-    是否抓到 (最终 content 缺第一段)。
+<li>
+    把 RecoveryState 提到模块顶层全局变量, 跑两个 agent.run 串联
+    测试, 看"全局共享 budget" 是否抓到 (第二个 run 第一次 LLM
+    调用就 fail, 因为 budget 被第一个用完)。
+  </li>
+<li>
+    在 decideRecovery 内部 <code>state.apiRetryCount++</code>,
+    跑"纯函数" 单测, 看"纯函数性质" 是否抓到 (state 被修改,
+    同输入 2 次返回不同)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本章给 harness 加了 Recovery 模块, 分类 6 种 LLM 失败模式 (rate_limit /
-  timeout / context_overflow / parse_error / truncation / unknown),
-  不同失败采取不同策略。recovery state 是 run() 入口的闭包内状态, retry 有上限,
-  truncation 累积 半段输出, compact_and_retry 复用第 06 章。下一章 (第 12 章)
-  我们会处理"长期计划" 的问题——Persistent Task, 把跨会话的 plan / TODO 落盘,
-  区分"会话内 TODO" 和"项目级 task"。
+  Recovery 是给 LLM 调用的<strong>错误转动作</strong>, 7 类
+  错误 × 4 种动作的纯函数决策。 核心是 5 个设计:
 </p>
-
-<h2 id="next">下一章伏笔</h2>
+<ul>
+<li>
+<strong>7 类错误</strong>: network / rate_limit / credential /
+    quota / context_length / output_interrupted / unknown, 分
+    类顺序固定 (credential → quota → rate_limit → ...)。
+  </li>
+<li>
+<strong>4 种动作</strong>: continue / compact / backoff / fail,
+    一一映射, 不可新增。
+  </li>
+<li>
+<strong>纯函数决策</strong>: decideRecovery 不修改 state, 调方
+    负责 ++, 单元测试覆盖 12 个边界。
+  </li>
+<li>
+<strong>per-request state</strong>: RecoveryState 每次 agent.run()
+    重建, 不全局共享, 30 个 user 互不干扰。
+  </li>
+<li>
+<strong>人话提示</strong>: 中文 failure message 告诉用户具体
+    行动, 不输出 "Error: 429"。
+  </li>
 <p>
-  第 11 章让 harness 在 LLM 失败时持续工作, 但"用户的长期计划" (例如"未来 3
-  周要重构 X") 仍然只在会话内 TODO 里。下一章 Task 模块会区分"会话内 TODO" (第
-  03 章) 和"项目级 task" (持久化到
-  <code>~/.claude/tasks/</code>), 跨会话保留, 让用户离开一周后
-  回来仍然能看到"上次没做完的事"。
+  下一章 (第 12 章) 展开 harness 的<strong>任务系统</strong> —
+  LLM 跑长任务 (1 小时跑测试 / 半小时跑 build / 1 天跑全项目
+  扫描) 时, 状态怎么持久化, 怎么挂到 TODO 列表上, 怎么和
+  subagent 配合。
 </p>

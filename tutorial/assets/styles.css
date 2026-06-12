@@ -747,7 +747,8 @@ mark {
 }
 
 .figure {
-  margin: var(--space-6) 0;
+  margin: var(--space-8) auto;
+  max-width: 760px;
 }
 
 .figure figcaption {
@@ -755,6 +756,7 @@ mark {
   color: var(--color-text-faint);
   font-size: var(--text-sm);
   line-height: var(--leading-snug);
+  text-align: center;
 }
 
 .loop-map,
@@ -798,6 +800,146 @@ mark {
 .flow-map {
   display: grid;
   gap: var(--space-3);
+  justify-items: center;
+}
+
+.flow-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+.flow-arrow {
+  color: var(--color-text-faint);
+  font-size: var(--text-lg);
+}
+
+/* 居中变体: 单行带箭头, 居中对齐 */
+.flow-row--center {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+/* 居中变体: 树状 (1 父 → N 子) */
+.flow-tree {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+.flow-tree__children {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--space-4);
+  width: 100%;
+}
+
+.flow-tree__branch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 200px;
+  max-width: 280px;
+}
+
+.flow-tree__connector {
+  width: 2px;
+  height: var(--space-4);
+  background: var(--color-border-soft);
+}
+
+/* 居中变体: 2 列对比 (左旧右新) */
+.flow-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+  width: 100%;
+}
+
+.flow-compare__col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+
+.flow-compare__col--bad {
+  border-color: #e8b4b8;
+  background: #fdf2f3;
+}
+
+.flow-compare__col--good {
+  border-color: var(--color-accent-soft);
+  background: var(--color-accent-bg);
+}
+
+.flow-compare__label {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  text-align: center;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* 居中变体: 层次栈 (上 → 下, 越来越具体) */
+.flow-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: center;
+  width: 100%;
+}
+
+.flow-stack__layer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  width: 100%;
+  max-width: 600px;
+}
+
+.flow-stack__layer--stable {
+  border-color: var(--color-accent-soft);
+  background: var(--color-accent-bg);
+}
+
+.flow-stack__layer--dynamic {
+  border-color: #b8d4e8;
+  background: #f0f6fb;
+}
+
+.flow-stack__label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--color-text-faint);
+}
+
+.flow-stack__arrow {
+  color: var(--color-text-faint);
+  font-size: var(--text-xl);
+  text-align: center;
 }
 
 .flow-row {

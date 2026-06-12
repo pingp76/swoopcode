@@ -1,624 +1,876 @@
-<p class="article__eyebrow">第 02 章 · 让模型提出动作</p>
-<h1 class="article__title">给 Agent 一双手: 工具调用</h1>
+<p class="article__eyebrow">第 02 章 · 给 Agent 一双手</p>
+<h1 class="article__title">工具调用: 让 LLM 真的能改世界</h1>
 <p class="article__lede">
-  第 01 章的 loop 只能聊天。这一章把 tool call 接进 loop: 模型只提出
-  结构化的动作请求, 真正去执行动作的是 harness。这一步是 coding agent 与普通聊天
-  agent 的分水岭: 模型从此可以读文件、跑命令、改代码。
+  第 01 章的 loop 跑通了两轮对话保留上下文, 但 LLM 还是只输出文本 —
+  它没法真的改文件、跑命令。 这一章给 loop 加上一双"手": 工具调用。
+  读完后, 你能区分 3 种工具调用协议 (Anthropic / OpenAI / Google),
+  知道 ToolResult 怎么设计, 并能用 fake tool 写一个"先读 README 再回答"
+  的最小集成测试。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-01">在第 01 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="why-tools">为什么需要工具调用</h2>
 <p>
-  这一章把"LLM 返回文本"扩展为"LLM 可能返回 tool_calls"。loop 主结构不变,
-  只在"调 LLM"和"写 assistant"之间插入"如果 assistant 携带 tool_calls,
-  就执行工具、把 tool result 写回 history, 再回到 loop 头部"这条新分支。
-  对应到代码, 改动集中在 4 个文件: <code>src/llm.ts</code>、
-  <code>src/tools/registry.ts</code>、<code>src/agent.ts</code>、
-  <code>src/history.ts</code>。其他文件不动。
+  写代码之前, 先讲为什么 LLM 必须能调工具, 不用会怎样。
+  </p>
+<p>
+  LLM 本质是个"下一个 token 预测器"。 给它一段对话, 它能续写;
+  但让它"真的去看 README 里写了什么" 或者"真的跑 <code>ls</code>" ,
+  它做不到 — 模型没有文件系统、没有 shell、没有网络。 即使你用
+  "系统提示" 告诉它"假装你能 ls", 它只能瞎编。
+  </p>
+<p>
+  <strong>工具调用就是让 LLM 输出一个结构化指令 (tool_call),
+  由 harness 执行, 再把结果 (tool_result) 喂回 LLM</strong>。
+  </p>
+<p>
+  这条"输出指令 → 执行 → 喂结果" 的循环, 让 LLM 第一次有了"改世界"
+  的能力。 也是 coding agent 和普通 chatbot 的分水岭。 没有工具
+  调用的 agent, 只是 chat 套壳; 有工具调用的 agent, 才开始谈得上
+  "完成用户任务"。
+  </p>
+<p>
+  本章要解决的 3 个真实问题:
 </p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/llm.ts"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/llm.ts: LLM 响应多一个 tool_calls 字段</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/tools/registry.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/tools/registry.ts: 工具注册表 (新文件)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
-    target="_blank"
-    rel="noreferrer"
-    >3. src/agent.ts: 主体循环加 tool call 分支</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/history.ts"
-    target="_blank"
-    rel="noreferrer"
-    >4. src/history.ts: 新增 tool message 写入</a
-  >
-</div>
-
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    用户问"项目里主循环怎么写", 01 章的 agent 只能回"我看不到你的项目"。 真正的
-    coding agent 必须先读文件, 再把文件内容拼到下一轮 LLM 请求里。 现象是"agent
-    需要在 loop 内中途插入一次外部世界访问"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"让模型输出 shell 命令, harness 用 <code>exec()</code> 跑"。
-    这有两个致命问题: 一是模型生成的文本和 shell 语法混在一起, harness
-    无法稳定判断哪些命令安全; 二是工具结果伪装成 user message, 多轮
-    之后模型搞不清"上一轮到底执行了什么"。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口: <code>interface Tool { name, schema, execute(args) }</code>;
-    工具注册表暴露 <code>register(tool)</code> 和 <code>get(name)</code>。
-    不变量三条: (1) tool call 与 tool result 必须配对出现, (2) tool 名称稳定,
-    不会因 LLM 自由发挥改名, (3) tool result 写入 history 时 role 必须是
-    <code>"tool"</code>, 不能伪装成 user。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    fake LLM 预设返回
-    <code
-      >{ role: "assistant", content: "", tool_calls: [{ id: "1", name:
-      "read_file", args: {path:"a.ts"} }] }</code
-    >, 跑完一轮后断言 history 里出现 role 为 <code>"tool"</code> 的消息, 且
-    <code>tool_call_id</code> 与 assistant 的 tool_calls.id 一一对应。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
-
-<div class="note">
-  <p class="note__title">观察 1 · 把工具结果伪装成 user 消息</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-const answer = await llm.chat(messages);
-const command = extractShell(answer.content);
-const output = await exec(command);
-messages.push({ role: "user", content: output });</code></pre>
-  <p><strong>问:</strong>看上去比 tool call 简洁, 为什么仍然不行?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 协议层: LLM 协议要求 tool_call 与 tool
-    result 配对, 伪装成 user 之后, 后续 normalize / compress / replay
-    全失事实边界; 安全层: harness 拿不到 tool name, 没法做 permission 检查,
-    危险命令全靠肉眼拦; 体验层: 模型下一次被告知 "刚才执行了 X",
-    它无法判断这是"自己请求的工具"还是"用户塞进来的 文本", 推理时会犹豫。
+<ol>
+<li>
+<strong>协议对齐</strong>: 3 家 LLM (Anthropic / OpenAI / Google) 的
+    tool call 协议不同, harness 怎么选一个统一内部表示?
+    </li>
+<li>
+<strong>工具结果怎么表达</strong>: 工具执行完返回什么给 LLM? 字符串
+    够不够, 还是要支持图片 / 文件?
+    </li>
+<li>
+<strong>工具多了怎么管</strong>: 1 个工具写死, 5 个工具还能写死,
+    30 个工具不写个注册表就乱。
+    </li>
+</ol>
+<h2 id="protocol-divergence">3 种工具调用协议</h2>
+<p>
+  朴素想法: "OpenAI / Anthropic / Google 都有 tool call, 应该一样吧?"
+  实际上 3 家协议有 3 个真实差异, adapter 必须收口。 这不是"语法不同"
+  那么轻, 整个 messages 序列结构都不同。
   </p>
-</div>
-
-<div class="note">
-  <p class="note__title">观察 2 · 工具表用 if/else 分发</p>
-  <pre class="code-block"><code>// 教学简化版
-if (toolName === "read_file") return readFile(args);
-if (toolName === "bash") return runBash(args);
-if (toolName === "edit") return applyEdit(args);
-// ...</code></pre>
-  <p><strong>问:</strong>为什么不直接写 if/else, 而要单独搞一个 registry?</p>
-  <p>
-    <strong>答:</strong>if/else 在小规模能跑, 一旦工具数到 10+ 就出现 三个问题:
-    (1) 没法在工具描述里统一暴露给 LLM, (2) 测试时无法 mock 单个工具, (3)
-    第三方工具 (例如 MCP server) 没有挂载点。 registry
-    把"工具是什么"和"工具怎么用"解耦, 后续 skill / subagent / permission
-    都要复用它。
+<table class="terms">
+<thead>
+<tr>
+<th>维度</th>
+<th>Anthropic</th>
+<th>OpenAI</th>
+<th>Google</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>工具调用字段</td>
+<td><code>tool_use</code> 块</td>
+<td><code>tool_calls</code> 数组</td>
+<td><code>functionCall</code> 块</td>
+</tr>
+<tr>
+<td>content 形状</td>
+<td>数组 (text + tool_use)</td>
+<td>字符串 + tool_calls 并列</td>
+<td>数组 (text + functionCall)</td>
+</tr>
+<tr>
+<td>工具结果回传</td>
+<td>user message + <code>tool_result</code> 块</td>
+<td>tool message + <code>tool_call_id</code></td>
+<td>user message + <code>functionResponse</code> 块</td>
+</tr>
+</tbody>
+</table>
+<p>
+  字段名不同只是表面, 真正难的是<strong>history 序列</strong>不同:
+</p>
+<ul>
+<li>Anthropic: assistant 输出 <code>tool_use</code>, 下一条必须是 user 消息里的 <code>tool_result</code> 块</li>
+<li>OpenAI: assistant 输出 <code>tool_calls</code>, 下一条必须是 role:"tool" 的消息, 用 <code>tool_call_id</code> 配对</li>
+<li>Google: assistant 输出 <code>functionCall</code>, 下一条必须是 user 消息里的 <code>functionResponse</code> 块</li>
+</ul>
+<p>
+  注意区别: Anthropic 和 Google 都把 tool result 放在 user message 里
+  (用 content block 类型区分), OpenAI 单独有一个 <code>role: "tool"</code>。
+  选哪个? OpenAI 的最简单 (独立 role, 不用 content block 类型判断),
+  我们就用 OpenAI 风格的统一 history 形状, 未来接 Anthropic / Google
+  时在 adapter 层翻译 (专题 A 展开)。
   </p>
-</div>
+<h2 id="tool-call-message-shape">OpenAI 风格的 message 形状</h2>
+<p>
+  选 OpenAI 风格后, harness 内部有 3 种 message role:
+</p>
+<pre class="code-block"><code>// 1. 用户输入
+{ role: "user", content: "What's the test command?" }
 
-<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export interface ToolCall {
-  id: string;
-  name: string;
-  args: Record&lt;string, unknown&gt;;
+// 2. assistant 调工具 (一条消息, content 可能为 null)
+{
+  role: "assistant",
+  content: null,
+  tool_calls: [
+    {
+      id: "call_abc123",                      // 配对 ID
+      type: "function",
+      function: {
+        name: "run_read",
+        arguments: '{"path": "package.json"}',  // 字符串, 不是对象
+      },
+    },
+  ],
 }
 
-export interface ToolResult {
-  toolCallId: string;
-  content: string;
-  error?: string;
-}
-
-export interface Tool {
-  name: string;
-  description: string;
-  schema: JSONSchema;  // 给 LLM 看的参数形状
-  execute(args: Record&lt;string, unknown&gt;): Promise&lt;ToolResult&gt;;
-}
-
-export interface ToolRegistry {
-  register(tool: Tool): void;
-  get(name: string): Tool | undefined;
-  list(): Tool[];
-}
-
-// LLM 响应增加 tool_calls 字段
-export interface AssistantMessage {
-  role: "assistant";
-  content: string;
-  tool_calls?: ToolCall[];
+// 3. 工具结果 (role: "tool", 用 tool_call_id 配对上面的调用)
+{
+  role: "tool",
+  tool_call_id: "call_abc123",
+  content: "{ \"scripts\": { \"test\": \"npm test\" } }",
 }</code></pre>
-
-<h2 id="delta-loop">loop 路径: 与第 01 章的关系</h2>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/llm-adapter.ts#L1" rel="noreferrer" target="_blank">GitHub · src/llm-adapter.ts OpenAI 风格 message 形状 (L1)</a></p>
 <p>
-  第 01 章的 loop 是"调 LLM → 写 assistant → 返回"。这一章把它扩展成 "调 LLM →
-  如果有 tool_calls 就执行工具 → 写 tool result → 回到头部再 调 LLM"。如果
-  assistant 没有 tool_calls, 行为退化为第 01 章。
+  3 个细节决定后面写代码时少踩坑:
 </p>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-async function run(query: string): Promise&lt;string&gt; {
-  history.add({ role: "user", content: query });
+<ol>
+<li>
+<strong>assistant 消息的 content 可以是 null</strong>: 调工具时
+    模型可能"只调不解释", content 就是 null。 LLM SDK 接受
+    <code>content: null</code>, 不用填空字符串。
+  </li>
+<li>
+<strong>tool_calls[].function.arguments 是字符串</strong>:
+    字符串, 不是对象。 调 executor 前要 <code>JSON.parse</code>。
+    模型有时候会给出非法 JSON (比如忘了引号), 解析失败要写
+    error tool message, 不能让 loop 崩。
+  </li>
+<li>
+<strong>tool message 必须配对 tool_call_id</strong>: 多工具并发
+    时 (<code>run_bash</code> 和 <code>run_read</code> 同时调),
+    每条 tool message 必须用对应的 id 配对, 不然模型不知道
+    哪个结果对应哪个调用。
+  </li>
+</ol>
+<h2 id="naive">朴素反例: 工具逻辑写死在 agent.ts</h2>
+<p>
+  写 agent 最朴素的做法: 把所有工具的 if/else 塞进 <code>agent.ts</code>。
+  5 个工具能撑, 10 个工具开始肿, 30 个工具变成大泥球。
+  </p>
+<pre class="code-block"><code>// ❌ 反例: 5 个工具 5 个 if
+async function handleToolCall(call) {
+  if (call.name === "run_read") {
+    return await fs.readFile(call.args.path, "utf8");
+  }
+  if (call.name === "run_write") {
+    await fs.writeFile(call.args.path, call.args.content);
+    return "OK";
+  }
+  if (call.name === "run_bash") {
+    const { stdout } = await exec(call.args.command);
+    return stdout;
+  }
+  if (call.name === "run_edit") {
+    // ... 50 行编辑逻辑
+  }
+  if (call.name === "run_todo_create") {
+    // ... 10 行 todo 逻辑
+  }
+  // 新加 run_web_fetch 又要加 if
+}</code></pre>
+<p>
+  5 件事立刻坏掉:
+</p>
+<ol>
+<li>
+<strong>agent.ts 变成大泥球</strong>: 5 个工具 100+ 行, 10 个工具 200+ 行。
+  </li>
+<li>
+<strong>测试没法隔离</strong>: 想测"agent 调 run_read 后能不能回答",
+    必须真的创建文件, 跑 read。 不能用 fake tool。
+  </li>
+<li>
+<strong>权限难加</strong>: 想在 run_write 前问用户, 只能改 agent.ts,
+    工具作者根本不知道有权限层。
+  </li>
+<li>
+<strong>元信息丢失</strong>: 工具返回的 metadata (执行耗时、字节数) 没地方放。
+  </li>
+<li>
+<strong>工具作者互相耦合</strong>: 改 run_edit 的实现可能影响 run_bash 的逻辑。
+  </li>
+</ol>
+<p>
+  解决方式: <code>ToolRegistry</code> 注册表, 把"调用哪个工具" 和
+  "工具怎么实现" 隔开。
+  </p>
+<h2 id="toolresult-design">ToolResult 接口 — 工具返回什么</h2>
+<p>
+  <strong>用途</strong>: 工具执行完, harness 要把结果喂回 LLM。 这个结果
+  怎么表达, 决定了 LLM 能不能正确解读。 我们用统一的
+  <code>ToolResult</code> 接口。
+  </p>
+<p>
+  <strong>真实场景</strong>: 工具作者写 <code>run_bash("ls")</code>, 返回
+  "README.md\nsrc\n", 这个字符串 LLM 能直接看; 工具作者写
+  <code>run_web_fetch("https://...")</code>, 返回 HTML + 图片,
+  纯字符串放不下, 需要 attachments。 统一接口覆盖两种情况。
+  </p>
+<p>
+  <strong>设计思想</strong>: 4 个字段刚好覆盖所有情况 — content 必有
+  (LLM 看的文本), attachments 可选 (多模态), error 标记业务错误
+  (区别 throw), metadata 内部信息 (不进 LLM, 只进 transcript)。
+  不多不少, 多一个字段就多一个"会不会被滥用" 的地方。
+  </p>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>interface ToolResult {
+  // 文本结果, 大多数工具用它
+  content: string;
+  // 可选: 输出图片 / 文件 / 结构化数据
+  attachments?: Array&lt;{
+    kind: "image" | "file" | "json";
+    path?: string;
+    data?: string;       // base64 或 JSON 字符串
+    mimeType?: string;
+  }&gt;;
+  // 错误标记: 工具正常完成但没拿到结果 (vs throw 是 harness 错误)
+  error?: boolean;
+  // 工具内部补充信息 (不进 LLM messages, 只进 transcript)
+  metadata?: Record&lt;string, unknown&gt;;
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/tools/types.ts#L1" rel="noreferrer" target="_blank">GitHub · src/tools/types.ts ToolResult 接口 (L1)</a></p>
+<p>
+  4 个字段的边界:
+</p>
+<ol>
+<li>
+<strong><code>content</code> 必有</strong>: LLM 看到的"工具说了什么"。
+    即使工具有 attachments, 也要有一个 content 描述
+    "我找到了这张图, 在 attachments 里"。
+  </li>
+<li>
+<strong><code>attachments</code> 可选</strong>: 工具产物, 比如
+    <code>run_bash</code> 写出的截图, <code>run_read</code> 读到的图片。
+    LLM 收到时知道这是附件, 不是普通文本。 当前多数工具链
+    只用 content, attachments 是为多模态工具 (第 09 章 memory 多模态)
+    留的扩展点。
+  </li>
+<li>
+<strong><code>error: true</code> ≠ throw</strong>: 工具正常执行完,
+    但返回了"命令不存在" 这种业务错误, 标 <code>error: true</code>。
+    harness 抛 throw 是 harness 内部错误 (权限拒绝、工具超时),
+    不是工具错误。 两类错误要分开处理 — 见下一节。
+  </li>
+<li>
+<strong><code>metadata</code> 不进 LLM</strong>: 工具的内部信息
+    (执行耗时、字节数), 只进 transcript 调试, 不进 messages。
+    避免 LLM 被内部细节污染 — LLM 不需要知道"我跑了 200ms",
+    只需要"命令输出是 X"。
+  </li>
+</ol>
+<h2 id="tool-failure-modes">工具失败的 3 种模式</h2>
+<p>
+  <strong>用途</strong>: 工具调用的"失败" 有 3 种, 处理方式完全不同。
+  这是新同学最容易搞混的地方, 必须单独讲。
+  </p>
+<p>
+  <strong>真实场景</strong>: 跑一个 agent 调 3 个工具: <code>run_read</code>
+  成功, <code>run_bash</code> 因为命令不存在失败, <code>run_write</code>
+  因为权限被拒未执行。 3 个失败, 3 种处理, 但 harness 必须一致地
+  把失败信息喂回 LLM, 不能假装成功。
+  </p>
+<table class="terms">
+<thead>
+<tr>
+<th>模式</th>
+<th>含义</th>
+<th>示例</th>
+<th>处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>业务错误</strong></td>
+<td>工具正常完成, 但结果表示"做错了"</td>
+<td><code>run_bash("cat nonexistent")</code> 返回 exit code 1</td>
+<td><code>result.error = true</code>, 写 tool message, LLM 自己决定</td>
+</tr>
+<tr>
+<td><strong>权限拒绝</strong></td>
+<td>工具被 permission 拦了</td>
+<td>用户拒绝 run_write</td>
+<td>写 tool message "<code>Permission denied</code>", 不执行, LLM 知道</td>
+</tr>
+<tr>
+<td><strong>异常抛出</strong></td>
+<td>harness 内部错误, 工具没正常返回</td>
+<td>工具超时 / OOM / panic</td>
+<td>recovery 决定 (第 11 章), loop 不该崩</td>
+</tr>
+</tbody>
+</table>
+<p>
+  ❌ / ✅: 把业务错误当 throw。
+</p>
+<pre class="code-block"><code>// ❌ 把业务错误当 throw
+async function runRead(args) {
+  const content = await fs.readFile(args.path, "utf8");
+  if (!content) throw new Error("empty file");   // LLM 看不到这个, messages 断裂
+  return { content };
+}
 
-  for (;;) {
-    const messages = history.getMessages();
-    const assistant = await llm.chat(messages);
-    history.add(assistant);
-
-    // 第 02 章新增: 如果 assistant 携带 tool_calls, 执行并继续
-    if (!assistant.tool_calls || assistant.tool_calls.length === 0) {
-      return assistant.content;
-    }
-
-    for (const call of assistant.tool_calls) {
-      const tool = registry.get(call.name);
-      if (!tool) {
-        history.add({ role: "tool", tool_call_id: call.id,
-                       content: `Error: Unknown tool "${call.name}"` });
-        continue;
-      }
-      const result = await tool.execute(call.args);
-      history.add({ role: "tool", tool_call_id: call.id, content: result.content });
-    }
-    // 继续 loop, 让 LLM 看到 tool result
+// ✅ 业务错误用 error: true
+async function runRead(args) {
+  try {
+    const content = await fs.readFile(args.path, "utf8");
+    return { content };
+  } catch (e) {
+    return { content: `Error: ${e.message}`, error: true };
   }
 }</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/tools/run-read.ts#L1" rel="noreferrer" target="_blank">GitHub · src/tools/run-read.ts 业务错误 vs throw 模板 (L1)</a></p>
 <p>
-  注意三点: (1) tool message 永远带 <code>tool_call_id</code>, 协议要求它 与对应
-  assistant.tool_calls[].id 配对; (2) 即使工具抛错, 也要写一条 tool message,
-  不能让 messages 在协议层断裂; (3) loop 终止条件是 "assistant 不再携带
-  tool_calls", 而不是"工具全部成功"。
+  业务错误用 <code>error: true</code>, LLM 收到后能继续推理:
+  "啊, 文件不存在, 我换个路径试试"。 异常抛出时, LLM 看不到任何信息,
+  messages 序列还可能断, 整个 loop 崩。
+  </p>
+<p>
+  为什么 throw 不行? 假设 LLM 调了 2 个工具: <code>run_read</code> 和
+  <code>run_bash</code>。 <code>run_read</code> 抛 throw,
+  <code>run_bash</code> 还没执行。 messages 序列里:
 </p>
-
-<h2 id="registry">工具注册表: 把"工具是什么"和"工具怎么用"解耦</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export function createToolRegistry(): ToolRegistry {
-  const tools = new Map&lt;string, Tool&gt;();
-  return {
-    register(tool) { tools.set(tool.name, tool); },
-    get(name) { return tools.get(name); },
-    list() { return Array.from(tools.values()); },
-  };
+<ol>
+<li>user (原 query)</li>
+<li>assistant (调 run_read + run_bash)</li>
+<li>工具: throw 退出, 没有 tool message</li>
+</ol>
+<p>
+  下一次 chat() 时, LLM 看到一个 assistant 调了 2 个工具, 但只
+  收到 0 个 tool message, 模型困惑。 messages 序列不完整, OpenAI
+  API 甚至可能直接报 400 错误。
+  </p>
+<h2 id="tool-registry">Tool Registry — 工具怎么注册</h2>
+<p>
+  <strong>用途</strong>: 工具数量从 1 涨到 5 之后, 把它们写死在 <code>agent.ts</code>
+  里就难维护。 引入 <code>ToolRegistry</code> 注册表, 把"注册 / 查询 /
+  调用" 分离。
+  </p>
+<p>
+  <strong>真实场景</strong>: harness 跑久了, 工具数从 5 涨到 30+。 注册表让
+  工具作者写 <code>register(name, def, executor)</code> 一行就接入,
+  不需要改 agent.ts 主循环。
+  </p>
+<p>
+  <strong>设计思想</strong>: 经典<strong>注册表模式</strong> — 把"按名字查找
+  对象" 抽成一个数据结构, 外界通过 <code>register()</code> 和
+  <code>get()</code> 交互。 翻译 (tool def → LLM ChatCompletionTool)
+  藏 registry 内部, 业务模块不感知。 详细模式解释见 Reference
+  章节的"模式 5 · 注册表模式"。
+  </p>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>interface ToolRegistry {
+  register(name: string, def: ToolDefinition, executor: ToolExecutor): void;
+  get(name: string): ToolDefinition | undefined;
+  list(): ToolDefinition[];
+  getToolDefinitions(): ChatCompletionTool[];   // 转成 OpenAI 格式
+  invoke(name: string, args: unknown): Promise&lt;ToolResult&gt;;
 }
 
-// 注册一个 read_file 工具
-registry.register({
-  name: "read_file",
-  description: "读取项目内文件的文本内容",
-  schema: {
-    type: "object",
-    properties: { path: { type: "string" } },
-    required: ["path"],
-  },
-  async execute(args) {
-    const path = String(args["path"]);
-    const content = await fs.readFile(path, "utf8");
-    return { toolCallId: "", content };
-  },
+type ToolDefinition = {
+  name: string;
+  description: string;       // 给 LLM 看, 决定何时调
+  parameters: JSONSchema;     // JSON Schema 描述参数
+};
+
+type ToolExecutor = (args: any, ctx: ToolContext) =&gt; Promise&lt;ToolResult&gt;;</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/tools/registry.ts#L1" rel="noreferrer" target="_blank">GitHub · src/tools/registry.ts ToolRegistry 完整实现 (L1)</a></p>
+<p>
+  Registry 的 4 个职责:
+</p>
+<ol>
+<li>
+<strong>注册</strong>: 工具通过 <code>register(name, def, executor)</code> 接入。
+  </li>
+<li>
+<strong>查询</strong>: <code>getToolDefinitions()</code> 转成 OpenAI
+    <code>ChatCompletionTool[]</code>, 喂给 LLM。
+  </li>
+<li>
+<strong>执行</strong>: <code>invoke(name, args)</code> 找到 executor, 调用,
+    返回 ToolResult。
+  </li>
+<li>
+<strong>权限检查 (第 07 章展开)</strong>: invoke 之前
+    调 permissionManager, 拒绝时返回 "Permission denied" 而不执行。
+  </li>
+</ol>
+<p>
+  为什么 registry 不直接暴露给 LLM?
+  因为 LLM 看到的"工具列表" 必须稳定, 不能按 mode 动态增减 —
+  会破坏 prompt cache (第 10 章)。 工具的"激活 / 停用" 由 Skill 系统管,
+  不在 registry。
+  </p>
+<h2 id="loop-integration">loop 接入: 工具调用是第 5 步</h2>
+<p>
+  <strong>用途</strong>: 把第 01 章的 6 步 loop 补上第 5 步, 让 LLM 调的工具真的
+  被执行。 这是 loop 从"聊天" 升级为"agent" 的关键一步。
+  </p>
+<p>
+  <strong>真实场景</strong>: LLM 返回 <code>tool_calls: [{ name: "run_read", args: {path: "package.json"} }]</code>,
+  harness 找到 run_read 的 executor, 调它, 拿 ToolResult,
+  写回 history, 回到 loop 顶部让 LLM 看到结果。
+  </p>
+<p>
+  <strong>设计思想</strong>: 5 个关键细节决定"工具调用是不是真稳":
+</p>
+<ol>
+<li>
+<strong>工具参数是 JSON 字符串</strong>: <code>call.function.arguments</code>
+    是字符串, 调 <code>invoke</code> 前 <code>JSON.parse</code>。 解析失败要
+    写 error tool message, 不能 throw 让 loop 崩。
+  </li>
+<li>
+<strong>每个 tool_call 都写一条 tool message</strong>: 即使工具
+    抛错, 也要写 <code>role: "tool"</code> 消息告诉 LLM "这个调用失败了" 。
+    不写会让 messages 序列断裂, LLM 收到错位消息。
+  </li>
+<li>
+<strong>catch 包到 invoke 内部</strong>: 不让 throw 逃出 loop。
+    业务错误用 <code>error: true</code> 表达, harness 错误用 recovery
+    (第 11 章) 处理。
+  </li>
+<li>
+<strong>load_skill 特殊处理</strong>: 第 05 章展开 — load_skill
+    激活 skill 而不执行, 激活后写 tool message。
+  </li>
+<li>
+<strong>工具是并行还是串行?</strong> 第一版用串行, 简单可调试。
+    第 13 章再讲并行 / 异步。
+  </li>
+</ol>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>export function createAgent(deps: { llm: LLMClient; history: History; tools: ToolRegistry }): Agent {
+  return {
+    async run(query: string): Promise&lt;string&gt; {
+      deps.history.add({ role: "user", content: query });
+
+      for (;;) {
+        const messages = deps.history.getMessages();
+        const toolDefs = deps.tools.getToolDefinitions();
+        const response = await deps.llm.chat({ messages, tools: toolDefs });
+        deps.history.add({
+          role: "assistant",
+          content: response.content,
+          tool_calls: response.toolCalls,
+        });
+        if (response.toolCalls.length === 0) {
+          return response.content ?? "";
+        }
+
+        // 5. 执行工具调用
+        for (const call of response.toolCalls) {
+          let result: ToolResult;
+          try {
+            const args = JSON.parse(call.function.arguments);
+            result = await deps.tools.invoke(call.function.name, args);
+          } catch (e) {
+            // JSON 解析失败也算业务错误, 不让 loop 崩
+            result = { content: `Tool error: ${e.message}`, error: true };
+          }
+          deps.history.add({
+            role: "tool",
+            tool_call_id: call.id,
+            content: result.content,
+          });
+        }
+        // 6. 回到 loop 顶部
+      }
+    },
+  };
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L1" rel="noreferrer" target="_blank">GitHub · src/agent.ts loop 接入工具调用 (L1)</a></p>
+<h2 id="description-patterns">tool description 怎么写 LLM 才用对</h2>
+<p>
+  <strong>用途</strong>: 工具被 LLM 调对调错, 80% 取决于 description 怎么写。
+  这一节总结几个常见 pattern, 帮工具作者写好 description。
+  </p>
+<p>
+  <strong>真实场景</strong>: 工具作者写 <code>description: "Read a file"</code>,
+  LLM 看到不知道何时调; 改成 "读取文件内容, 需要查看文件时使用, 不要
+  用 cat 命令代替", LLM 立刻知道用这个工具。
+  </p>
+<p>
+  <strong>设计思想</strong>: description = "做什么 + 何时用 + 不要做什么 +
+  输出格式"。 4 个要素缺一不可。
+  </p>
+<p>
+  <strong>实现细节 (3 个 pattern)</strong>:
+</p>
+<p>
+  <strong>Pattern 1: 动词 + 对象 + 何时用</strong>
+</p>
+<pre class="code-block"><code>// ❌ 抽象
+description: "Read tool"
+
+// ✅ 具体
+description: "读取文件内容。需要查看文件内容时使用, 不要用 cat 命令代替。"</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/tools/run-read.ts#L1" rel="noreferrer" target="_blank">GitHub · src/tools/run-read.ts description Pattern 1 (L1)</a></p>
+<p>
+  <strong>Pattern 2: 反例 (告诉 LLM 不要做什么)</strong>
+</p>
+<pre class="code-block"><code>// ❌ 没说清边界
+description: "Search the web"
+
+// ✅ 明确边界
+description: "使用搜索引擎查询实时信息。仅当本地知识不够用时调用, 不要用它查 package 文档 (用 run_read)。"</code></pre>
+<p>
+  <strong>Pattern 3: 输出格式</strong>
+</p>
+<pre class="code-block"><code>// ❌ 输出格式没说
+description: "Run a shell command"
+
+// ✅ 说了
+description: "执行 shell 命令, 返回 stdout (最多 5000 字符) 和 exit code。 长输出会被截断, 需要时用 grep 过滤。"</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/tools/run-bash.ts#L1" rel="noreferrer" target="_blank">GitHub · src/tools/run-bash.ts description Pattern 3 (L1)</a></p>
+<h2 id="fake-tool-test">fake tool 测试: 验证不是偶然跑通</h2>
+<p>
+  <strong>用途</strong>: 真实工具 (<code>run_bash</code>) 是 IO 密集型, 测试时不希望
+  真跑命令。 fake tool 用"预设 response" 模拟工具行为。
+  </p>
+<p>
+  <strong>设计思想</strong>: 跟 fake LLM 一个套路 — fake tool 实现
+  <code>ToolExecutor</code> 接口, 预设 response, 行为完全可控。 fake tool
+  的额外好处: 测<strong>工具错误的传播</strong>。 写一个返回
+  <code>{ content: "Error: file not found", error: true }</code>
+  的 fake tool, 验证 LLM 收到错误后能调整策略。
+  </p>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>test("agent.run 调 run_read 后能基于结果回答", async () =&gt; {
+  const fakeTools = createToolRegistry();
+  fakeTools.register(
+    "run_read",
+    { name: "run_read", description: "Read a file", parameters: {} },
+    async (args) =&gt; ({ content: "package.json says test = npm test" }),
+  );
+
+  const fakeLLM = createFakeLLM([
+    // 第一次: 模型决定调 run_read
+    {
+      content: null,
+      toolCalls: [{ id: "c1", function: { name: "run_read", arguments: '{"path":"package.json"}' } }],
+      finishReason: "tool_calls",
+    },
+    // 第二次: 基于工具结果回答
+    { content: "Test command: npm test", toolCalls: [], finishReason: "stop" },
+  ]);
+
+  const agent = createAgent({ llm: fakeLLM, history: createHistory(), tools: fakeTools });
+  const reply = await agent.run("What test command does this project use?");
+
+  expect(reply).toBe("Test command: npm test");
+  // 验证 history 累积了 user + assistant(tool_call) + tool + assistant
+  const msgs = fakeLLM.lastCapturedMessages();
+  expect(msgs).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "c1" }));
 });</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/agent.test.ts#L1" rel="noreferrer" target="_blank">GitHub · src/agent.test.ts fake tool 测试 (L1)</a></p>
 <p>
-  这一段把工具的"身份证"集中起来: name 给 LLM 看, schema 给 LLM 校验 参数,
-  execute 给 harness 真正执行。第 07 章 permission 会复用 schema
-  做"参数级权限判断", 第 10 章 prompt cache 会复用 name + description
-  做"工具描述前缀稳定性"。这些都是为什么 registry 不是 if/else 的原因。
-</p>
-
-<h2 id="llm-adapter">LLM 适配: 不同模型的 tool call 协议不一样</h2>
-<p>
-  OpenAI / Anthropic / Google 的 tool call 字段名、参数序列化方式、 tool result
-  写入约定都不完全一致。这一层细节全部收敛在
-  <code>src/llm-adapter.ts</code> 里 (你会在仓库里看到这个文件)。 本教程假设
-  <code>createLlm()</code> 内部已经统一好了, 暴露给 agent 的就是上面的
-  <code>AssistantMessage</code> 形态。
-</p>
-
+  这条测试验证 3 件事: (1) 工具被调了, (2) 工具结果写进了 history,
+  (3) LLM 第二轮能看到工具结果。 任何一件坏, 测试挂。
+  </p>
+<h2 id="loop-with-tool">带工具的 loop 数据流</h2>
+<figure class="figure">
+<div class="flow-map" role="img" aria-label="带工具的 loop 数据流">
+<div class="flow-row--center">
+<span class="flow-node">用户输入</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node flow-node--accent">history.add(user)</span>
+</div>
+<div class="flow-row--center" style="margin-top: var(--space-3)">
+<span class="flow-node">history.getMessages()</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node flow-node--accent">llm.chat(messages, tools)</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">assistant<br/><small>含 tool_calls</small></span>
+</div>
+<div class="flow-row--center" style="margin-top: var(--space-3)">
+<span class="flow-node">for each call<br/>tools.invoke(name, args)</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node flow-node--accent">history.add(tool result)</span>
+</div>
+<div class="flow-row--center" style="margin-top: var(--space-3)">
+<span class="flow-node flow-node--accent">回到 chat(), 喂 messages + tools</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">最终回复 (无 tool_calls)</span>
+</div>
+</div>
+<figcaption>图 02-1 · 工具调用 loop. 关键: tool message 必须紧跟 assistant(tool_calls)。</figcaption>
+</figure>
+<figure class="figure">
+<div class="flow-map" role="img" aria-label="OpenAI 风格 message 形状">
+<div class="flow-row--center">
+<span class="flow-node">user</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node flow-node--accent">assistant<br/><small>tool_calls: [...]</small></span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">tool<br/><small>tool_call_id 配对</small></span>
+<span class="flow-arrow">→</span>
+<span class="flow-node flow-node--accent">assistant<br/><small>最终回复</small></span>
+</div>
+</div>
+<figcaption>图 02-2 · OpenAI 风格 message 配对. tool message 必须用 tool_call_id 配对 assistant(tool_calls)。</figcaption>
+</figure>
+<figure class="figure">
+<div class="flow-tree" role="img" aria-label="3 种工具失败模式">
+<div class="flow-tree__children" style="border: 1px solid var(--color-border-soft); border-radius: var(--radius-md); padding: var(--space-3); width: 100%; max-width: 700px;">
+<div class="flow-tree__branch">
+<div class="flow-compare__label" style="color: #b8860b;">业务错误</div>
+<span class="flow-node">run_bash 返 exit 1</span>
+<span class="flow-node">run_read 文件不存在</span>
+<span class="flow-node" style="font-size: var(--text-xs);">→ error: true, LLM 继续</span>
+</div>
+<div class="flow-tree__branch">
+<div class="flow-compare__label" style="color: #cd5c5c;">权限拒绝</div>
+<span class="flow-node">用户拒绝 run_write</span>
+<span class="flow-node">黑名单触发</span>
+<span class="flow-node" style="font-size: var(--text-xs);">→ 写 denied tool message</span>
+</div>
+<div class="flow-tree__branch">
+<div class="flow-compare__label" style="color: #8b008b;">异常抛出</div>
+<span class="flow-node">工具超时</span>
+<span class="flow-node">OOM / panic</span>
+<span class="flow-node" style="font-size: var(--text-xs);">→ recovery 决定, loop 不崩</span>
+</div>
+</div>
+</div>
+<figcaption>图 02-3 · 3 种工具失败模式. 业务错误用 error: true, 异常抛出走 recovery, 权限拒绝写 denied tool message。</figcaption>
+</figure>
+<figure class="figure">
+<div class="flow-compare" role="img" aria-label="业务错误 vs throw">
+<div class="flow-compare__col flow-compare__col--bad">
+<div class="flow-compare__label">❌ throw</div>
+<span class="flow-node">assistant 调 2 工具</span>
+<span class="flow-node" style="font-weight: 600;">throw 退出</span>
+<span class="flow-node">tool message: 0 条</span>
+<span class="flow-node">messages 序列断裂</span>
+</div>
+<div class="flow-compare__col flow-compare__col--good">
+<div class="flow-compare__label">✅ error: true</div>
+<span class="flow-node">assistant 调 2 工具</span>
+<span class="flow-node" style="font-weight: 600;">error: true 返回</span>
+<span class="flow-node">tool message: 2 条</span>
+<span class="flow-node">LLM 继续推理</span>
+</div>
+</div>
+<figcaption>图 02-4 · 业务错误 vs throw. throw 让 LLM 看不到任何信息, error: true 让 LLM 继续推理。</figcaption>
+</figure>
 <h2 id="trap">反例梯度</h2>
-
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>用 if/else 分发工具, 不写 registry。</p>
-    <p>
-      <strong>为什么错:</strong>小规模能跑, 工具数到 10+
-      后无法测试、无法扩展、无法暴露给 LLM。
-    </p>
-    <p>
-      <strong>正确做法:</strong>本章已示范, registry 是 harness 复用同一份 tool
-      列表的基础设施。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">新手错法 · A</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> 工具执行失败直接 <code>throw</code>。
+    </p>
+<p>
+<strong>为什么错:</strong> throw 会让 agent.run 整个崩, messages 序列断裂,
+      LLM 收不到任何信息。
+    </p>
+<p>
+<strong>正确做法:</strong> 业务错误用 <code>{ content: "Error: ...", error: true }</code> 返回,
+      LLM 看到错误后能继续推理。
+    </p>
+</div>
+</div>
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>工具抛错时, 不写 tool message, 直接抛给上层。
-    </p>
-    <p>
-      <strong>为什么错:</strong>messages 序列断裂, LLM 协议拒绝接受。下一次 LLM
-      调用会报 "missing tool_result" 错, 而且无法恢复。
-    </p>
-    <p>
-      <strong>正确做法:</strong>try/catch 包住 execute, 出错时写一条
-      <code>{role:"tool", content:"Error: ..."}</code>。错误也是信息, 必须让 LLM
-      看到。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">中级错法 · B</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> 工具调成功不写 <code>role: "tool"</code> 消息。
+    </p>
+<p>
+<strong>为什么错:</strong> messages 序列断裂, 下一次 LLM 收到的 assistant
+      消息没有对应 tool_result, 模型困惑。
+    </p>
+<p>
+<strong>正确做法:</strong> 每次 tool_call 必须配对一条 tool message, 不管
+      成功失败。
+    </p>
+</div>
+</div>
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>tool message 不带 <code>tool_call_id</code>,
-      或者 <code>id</code> 用自增整数生成。
-    </p>
-    <p>
-      <strong>为什么错:</strong>多工具并行调用时, 整数 id 无法对应到具体哪个
-      tool_call, 协议层会拒绝接受。
-    </p>
-    <p>
-      <strong>正确做法:</strong>用 LLM 在 tool_calls 里返回的
-      <code>id</code> 字符串原样回写, 不要重新生成。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">高级错法 · C</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> tool description 写"这是一个工具"。
+    </p>
+<p>
+<strong>为什么错:</strong> LLM 看了不知道何时调, 永远不调。
+    </p>
+<p>
+<strong>正确做法:</strong> 写"<strong>读取文件内容</strong>, <strong>需要时</strong>用
+      这个工具, <strong>不要</strong>用 cat 命令代替"。
+    </p>
+</div>
+</div>
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>把权限检查写在工具 execute 内部。</p>
-    <p>
-      <strong>为什么错:</strong>权限是 harness 决策, 不是工具职责。写进 execute
-      后, 第 07 章 permission 模块无法统一拦截, 第三方工具 (例如 MCP)
-      也无法复用同一套规则。
-    </p>
-    <p>
-      <strong>正确做法:</strong>权限检查在 agent 主循环里, 工具 execute
-      假定输入已经过校验。本章先放空, 第 07 章会展开。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">边界错法 · D</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> 工具参数 schema 用 TypeScript 类型, 不写 JSON Schema。
+    </p>
+<p>
+<strong>为什么错:</strong> LLM 看不到类型, 模型给出来的参数不符合期望。
+    </p>
+<p>
+<strong>正确做法:</strong> 用 JSON Schema 描述, harness 在 invoke 前做一次
+      校验, 不通过返回 error。
+    </p>
+</div>
+</div>
 <h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
 <div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · 第 02 章</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>tool_call 触发执行:</strong>fake LLM 返回携带
-      <code>tool_calls: [{name:"read_file", args:{path:"a.ts"}}]</code>
-      的 assistant, 跑完后 history 末尾出现 <code>role: "tool"</code>
-      消息, 且 content 是文件内容。
-    </p>
-    <p>
-      <strong>tool_call_id 配对:</strong>fake LLM 返回 2 个 tool_calls, 跑完后
-      history 出现 2 条 tool message, 它们的
-      <code>tool_call_id</code> 严格对应到 assistant.tool_calls[0/1].id。
-    </p>
-    <p>
-      <strong>工具抛错仍写 tool message:</strong>fake registry 在 execute
-      内抛错, 跑完后 history 仍有 <code>role: "tool"</code> 消息, content 以
-      "Error: " 开头。
-    </p>
-    <p>
-      <strong>loop 终止条件:</strong>fake LLM 第一轮带 tool_calls, 第二轮 不带,
-      跑完后 <code>agent.run()</code> 恰好返回第二轮 assistant 的 content,
-      没有第三轮。
-    </p>
-    <p>
-      <strong>未知工具不崩:</strong>fake LLM 返回 <code>name: "不存在"</code>,
-      跑完后 history 末尾有 tool message, content 提示 "Unknown tool", agent
-      不抛异常, 第二轮 LLM 看到错误并改用其他工具。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">Validation · 第 02 章</span>
 </div>
-
-<h2 id="debug">如果实现失败, 先查哪里</h2>
-<ol>
-  <li>
-    <strong>LLM 报 "missing tool_result":</strong>看 tool execute 抛错时是否写了
-    tool message, 或者是否漏写了 <code>role: "tool"</code>。
-  </li>
-  <li>
-    <strong>工具从未执行:</strong>看
-    <code>assistant.tool_calls</code> 解析是否被丢, fake LLM 返回时是否带
-    <code>tool_calls</code> 字段。
-  </li>
-  <li>
-    <strong>loop 死循环:</strong>看终止条件。fake LLM 永远返回同一个 tool_call,
-    loop 会一直转; 测试时务必预设两轮不同响应。
-  </li>
-  <li>
-    <strong>tool_call_id 对不上:</strong>看是否用了自增整数, 应严格用 LLM
-    返回的字符串 id。
-  </li>
-  <li>
-    <strong>工具 execute 读不到 schema:</strong>registry.get(name) 返回
-    undefined, 检查 name 是否一致, schema 是否完整。
-  </li>
-</ol>
-
-<h2 id="lookback">回望第 00–01 章: 哪些原则在本章兑现了</h2>
+<div class="card__body">
+<p>
+<strong>调一次工具再回答:</strong> fake tool 返回固定内容, fake LLM 第一轮
+      调工具, 第二轮基于工具结果回答, 最终回复匹配 fake tool 的内容。
+    </p>
+<p>
+<strong>tool message 必写:</strong> 工具调成功 / 业务失败 / 权限拒绝, history
+      末尾都有 <code>role: "tool"</code> 消息, content 描述结果。
+    </p>
+<p>
+<strong>参数 JSON 解析失败不崩:</strong> LLM 给出非法 JSON args, tool executor
+      收到解析错误返回, history 写 error tool message, loop 不抛。
+    </p>
+<p>
+<strong>tool description 含使用场景:</strong> 每个工具 description 至少含
+      一句"何时用", 而不是空泛的"工具" 二字。
+    </p>
+</div>
+</div>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
 <ul>
-  <li>
-    <strong>术语锁定:</strong><code>tool call</code> /
-    <code>tool result</code> / <code>tool registry</code> 在第 00 章 6
-    词里没出现, 首次出现于本章, 之后只用英文。
-  </li>
-  <li>
-    <strong>Composition Root 唯一接线:</strong>registry 在
-    <code>index.ts</code> 创建, 通过 deps 注入 agent; agent.ts 内不 new
-    registry。
-  </li>
-  <li>
-    <strong>共享实例:</strong>同一个 registry 实例被 agent 和 permission 共享,
-    不会因为新建两次导致"工具列表不一致"。
-  </li>
-  <li>
-    <strong>fake LLM 顺序断言:</strong>本章所有 Validation 都基于 fake LLM,
-    不依赖真实模型, 跑得快、断言准。
-  </li>
+<li>
+<strong>依赖注入</strong>: ToolRegistry 注入 agent, 不在内部 new。
+    </li>
+<li>
+<strong>工厂模式</strong>: 工具通过 <code>register(name, def, executor)</code> 注册,
+      registry 是单例, 但 executor 闭包内捕获上下文。
+    </li>
+<li>
+<strong>窄接口</strong>: ToolResult 只暴露 4 个字段, 工具元信息不外泄。
+    </li>
+<li>
+<strong>fake 测试</strong>: 不依赖真实文件系统, 用 fake tool 验证 loop。
+    </li>
 </ul>
-
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
-  <dt>工具多到装不下</dt>
-  <dd>第 05 章 Skill 会解决"按需加载工具子集", 本章的 registry 是它的底座。</dd>
-  <dt>危险命令要拦</dt>
-  <dd>
-    第 07 章 Permission 会在 execute 之前同步拦截, 本章把 execute
-    假定为"已校验"是为了让权限模块能复用同一个 registry。
-  </dd>
-  <dt>工具结果太长</dt>
-  <dd>
-    第 06 章 Compress 会处理"tool result 太大撑爆 context" 的问题, tool message
-    是它的主要压缩对象之一。
-  </dd>
-  <dt>工具结果要审计</dt>
-  <dd>
-    第 08 章 Hook 会在 tool execute 前后插入"事实记录", transcript 会单独留底,
-    不与 history 混。
-  </dd>
-  <dt>子智能体用工具</dt>
-  <dd>
-    第 04 章 SubAgent 会让第二个 agent 复用同一份 registry, 但暴露工具子集。
-  </dd>
+<dt>工具数到 30+</dt>
+<dd>
+    全部暴露给 LLM 会让 system prompt 撑爆, 模型也选不对。 第 05 章
+    Skill 机制按场景动态激活工具子集。
+    </dd>
+<dt>权限</dt>
+<dd>
+    工具执行要不要先问用户, 第 07 章展开。
+    </dd>
+<dt>大输出</dt>
+<dd>
+    <code>run_bash</code> 返回 5000 字错误日志怎么办, 第 06 章 P1 即时压缩。
+    </dd>
 </dl>
-
-<h2 id="vibe-coding-02">本次如何 vibe code: 第 02 章的三件套</h2>
-
-<h3 id="vibe-feed-02">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。只贴 "目标 + 场景 + 模块", 让 LLM 给出
-    <code>Tool</code> / <code>ToolRegistry</code> / <code>ToolCall</code> /
-    <code>ToolResult</code> 4 个 interface 的草案, 以及
-    <code>AssistantMessage</code> 增加
-    <code>tool_calls</code> 字段的形态。本轮不写实现, 只钉形状与命名。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。贴 "模块 + 接线", 让 LLM 给出
-    <code>index.ts</code> 接线代码, 其中
-    <code>createToolRegistry</code> 是空实现, agent.run 仍然只走第 01
-    章的"返回文本"路径。本轮 review 重点: registry 实例是否在
-    <code>index.ts</code> 只 new 一次。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。贴 "边界 (5 条 checklist)", 让 LLM 按
-    checklist 写 agent 主循环加 tool call 分支、写 read_file 工具、写 tool
-    message 写入 history。本轮 review 重点: tool_call_id 是否原样回写,
-    错误是否仍然写 tool message。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。贴 "验证 (5 条 vitest 断言)", 让 LLM 写
-    <code>test/agent.tool.test.ts</code>。本轮 review 重点: fake LLM
-    是否预设两轮响应 (第一轮带 tool_calls, 第二轮不带), 否则 loop 不会终止。
-  </li>
-</ol>
-
-<h3 id="vibe-review-02">Review: 第 02 章专属 checklist</h3>
-<ol>
-  <li>
-    <strong>tool_call_id 严格来自 LLM。</strong>代码中不得出现
-    <code>const id = String(counter++)</code> 这种自增 id。验证:
-    <code>grep -n 'counter\|nanoid\|uuid' src/agent.ts</code> 应当 0 行。
-  </li>
-  <li>
-    <strong>tool message role 必为 "tool"。</strong>不出现
-    <code>role: "user"</code> 伪装成工具结果。验证:
-    <code>grep -n 'role: "user"' src/agent.ts</code> 在 tool 执行路径上为 0 行
-    (非 tool 路径仍可写 user message)。
-  </li>
-  <li>
-    <strong>未知工具不抛异常。</strong>写一条 tool message 提示 "Unknown tool",
-    继续 loop。验证: Validation 卡片"未知工具不崩"那条断言要落到测试里。
-  </li>
-  <li>
-    <strong>permission 没写在 execute 内。</strong>第 07 章会补, 本章的 execute
-    应当是"裸"实现, 不读 process.env, 不读白名单。验证:
-    <code>grep -n 'process.env\|whitelist' src/tools/read_file.ts</code> 应当 0
-    行。
-  </li>
-  <li>
-    <strong>registry 是工厂不是单例。</strong>复用第 01 章的检查:
-    <code>grep -n 'export const registry' src/</code> 应当 0 行。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-02">调试: 第 02 章典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · 工具执行了但 messages 没增长。</strong>症状: tool execute
-    输出在终端能看到, 但 fake LLM 第二次收到的 messages 不含 tool message。验证:
-    Validation 卡片"tool_call 触发执行"那条断言, 必须断言
-    <code
-      >history.getMessages().filter(m =&gt; m.role === "tool").length ===
-      1</code
-    >, 而不只是断言最终文本。
-  </li>
-  <li>
-    <strong>伪装 B · tool_call_id 用函数参数名伪装。</strong>症状: 代码里写
-    <code>tool_call_id: call.name</code>, 看着对, 实际错。验证: LLM 返回的
-    <code>call.id</code> 应当是字符串 (例如 "call_abc123"), 不是工具函数名。grep
-    一次 <code>tool_call_id:</code> 看取的是哪个字段。
-  </li>
-  <li>
-    <strong>伪装 C · 把权限检查塞进工具 execute。</strong>症状: read_file 工具内
-    <code>if (path.startsWith("/")) throw new Error(...)</code
-    >。这等于把"路径必须项目内"这条硬规则焊在 read_file 里, 后续 edit / write
-    工具又会重复写一遍。验证: 第 07 章会统一收口, 本章的 execute 内禁止出现 if
-    守卫 (除了参数解析)。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-02">迭代: 第 02 章 5 个 commit 节点</h3>
-<ol>
-  <li>
-    <code
-      >feat(ch02): 钉 Tool / ToolRegistry / AssistantMessage.tool_calls
-      接口</code
-    >
-    —— tsc 通过, 无实现。
-  </li>
-  <li>
-    <code>feat(ch02): createToolRegistry 工厂 + read_file 工具 stub</code> ——
-    tsc 通过, agent.run 仍未走 tool 分支。
-  </li>
-  <li>
-    <code>feat(ch02): agent.run 加 tool call 分支, 写 tool message</code> ——
-    跑通 Validation 卡片前 3 条 (触发执行 / id 配对 / 错误仍写 tool message)。
-  </li>
-  <li>
-    <code>feat(ch02): loop 终止条件 + 未知工具降级</code> —— 跑通 Validation
-    卡片后 2 条 (终止条件 / 未知工具不崩)。
-  </li>
-  <li>
-    <code>test(ch02): 5 条 Validation 全部 vitest 通过</code> —— 全绿, commit
-    message 引用 5 个 Validation ID。
-  </li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
-  <div class="card__head">
-    <span class="card__tag">Prompt Card · 第 02 章</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>目标:</strong>把 tool call 接进 agent loop,
-      让模型可以读文件、跑命令、改代码。
-    </p>
-    <p>
-      <strong>场景:</strong>用户输入 "帮我读 src/agent.ts", agent 第一轮让 LLM
-      返回 tool_call=read_file, 跑完工具后第二轮 LLM 基于文件内容回答。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/llm.ts</code> 暴露
-      <code>chat()</code> 解析 tool_calls;
-      <code>src/tools/registry.ts</code> (新) 暴露
-      <code>createToolRegistry()</code>;
-      <code>src/tools/read_file.ts</code> (新) 实现 read_file 工具;
-      <code>src/agent.ts</code> 主循环加 tool call 分支;
-      <code>src/history.ts</code> 接受 role: "tool" 消息。
-    </p>
-    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
-    <ul>
-      <li>
-        tool message 必带 <code>tool_call_id</code>, id 来自 LLM 返回,
-        不重新生成
-      </li>
-      <li>
-        工具 execute 抛错时仍然写一条 <code>role: "tool"</code> 消息, content 以
-        "Error: " 开头
-      </li>
-      <li>未知工具不抛异常, 写一条提示消息后继续 loop</li>
-      <li>execute 内不读 process.env, 不写权限检查 (留给第 07 章)</li>
-      <li>assistant 没有 tool_calls 时, 行为退化为第 01 章 (返回 content)</li>
-    </ul>
-    <p><strong>验证 (用 fake LLM + fake registry, 逐条落到 vitest):</strong></p>
-    <ul>
-      <li>
-        fake LLM 第一轮返回带 tool_calls 的 assistant, 第二轮返回纯文本,
-        agent.run 返回第二轮 content
-      </li>
-      <li>tool_call_id 严格等于 assistant.tool_calls[N].id</li>
-      <li>
-        fake registry.execute 抛错时, history 末尾仍有
-        <code>role: "tool"</code> 消息
-      </li>
-      <li>
-        fake LLM 返回 name: "不存在", history 末尾有提示消息, agent.run 不抛
-      </li>
-      <li>
-        2 个 tool_calls → 2 条 tool message, 顺序按 assistant.tool_calls 顺序
-      </li>
-    </ul>
-  </div>
+<div class="card__head">
+<span class="card__tag">Prompt Card · 第 02 章</span>
+<button class="card__copy" data-copy-card="" type="button">复制</button>
 </div>
-
+<div class="card__body">
+<p>
+<strong>目标:</strong> 给 agent loop 加上工具调用能力, LLM 输出 tool_call,
+      harness 执行, 把 tool_result 写回 history。
+    </p>
+<p>
+<strong>场景:</strong> 用户问"这个项目用什么 test 命令?", agent 调
+      <code>run_read("package.json")</code>, 看到结果, 回答 "npm test"。
+    </p>
+<p>
+<strong>模块:</strong> <code>src/tools/types.ts</code> (新) 暴露 <code>ToolResult</code> 接口;
+      <code>src/tools/registry.ts</code> (新) 暴露 <code>createToolRegistry()</code>;
+      <code>src/tools/run-read.ts</code> (新) 真实 <code>run_read</code> 工具;
+      <code>src/agent.ts</code> (改) 接收 ToolRegistry, 第 5 步执行工具;
+      <code>src/index.ts</code> (改) 注册核心工具。
+    </p>
+<p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+<ul>
+<li>ToolResult 只暴露 <code>content</code> / <code>attachments</code> / <code>error</code> /
+      <code>metadata</code> 4 个字段, 工具元信息不外泄</li>
+<li>工具参数是 JSON Schema, 不是 TypeScript 类型</li>
+<li>业务错误用 <code>error: true</code> 返回, 不 throw</li>
+<li>每次 tool_call 必须配对一条 <code>role: "tool"</code> 消息, 不管成功失败</li>
+<li>tool description 必须含"何时用" 的场景描述, 不能空泛</li>
+</ul>
+<p><strong>验证 (用 fake LLM + fake tool, 逐条落到 vitest):</strong></p>
+<ul>
+<li>fake LLM 第一轮调 <code>run_read</code>, fake tool 返回固定内容, 第二轮
+      LLM 收到 tool_result, 最终回复基于工具内容</li>
+<li>history 累积 user + assistant(tool_call) + tool + assistant, 不断裂</li>
+<li>业务错误 (fake tool 返回 <code>error: true</code>) 不抛, LLM 继续推理</li>
+<li>非法 JSON args 返回 error tool message, loop 不崩</li>
+</ul>
+</div>
+</div>
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>故意把 tool_call_id 改写成自增整数, 跑测试, 看哪条 Validation 抓到。</li>
-  <li>
-    在 agent.run 里加
-    <code
-      >if (assistant.tool_calls.length &gt; 0) throw new Error("no tools")</code
-    >, 跑测试, 看是否被 Validation 卡片"未知工具不崩"抓到。
+<li>
+    故意让 tool executor <code>throw new Error()</code>, 跑测试, 看
+    "业务错误不崩" 是否抓到 (loop 崩, history 断裂)。
   </li>
-  <li>
-    把 read_file 工具换成 write_file, 写一段故意不写 tool message 的代码,
-    跑测试, 看是否被"工具抛错仍写 tool message"抓到。
+<li>
+    让 tool executor 调成功但不写 tool message, 跑测试, 看
+    "tool message 必写" 是否抓到 (下次 chat() 收到错位消息)。
+  </li>
+<li>
+    写一个 tool description = "这是一个工具", 跑测试, 看 LLM
+    是否会调它 (不会调, 描述太抽象)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本章把 loop 从"调 LLM → 返回文本"扩展成"调 LLM → 可能有 tool_calls → 执行工具
-  → 写 tool result → 再调 LLM"。tool call 是 harness 与 LLM 协作的核心协议,
-  一旦接上, coding agent 就能读文件、改代码、跑命令。 下一章 (第 03 章) 我们会在
-  loop 上加一层"计划"——TODO Manager, 让多轮执行有节奏。
+  这一章给 loop 加上了工具调用。 核心是 3 个设计选择:
 </p>
-
-<h2 id="next">下一章伏笔</h2>
+<ul>
+<li>
+<strong>OpenAI 风格的统一 history 形状</strong>: 内部一律用
+      <code>tool_calls</code> + <code>role: "tool"</code>, 未来接 Anthropic
+      / Google 时在 adapter 层翻译。
+    </li>
+<li>
+<strong>ToolResult 4 字段</strong>: content / attachments / error / metadata,
+      业务错误用 <code>error: true</code>, 不用 throw。
+    </li>
+<li>
+<strong>Tool Registry</strong>: 工具注册后转成 JSON Schema 给 LLM,
+      LLM 调的工具名 + 参数 + 结果都进 history。
+    </li>
 <p>
-  第 02 章的 loop 仍然没有节奏: 模型可以一次调 10 个工具, 也可以
-  一直调下去不结束。第 03 章 TODO Manager 给 loop 加一个"工作清单",
-  模型每轮开始前能看到当前 TODO 状态, 每轮结束后可以更新 TODO。 这是给 harness
-  加"自我规划"能力的第一步。
+  下一章 (第 03 章) 给 agent 加一个"短期记忆" — TODO Manager,
+  让多轮执行有节奏。
 </p>
+</content>

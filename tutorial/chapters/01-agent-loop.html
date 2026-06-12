@@ -1,768 +1,786 @@
 <p class="article__eyebrow">第 01 章 · 真正落 TypeScript</p>
 <h1 class="article__title">最小 Agent Loop: 从伪码到可测试模块</h1>
 <p class="article__lede">
-  第 00 章讲了"为什么需要 harness",并给出了一份 6 段 Prompt Card 模板。
-  这一章按那张卡片把最小 agent loop 真正写成 TypeScript 模块: History、 LLM
-  Client、Agent、REPL、Composition Root 五件套,加上 fake LLM 的 messages
-  顺序断言。读完后,你能跑通一份"两轮对话保留上下文"的最小 harness,
-  并能用测试验证它不是偶然跑通。
+  第 00 章讲了"为什么需要 harness", 并给出了一份 6 段 Prompt Card 模板。
+  这一章按那张卡片把最小 agent loop 真正写成 TypeScript 模块:
+  History、 LLM Client、 Agent、 REPL、 Composition Root 五件套,
+  加上 fake LLM 的 messages 顺序断言。 读完后, 你能跑通一份
+  "两轮对话保留上下文" 的最小 harness, 并能用测试验证它不是偶然跑通。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-00">在第 00 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="why-loop">为什么 agent 实际是个 loop</h2>
 <p>
-  在动手前,先明确这一章的"差量"。它是对第 00 章 Prompt Card 的兑现,
-  不是"另一份新设计"。下面这张表是这一章要在仓库里新增的文件、每个文件的
-  单一职责,以及它和第 00 章伪码的对应。
-</p>
-<div class="source-links" aria-label="本章改动清单">
-  <a class="source-link" href="#delta-files">新增 7 个文件,每个文件一个职责</a>
-  <a class="source-link" href="#delta-loop"
-    >loop 路径与第 00 章图 00-1 一一对应</a
-  >
-  <a class="source-link" href="#delta-test"
-    >test 用 fake LLM 验证 messages 顺序</a
-  >
-</div>
-<p>
-  之后所有章节 (02–15) 都会按这张差量表的格式开头: "在第 N 章基础上改了什么"。
-  这是一个硬规矩,目的是让学生能用 diff 而不是用记忆去跟读。
-</p>
-
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<p>
-  按第 00 章 6 段 Prompt Card 模板倒推,写这一章 Prompt Card 之前,作者脑子里
-  经历了下面 4 步。第 00 章第 1 节已经讲过这 4 步的抽象,这里给具体例子。
-</p>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    现象是"两次 run 之后,模型还能引用第一轮的偏好"。这个现象的最小复现 是 REPL
-    里连续输入两句"我喜欢简洁"和"我喜欢什么风格"。如果实现错了,
-    第二句会得到"我不知道你喜欢什么"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是第 00 章的 <code>ask(query)</code>: 它只把当前 query 发给
-    LLM,没有 History。这一章要"治"的就是这种"每次都是新会话"的问题。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    不变量有三: (1) History 是 messages 的唯一来源, (2) getMessages()
-    返回浅拷贝,(3) Composition Root 内同一份 history 实例被 agent 和 repl
-    共享。接口要暴露 <code>add</code> / <code>getMessages</code> /
-    <code>clear</code> 三个动作,不要暴露内部数组。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    验证用 fake LLM,断言"第二轮 LLM 收到的 messages 数量 == 3、第一条 role ==
-    user、最后一条 role == user"。这条断言比"最终文本对"强,
-    因为它要求"消息真的被保存并被重新发送"。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 三段故意有气味的代码</h2>
-<p>
-  在写正确实现之前,先看三段常见但"有气味"的最小实现,回答"它为什么
-  不行"。这一节不是练习,只是训练"看出哪里不对"的眼睛。
-</p>
-
-<div class="note">
-  <p class="note__title">观察 1 · 全局单例 History</p>
-  <pre class="code-block"><code>// history.ts
-export const history = createHistory();
-
-// agent.ts
-import { history } from "./history.js";
-export async function run(query: string) {
-  history.add({ role: "user", content: query });
-  const msgs = history.getMessages();
-  return (await llm.chat(msgs)).content;
-}</code></pre>
-  <p>
-    <strong>问:</strong>看上去很简洁。为什么 Composition Root 团队普遍禁止
-    module-level 单例?
+  在写代码之前, 先把"agent loop" 这个抽象放下, 用一个真实问题看
+  为什么它必须存在。
   </p>
-  <p>
-    <strong>答:</strong>单例失去三件事 —— 测试时无法替换; 子智能体或 多窗口 REPL
-    无法隔离; Composition Root 失去了"实例从哪里来"的可观测 性。第 00
-    章的"中级错法 B"已经讲过这一点。
+<p>
+  假设你做一个"能聊天的程序", 用户输入 "Hello", 程序输出 "Hi!" —
+  30 行能搞定。 但用户接着输入 "Do you remember?" 时, 朴素实现
+  就崩了: 程序不知道上一轮说过 "Hello", 也知道上一轮回过 "Hi!",
+  它只看到这一句 query, 无法回答"remember what"。
   </p>
-</div>
-
-<div class="note">
-  <p class="note__title">观察 2 · getMessages 返回内部引用</p>
-  <pre class="code-block"><code>// history.ts (内部实现)
-getMessages(): Message[] {
-  return this.messages;
-}</code></pre>
-  <p><strong>问:</strong>返回引用比浅拷贝快,为什么不写?</p>
-  <p>
-    <strong>答:</strong>LLM client 拼下一轮 messages 时常见写法是
-    <code>[...msgs, thisTurnUser]</code>。如果 msgs 是内部数组,这个 spread
-    会让外部 push 写回 history,出现"我没调 add() 但 messages 变长"的隐性
-    bug。这正是第 00 章的"高级错法 C"。
+<p>
+  朴素想法 1: "在 <code>globalChatHistory</code> 里存所有消息。"
+  能解决 2 轮对话, 但跑 10 轮、100 轮后, 每次调 LLM 都要把全部
+  历史塞进去, 费用涨 10 倍、延迟涨 10 倍。
   </p>
-</div>
-
-<div class="note">
-  <p class="note__title">观察 3 · 把 process.env 塞进 agent.ts</p>
-  <pre class="code-block"><code>// agent.ts
-const apiKey = process.env.ANTHROPIC_API_KEY;
-const llm = createLlm({ apiKey });</code></pre>
-  <p><strong>问:</strong>看上去"配置就近使用"很自然,为什么要搬到 config.ts?</p>
-  <p>
-    <strong>答:</strong>agent.ts 一旦读环境变量,测试就必须 mock 整个
-    process.env; 不同部署环境 (本地 / CI / 沙箱) 切换配置就要改业务文件;
-    子智能体想用同一份 agent 但不同 LLM provider 时也无从换起。 config.ts 是
-    Composition Root 的"配置版本",不是 agent.ts 的私货。
+<p>
+  朴素想法 2: "只保留最近 5 轮对话。"
+  费用降了, 但"我想调出 30 轮前的 tool 调用" 答不上来。 信息
+  永远在丢。
   </p>
-</div>
-
-<h2 id="delta-files">新增文件清单 (差量表)</h2>
 <p>
-  这一章会新建 7 个文件。每个文件的第一行 import / export 决定了它的 职责边界;
-  不属于这个文件职责的代码,不要塞进来。
-</p>
-<dl class="defs">
-  <dt><code>src/config.ts</code></dt>
-  <dd>
-    读取环境变量并校验; 导出 <code>loadConfig()</code>,返回
-    <code>{ apiKey, model, ... }</code>。本文件不出现业务逻辑。
-  </dd>
-
-  <dt><code>src/terminal.ts</code></dt>
-  <dd>
-    封装 readline 的输入输出; 暴露 <code>ask()</code> / <code>print()</code> /
-    <code>close()</code>。本文件不出现 LLM 调用,也不出现 History。
-  </dd>
-
-  <dt><code>src/history.ts</code></dt>
-  <dd>
-    <code>createHistory()</code> 工厂; 内部 <code>messages: Message[]</code>。
-    暴露 <code>add</code> / <code>getMessages</code> / <code>clear</code>。
-    <code>getMessages</code> 必返回浅拷贝 (第 00 章不变量 2)。
-  </dd>
-
-  <dt><code>src/llm.ts</code></dt>
-  <dd>
-    <code>createLlm(config)</code> 工厂; 暴露 <code>chat(messages)</code>。
-    真实实现调 Anthropic SDK, fake LLM 由测试用同名 interface 注入。
-  </dd>
-
-  <dt><code>src/agent.ts</code></dt>
-  <dd>
-    <code>createAgent({ history, llm })</code> 工厂; 暴露
-    <code>run(query)</code>。本文件不读环境变量, 不 new LLMClient, 不直接用
-    readline (第 00 章边界 checklist)。
-  </dd>
-
-  <dt><code>src/repl.ts</code></dt>
-  <dd>
-    <code>createRepl({ agent, terminal })</code> 工厂; 暴露
-    <code>start()</code>。循环 <code>ask → agent.run → print</code>, 处理
-    <code>exit</code> / <code>quit</code> / 空输入。
-  </dd>
-
-  <dt><code>src/index.ts</code> (Composition Root)</dt>
-  <dd>
-    <code
-      >loadConfig → createHistory → createLlm → createTerminal →
-      createAgent(deps) → createRepl(deps) → repl.start()</code
-    >。 本文件不出现 if 分支, 不出现 try/catch 业务逻辑。
-  </dd>
-</dl>
-
-<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
+  朴素想法 3: "干脆不用 LLM, 写死状态机?"
+  那不是 agent, 是 chatbot。 失去 LLM 的灵活性, 一切问题都要
+  工程师手写。
+  </p>
 <p>
-  接口是给 LLM (也就是"另一个会读这段代码的智能体") 看的名片,好名字比
-  好实现更重要。
-</p>
-<pre class="code-block"><code>// src/history.ts
-export interface Message {
-  role: "user" | "assistant" | "system" | "tool";
-  content: string;
-  // 第 02 章会扩展 tool_calls, tool_call_id, name 等字段。
-}
-
-export interface History {
-  add(message: Message): void;
-  getMessages(): Message[];
-  clear(): void;
-}
-
-export function createHistory(): History { /* ... */ }</code></pre>
-
-<pre class="code-block"><code>// src/llm.ts
-export interface AssistantMessage {
-  role: "assistant";
-  content: string;
-  // 第 02 章会扩展 tool_calls。
-}
-
-export interface LLMClient {
-  chat(messages: Message[]): Promise&lt;AssistantMessage&gt;;
-}
-
-export function createLlm(config: Config): LLMClient { /* ... */ }</code></pre>
-
-<pre class="code-block"><code>// src/agent.ts
-export interface Agent {
-  run(query: string): Promise&lt;string&gt;;
-}
-
-export interface AgentDeps {
-  history: History;
-  llm: LLMClient;
-}
-
-export function createAgent(deps: AgentDeps): Agent { /* ... */ }</code></pre>
-
-<pre class="code-block"><code>// src/repl.ts
-export interface Terminal {
-  ask(): Promise&lt;string | null&gt;;  // null 表示 EOF / 关闭
-  print(text: string): void;
-  close(): void;
-}
-
-export interface ReplDeps {
-  agent: Agent;
-  terminal: Terminal;
-}
-
-export function createRepl(deps: ReplDeps): Repl { /* ... */ }</code></pre>
-
-<h2 id="delta-loop">loop 路径: 与第 00 章图 00-1 一一对应</h2>
+  正确做法: <strong>把"对话"建模成 loop</strong> —
+  <code>while (LLM 还要调工具) { 调 LLM; 调工具; 把结果喂回去 }</code>。
+  history 是"持续累积的状态", loop 是"持续重读的放大镜"。 每一轮
+  LLM 都看到完整 history, 但只决定"下一步做什么", 上下文由
+  harness 管理。
+  </p>
 <p>
-  下面这段实现直接对应第 00 章的伪码。每行右侧标注了它在图 00-1 中
-  的节点,方便对照。
-</p>
-<pre class="code-block"><code>// src/agent.ts
-export function createAgent(deps: AgentDeps): Agent {
-  const { history, llm } = deps;
-
-  return {
-    async run(query: string): Promise&lt;string&gt; {
-      // 边界 checklist: 空 query 不写入 history
-      if (query.trim().length === 0) {
-        return "";
-      }
-
-      // 图 00-1 节点 3: 写 user message
-      history.add({ role: "user", content: query });
-
-      // 图 00-1 节点 4: 取 messages 浅拷贝
-      const messages = history.getMessages();
-
-      // 图 00-1 节点 5: 调 LLM
-      const assistant = await llm.chat(messages);
-
-      // 图 00-1 节点 6: 写 assistant message
-      history.add(assistant);
-
-      return assistant.content;
-    },
-  };
-}</code></pre>
-
-<h2 id="composition-root">Composition Root: 把 5 件套装到一根线</h2>
+  这个 loop 不是教学简化 — 它是任何 agent (AutoGPT / Claude Code /
+  Cursor Agent) 的<strong>最小骨架</strong>。 后面 14 章所有功能
+  (工具 / 权限 / 压缩 / 子 agent) 都是这个 loop 的扩展, 不
+  替换它。
+  </p>
+<h2 id="what-is-loop">Agent Loop 是什么 — 不是什么</h2>
 <p>
-  <code>index.ts</code> 的存在意义是"5 件套的接线图"。它不出现 if 分支, 也不出现
-  try/catch,因为这两类代码一旦塞进 Composition Root,后续 子智能体和 e2e
-  都会变难。
-</p>
-<pre class="code-block"><code>// src/index.ts
-import { loadConfig } from "./config.js";
-import { createHistory } from "./history.js";
-import { createLlm } from "./llm.js";
-import { createTerminal } from "./terminal.js";
-import { createAgent } from "./agent.js";
-import { createRepl } from "./repl.js";
-
-export async function main(): Promise&lt;void&gt; {
-  const config = loadConfig();
-  const history = createHistory();
-  const llm = createLlm(config);
-  const terminal = createTerminal();
-  const agent = createAgent({ history, llm });
-  const repl = createRepl({ agent, terminal });
-  await repl.start();
-}
-
-main().catch((err) =&gt; {
-  console.error(err);
-  process.exit(1);
-});</code></pre>
-
-<h2 id="repl-edge">REPL 的边界: 退出命令和空输入</h2>
+  在讲代码之前, 把"agent loop" 这个词锁紧, 避免你读到后面
+  还在想"我到底在写什么"。
+  </p>
 <p>
-  REPL 这一层看起来是"输入输出",但它要承担三件事: (1) 拦截 <code>exit</code> /
-  <code>quit</code> 关闭 terminal, (2) 拦截空输入避免 agent 写入 History, (3)
-  拦截 Ctrl-D / EOF 优雅关闭。 这三件事都不应该让 agent 知道。
+  <strong>Agent loop 是</strong>:
 </p>
-<pre class="code-block"><code>// src/repl.ts
-export function createRepl(deps: ReplDeps): Repl {
-  const { agent, terminal } = deps;
-
-  return {
-    async start(): Promise&lt;void&gt; {
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const raw = await terminal.ask();
-        if (raw === null) break;            // EOF
-        const query = raw.trim();
-        if (query.length === 0) continue;   // 空输入不写入 history
-        if (query === "exit" || query === "quit") break;
-        const answer = await agent.run(query);
-        terminal.print(answer);
-      }
-      terminal.close();
-    },
-  };
-}</code></pre>
-
-<h2 id="fake-llm">Fake LLM Cookbook: 怎么写 messages 顺序断言</h2>
-<p>
-  这一节给出一份能直接抄的 fake LLM。它解决第 00 章"红灯 1"中提到的
-  "只断言最终文本"的隐患。
-</p>
-<pre class="code-block"><code>// test/_helpers/fake-llm.ts
-import type { LLMClient, AssistantMessage, Message } from "../../src/llm.js";
-
-export function createFakeLlm(scripted: string[]): LLMClient &amp; {
-  received: Message[][];
-} {
-  const received: Message[][] = [];
-  let i = 0;
-
-  return {
-    received,
-    async chat(messages: Message[]): Promise&lt;AssistantMessage&gt; {
-      // 记录每次调用收到的 messages 浅拷贝
-      received.push([...messages]);
-      const content = scripted[i++] ?? scripted[scripted.length - 1];
-      return { role: "assistant", content };
-    },
-  };
-}</code></pre>
-<p>
-  测试中只断言 <code>fake.received[N][M].role</code> /
-  <code>.content</code>,就能在不调真实 LLM 的情况下验证"第二次 LLM
-  收到了什么"。这种断言比"最终文本对"严格得多,它是后续每一章 Validation
-  卡片的基础。
-</p>
-
-<h2 id="delta-test">Validation: 把 Prompt Card 的 5 条断言落到 vitest</h2>
-<p>
-  下面 5 条断言直接来自第 00 章 Prompt Card 的"验证"一节。每条都能用 fake LLM 在
-  <code>&lt;100ms</code> 内跑完。
-</p>
-<pre class="code-block"><code>// test/agent.test.ts
-import { describe, it, expect } from "vitest";
-import { createAgent } from "../src/agent.js";
-import { createHistory } from "../src/history.js";
-import { createFakeLlm } from "./_helpers/fake-llm.js";
-
-describe("agent.run (最小 loop)", () =&gt; {
-  it("单轮: 透传 fake LLM 返回值", async () =&gt; {
-    const llm = createFakeLlm(["收到"]);
-    const agent = createAgent({ history: createHistory(), llm });
-    expect(await agent.run("你好")).toBe("收到");
-  });
-
-  it("多轮: 第二次 LLM 收到的 messages 包含第一轮 user 和 assistant", async () =&gt; {
-    const llm = createFakeLlm(["A1", "A2"]);
-    const agent = createAgent({ history: createHistory(), llm });
-
-    await agent.run("u1");
-    await agent.run("u2");
-
-    expect(llm.received[1]?.length).toBe(3);                  // [u1, a1, u2]
-    expect(llm.received[1]?.[0]?.role).toBe("user");
-    expect(llm.received[1]?.[0]?.content).toBe("u1");
-    expect(llm.received[1]?.[1]?.role).toBe("assistant");
-    expect(llm.received[1]?.[1]?.content).toBe("A1");
-    expect(llm.received[1]?.[2]?.role).toBe("user");
-  });
-
-  it("空 query 不写入 history", async () =&gt; {
-    const llm = createFakeLlm(["A"]);
-    const history = createHistory();
-    const agent = createAgent({ history, llm });
-
-    expect(await agent.run("")).toBe("");
-    expect(history.getMessages().length).toBe(0);
-    expect(llm.received.length).toBe(0);
-  });
-
-  it("getMessages 返回浅拷贝, 外部 push 不影响内部", () =&gt; {
-    const history = createHistory();
-    history.add({ role: "user", content: "u" });
-
-    const snap = history.getMessages();
-    snap.push({ role: "user", content: "hacked" });
-
-    expect(history.getMessages().length).toBe(1);
-    expect(history.getMessages()[0]?.content).toBe("u");
-  });
-});</code></pre>
-<p>
-  这 4 条断言 (5 条里第 5 条是 REPL 的,放到 <code>repl.test.ts</code>)
-  已经覆盖了第 00 章 Prompt Card 边界 checklist 的全部 5 条。 第 02
-  章开始,每一章都会沿用"fake LLM + messages 顺序断言"的模式, 只是 messages
-  数量和 role 序列变长。
-</p>
-
-<h2 id="trap">反例梯度: 新手 / 中级 / 高级</h2>
-<p>
-  本章的反例按"看起来能跑 / 看上去更优雅 / 用对了工具但放错位置"分三档。
-  读完后你应该能说出"为什么 LLM 经常写出 B 或 C"。
-</p>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>把 <code>agent.run()</code> 实现成"调一次
-      LLM,把响应拼接返回",不写 history。
-    </p>
-    <p>
-      <strong>为什么错:</strong>多轮上下文立刻断, 第二句会得到"我不知道
-      你喜欢什么"。
-    </p>
-    <p>
-      <strong>正确做法:</strong>严格按图 00-1 的 4 步, 写入 → 取 messages → 调
-      LLM → 写回。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>把 History 做成 module-level 单例, 在
-      <code>agent.ts</code> 内
-      <code>import { history } from "./history.js"</code>。
-    </p>
-    <p>
-      <strong>为什么错:</strong>测试时无法替换, 子智能体无法隔离, Composition
-      Root 失去可观测性 (第 00 章中级错法 B)。
-    </p>
-    <p><strong>正确做法:</strong>Composition Root 创建实例, 通过 deps 注入。</p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong><code>getMessages()</code> 返回内部数组引用。
-    </p>
-    <p>
-      <strong>为什么错:</strong>LLM client 拼下一轮 messages 时
-      <code>[...msgs, thisTurnUser]</code> 会反向污染 history (第 00 章 高级错法
-      C)。
-    </p>
-    <p>
-      <strong>正确做法:</strong>返回 <code>[...this.messages]</code> 浅拷贝,
-      并在 Validation 里写一条 push 反向断言。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>空字符串 query 仍然写 history 并调 LLM。</p>
-    <p>
-      <strong>为什么错:</strong>REPL 误触 (例如连续回车) 会让 history 出现
-      <code>role: "user", content: ""</code>, 既污染上下文又浪费 token。
-    </p>
-    <p>
-      <strong>正确做法:</strong>在 agent 层和 repl 层各加一次空输入拦截, 并在
-      Validation 里断言"空输入不增加 history 长度"。
-    </p>
-  </div>
-</div>
-
-<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
-<div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · 第 01 章</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>单轮透传:</strong>fake LLM 返回 "收到",
-      <code>agent.run("x")</code> === "收到"。
-    </p>
-    <p>
-      <strong>多轮 messages 顺序:</strong>连续两次 run 后, fake LLM 第二次
-      收到的 messages 长度 == 3, role 序列 == [user, assistant, user], content
-      与第一轮输入一致。
-    </p>
-    <p>
-      <strong>空 query 不写 history:</strong><code>run("")</code> 返回 "",
-      history 长度不变, fake LLM 收到 0 次调用。
-    </p>
-    <p>
-      <strong>getMessages 浅拷贝:</strong>外部 push 新元素后, history
-      内部不受影响 (反向断言)。
-    </p>
-    <p>
-      <strong>Composition Root 实例共享:</strong>在 <code>index.ts</code> 内
-      <code>history</code> 只 new 一次, agent 和 repl 拿到的是同一份 引用 (用
-      <code>===</code> 断言)。
-    </p>
-  </div>
-</div>
-
-<h2 id="debug">如果实现失败,先查哪里</h2>
 <ol>
-  <li>
-    <strong>多轮断言失败:</strong>看 <code>agent.run()</code> 是不是漏写了
-    <code>history.add(assistant)</code>, 或者 <code>getMessages()</code>
-    返回了浅拷贝但外部没拿到。
-  </li>
-  <li>
-    <strong>空 query 仍然写 history:</strong>看
-    <code>agent.run()</code> 顶部是否做了
-    <code>if (query.trim().length === 0) return ""</code>。
-  </li>
-  <li>
-    <strong>浅拷贝断言失败:</strong>看 <code>getMessages()</code> 是不是 返回了
-    <code>this.messages</code> 而不是 <code>[...this.messages]</code>。
-  </li>
-  <li>
-    <strong>Composition Root 出现 if 分支:</strong>把 if 拆到对应的工厂 函数或
-    REPL 里, index.ts 只做接线。
-  </li>
-  <li>
-    <strong>fake LLM 收到 0 次调用:</strong>检查
-    <code>llm.received</code> 是不是被 fake 工厂外部覆盖 (要直接读
-    <code>llm.received</code>, 不要在测试里用 <code>fake.received</code>)。
-  </li>
+<li>把用户输入写入 history (对话历史)</li>
+<li>把 history 转成 messages, 调一次 LLM, 把回复写回 history</li>
+<li>看 LLM 是否要调工具: 要就执行, 不要就返回文本</li>
 </ol>
-
-<h2 id="lookback">回望第 00 章: 哪些原则在本章兑现了</h2>
 <p>
-  这一节是"知识回环"。每章末尾都要把"自己兑现了哪些第 00 章原则"
-  列出来,作为对前章的差量验证。
+  <strong>Agent loop 不是</strong>:
 </p>
 <ul>
-  <li>
-    <strong>元方法 (4 步思考链):</strong>本章 "作者怎么想的" 一节把"现象 → 反例
-    → 接口 → 验证"完整走了一遍, Prompt Card 卡片里没有"注意架构" 这种空话。
-  </li>
-  <li>
-    <strong>术语锁定:</strong><code>History</code> / <code>LLMClient</code> /
-    <code>Composition Root</code> / <code>fake LLM</code> 全部以英文出现,
-    中文仅做"外层运行环境""消息列表"等一次性释义。
-  </li>
-  <li>
-    <strong>防自欺:</strong>红灯 1 "跑通 ≠ 正确" 体现在 fake LLM 的 messages
-    顺序断言上; 红灯 3 "LLM 说做完了" 体现在边界 checklist 的每条都可 翻译为
-    vitest 断言上; 红灯 4 "卡片漂亮 ≠ 实现漂亮" 体现在反例梯度 4 条具体错法上。
-  </li>
-  <li>
-    <strong>Prompt Card 6 段:</strong>第 00 章 Prompt Card 是 "6 段模板" 的
-    演示版, 第 01 章 Prompt Card 已经把 6 段全部按模板写, 不再空话。
-  </li>
+<li>"循环调 LLM 直到用户满意" — 没终止条件, 会无限循环</li>
+<li>"AI 自动完成任务" — agent loop 只是骨架, 任务完成靠工具执行</li>
+<li>"智能对话" — "智能" 是 LLM 的事, loop 只是"持续放大镜"</li>
 </ul>
-
-<h2 id="forward">前瞻张力: 留给后续章节</h2>
 <p>
-  现在的 loop 能跑, 但还差几件事: assistant 里出现 tool call 时 (第 02
-  章)、上下文增长到模型放不下时 (第 06 章)、多轮里 LLM 临时 抽风时 (第 11
-  章)、需要让另一个 agent 接力时 (第 04 章)。这一节 把这些张力显式钉出来,
-  后续章节会逐个回来解决。
+  任何一上来就讲"完整 agent" 的教程, 都在偷跑前 3 章的债。
+  你不知道 harness 哪部分是核心、哪部分是装饰, 改的时候不知道
+  改哪里。 这一章写的 loop 是"骨架", 后面 14 章都是"在骨架上
+  挂器官"。
+  </p>
+<h2 id="real-failure">真实失败故事: 一个 50 行脚本的第 11 天</h2>
+<p>
+  假设你按"最小能跑" 的思路写了一个 50 行的 chat 函数 (反例在下一节),
+  前 3 天跑得挺好。 第 11 天, 你想加一个"上下文超长就压缩" 的功能,
+  发现做不到:
+  </p>
+<ol>
+<li>
+<strong>history 是 module-level 单例, 多 agent 共享</strong>:
+    你想加 subagent 让长任务委托出去, 结果父子 history 串了。
+    </li>
+<li>
+<strong>没有 fake LLM 入口</strong>: 想加"基于 mock 验证 messages
+    顺序" 的测试, 但 openai SDK 是直接调的, mock 要侵入单例
+    全局变量, 写不出来。
+    </li>
+<li>
+<strong>tool 调度写死在函数里</strong>: 第 02 章要给 loop 加工具,
+    结果发现需要改 50 行里的 20 行, 因为 if/else 全在主函数里。
+    </li>
+</ol>
+<p>
+  这 3 个坑都是"骨架没分清" 造成的。 这一章写的 5 件套, 就是为了
+  让"加新功能" 只需要挂新模块, 不改骨架。
+  </p>
+<h2 id="naive">朴素反例: 一个文件 50 行的 loop</h2>
+<p>
+  写 agent 最朴素的做法: 一个文件, 一个函数, 全局变量存 history,
+  直接调 OpenAI SDK。 50 行能跑通, 但跑 10 分钟后就崩。
+  </p>
+<pre class="code-block"><code>// ❌ 反例: 全局 history + 直接调 SDK + 50 行
+let history: Message[] = [];
+
+export async function chat(userInput: string): Promise&lt;string&gt; {
+  history.push({ role: "user", content: userInput });
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4",
+    messages: history,
+  });
+  const reply = completion.choices[0].message.content ?? "";
+  history.push({ role: "assistant", content: reply });
+  return reply;
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L1" rel="noreferrer" target="_blank">GitHub · src/agent.ts 真实 agent loop 实现 (L1)</a></p>
+<p>
+  3 件事立刻坏掉:
 </p>
+<ol>
+<li>
+<strong>测试写不出</strong>: <code>openai.chat.completions.create</code> 是真实网络调用,
+    单测要 mock SDK, 断言 messages 顺序还要侵入全局变量。
+    实际写测试时, 你会发现自己要么 monkey-patch 全局 openai 客户端
+    (脏), 要么用 jest.mock (侵入性大)。
+  </li>
+<li>
+<strong>换模型写不出</strong>: 换 Claude / Gemini 时, <code>chat.completions.create</code>
+    的字段名不一样, 整个函数重写。 你想支持多模型路由, 只能复制粘贴
+    50 行 × 3, 维护噩梦。
+  </li>
+<li>
+<strong>多 agent 共享会污染</strong>: 子智能体拿到的 history 和父 agent 一样,
+    跨上下文泄露。 你想做 subagent, 但子 agent 看到的所有工具调用
+    都在 history 里, 它误以为是自己的。
+  </li>
+</ol>
+<p>
+  这 3 个问题不是"50 行写得不够好", 是"骨架设计错了"。 下面
+  5 件套就是解药。
+  </p>
+<h2 id="three-invariants">3 条不变量</h2>
+<p>
+  把反例的 3 个坏处倒过来, 就是这一章的 3 条不变量。 不变量是"写代码时
+  心里时刻记着的 3 件事", 不是"代码里写 3 条注释"。
+  </p>
 <dl class="defs">
-  <dt>tool call 分支</dt>
-  <dd>
-    当 assistant.content 是空但出现 tool_calls 数组时, loop 不能返回 文本,
-    而要执行工具、写入 tool result、再发一次 LLM。这条分支在 第 02 章接入, 但
-    prompt 模板里要提前留出 if 分支的形状。
+<dt>不变量 1 · History 在闭包内, 不在 module-level</dt>
+<dd>
+    让 <code>history</code> 由 <code>createAgent()</code> 创建, 存在闭包里。
+    每个 agent 实例有独立 history, 父子隔离自然成立。
+    这是"工厂模式" 在 agent 里的具体应用 — 后面 04 章 SubAgent 会
+    再用一次。
   </dd>
-  <dt>context 增长</dt>
-  <dd>
-    长对话会让 messages 超过模型窗口。History 之后会被 normalize / block /
-    compress (第 06 章), 这意味着 history 不能再"原样返回", 它要知道自己"是
-    prompt working context", 不等同于"原始记录"。
+<dt>不变量 2 · LLM 是窄接口, 不直接调 SDK</dt>
+<dd>
+    定义 <code>LLMClient.chat(messages, tools)</code> 接口,
+    默认实现调 OpenAI SDK, 测试用 fake。
+    换模型 = 换 LLMClient 实现, 业务代码不动。
+    这是"Adapter 模式" 的具体应用 — 后面专题 A 讲 Anthropic / Google
+    时会扩展。
   </dd>
-  <dt>LLM 异常</dt>
-  <dd>
-    LLM 返回空、超时、JSON 损坏时, agent 要决定"重试 / 跳过 / 中止"。 第 11
-    章会引入 recovery 边界, 现在的 agent.run() 还没考虑这些。
-  </dd>
-  <dt>子智能体</dt>
-  <dd>
-    第 04 章会让 agent.run() 内部"开第二个 loop", 但第二个 loop 的 History
-    必须和父 agent 隔离。这意味着 History 不能再 module-level, createHistory()
-    必须是工厂 (这一章已经做到)。
+<dt>不变量 3 · Composition Root 唯一组装依赖</dt>
+<dd>
+    所有"用哪个 LLM / 哪个 history / 哪个 logger" 都在
+    <code>index.ts</code> 的 <code>main()</code> 里一次性创建, 通过
+    依赖注入传给 agent。 模块内部不 import 其他模块的实现。
+    这是"控制反转 + 依赖注入" — 让业务模块纯净, 0 改动换测试。
   </dd>
 </dl>
-
-<h2 id="vibe-coding-01">本次如何 vibe code: 第 01 章的三件套</h2>
+<h2 id="why-factory">为什么用工厂模式 (而不是单例)</h2>
 <p>
-  按第 00 章 vibe-coding 方法论的拆卡 / review / 迭代三件套, 第 01
-  章的具体操作如下。 后续 02–15 章都会按这个格式给出 "本次如何 vibe code",
-  请你也按这个格式去写自己的 LLM 对话。
-</p>
-
-<h3 id="vibe-feed-01">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。只贴 "目标 + 场景 + 模块", 让 LLM 给出
-    <code>interface History</code> / <code>interface LLMClient</code> /
-    <code>interface Agent</code> / <code>interface Terminal</code> 四个
-    interface 的草案。本轮不写实现, 只钉形状与命名。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。贴 "模块 + 接线", 让 LLM 给出
-    <code>src/index.ts</code> 接线代码, 其中 <code>createHistory</code> /
-    <code>createLlm</code> / <code>createAgent</code> /
-    <code>createRepl</code> 都是返回空对象的 stub。本轮 review 重点:
-    <code>history</code> 实例是否 在 <code>index.ts</code> 中只 new 一次, agent
-    和 repl 拿到的是不是 同一份引用 (<code>===</code> 断言)。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。贴 "边界 (5 条 checklist)", 让 LLM 按
-    checklist 写每个工厂的真实实现。本轮 review 重点 (V1 review checklist
-    的"依赖方向"+"副作用"两栏): agent.ts 是否被偷偷塞进
-    <code>process.env</code> 读取, <code>getMessages</code> 是否返回浅拷贝。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。贴 "验证 (5 条 vitest 断言)", 让 LLM 写
-    <code>test/agent.test.ts</code>。本轮 review 重点: fake LLM 是否 真正记录
-    messages (而不是只返回字符串), 多轮断言是否同时检查 role 和 content。
-  </li>
-</ol>
-<div class="note">
-  <p class="note__title">为什么第 1 轮不允许写实现</p>
-  <p>
-    LLM 拿到 "目标 + 场景 + 模块" 后, 默认会直接写实现。写实现会触发"假装清单"
-    里的"假装做了边界检查"。本轮显式禁止 "do not write implementation yet", 强迫
-    LLM 把注意力放在命名、参数顺序、返回类型上, 后续轮次再补实现。
+  "工厂模式" 在面向对象里是老生常谈, 但在 TypeScript 写 agent 时
+  有特别的意义, 必须单独讲一遍。
   </p>
-</div>
-
-<h3 id="vibe-review-01">Review: 第 01 章专属 checklist</h3>
-<p>在第 00 章通用 review checklist 之上, 第 01 章额外要逐条核对的 5 条:</p>
+<p>
+  朴素想法: "单例不就行了吗, agent 又不创建多个。"
+  错。 至少 3 个场景会创建多个 agent 实例:
+  </p>
 <ol>
-  <li>
-    <strong>history 是工厂而不是单例。</strong
-    ><code>grep -n 'export const history' src/</code>
-    应当 0 行。如果出现, 立即回退到第 2 轮让 LLM 改成工厂。
+<li>
+<strong>REPL + SubAgent</strong>: REPL 里有一个主 agent, 用户说
+    "再开一个窗口做这个任务", 主 agent 调 <code>run_subagent</code>
+    创建子 agent。 父子要独立 history。
   </li>
-  <li>
-    <strong>getMessages 返回浅拷贝。</strong>看实现是不是
-    <code>return [...this.messages]</code>, 而不是
-    <code>return this.messages</code>。 必须配合 Validation 卡片里 "外部 push
-    不影响 history" 这条反向断言。
+<li>
+<strong>测试隔离</strong>: 每个测试 <code>it("...")</code> 需要一个
+    干净的 agent 实例, 不能被前一个测试污染。
   </li>
-  <li>
-    <strong>agent.run() 内不读环境变量。</strong
-    ><code>grep -n 'process.env' src/agent.ts</code>
-    应当 0 行。
-  </li>
-  <li>
-    <strong>空 query 在 agent.run() 顶部拦截。</strong>看是不是有
-    <code>if (query.trim().length === 0) return ""</code> 这行, 而不是 REPL
-    拦截后直接 <code>continue</code>。两层都要有。
-  </li>
-  <li>
-    <strong>Composition Root 内 <code>history</code> 只 new 一次。</strong
-    >写一个 <code>__test__.ts</code> (不进 git) 把 agent 和 repl 拿到的 history
-    引用 <code>===</code> 比对, 不通过则立即重写。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-01">调试: 第 01 章典型伪装</h3>
-<p>LLM 在 01 章最常犯的两种伪装:</p>
-<ol>
-  <li>
-    <strong>伪装 A · 把 LLM 调用直接放进 REPL。</strong>症状:
-    <code>repl.ts</code> 里有 <code>await llm.chat(...)</code>。这意味着 REPL
-    绕过了 agent, history 不再唯一。验证:
-    <code>grep -n 'llm.chat' src/repl.ts</code> 应当 0 行;
-    <code>grep -n 'llm.chat' src/agent.ts</code> 应当 ≥ 1 行。
-  </li>
-  <li>
-    <strong>伪装 B · 把 history 写成 module-level 闭包单例。</strong>症状:
-    <code>history.ts</code> 顶层有
-    <code>let messages: Message[] = [];</code> 之类 module-level 状态。验证:
-    <code>grep -n '^let messages\|^const messages' src/history.ts</code> 应当 0
-    行 (只能在 <code>createHistory()</code> 函数体内出现)。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-01">迭代: 第 01 章 4 个 commit 节点</h3>
-<p>推荐的 4 个 commit 节点。每个 commit 跑通对应 vitest 集合后才进下一个:</p>
-<ol>
-  <li>
-    <code>feat(ch01): 钉 4 个 interface 形状, 不写实现</code> —— 跑
-    <code>tsc --noEmit</code> 通过, 没有任何实现代码。
-  </li>
-  <li>
-    <code>feat(ch01): Composition Root 接线, 工厂为 stub</code> —— 跑通
-    "Composition Root 实例共享" 那个一次性断言 (history 在 agent 和 repl 间是
-    <code>===</code>)。
-  </li>
-  <li>
-    <code>feat(ch01): 5 条边界 checklist 兑现</code> —— 跑通 Validation 卡片前 4
-    条 (单轮透传 / 多轮 messages 顺序 / 空 query / 浅拷贝)。
-  </li>
-  <li>
-    <code>test(ch01): REPL 边界 (exit / quit / EOF)</code> —— 跑通 第 5 条
-    Validation (REPL 边界)。
+<li>
+<strong>多 session</strong>: 未来 harness 可能支持"同时跑 2 个
+    agent, 一个做 A 一个做 B", 各自独立 history。
   </li>
 </ol>
 <p>
-  每个 commit message 引用对应 Validation ID 是有意为之: 当某次回归测试 失败时,
-  你能立刻定位"是哪一条 Validation 被破坏了", 而不必从头读 diff。
+  单例写法短 1 行, 但加新场景时改 5 处; 工厂写法长 3 行, 但
+  加新场景时改 0 处。 这就是工厂模式在 agent harness 里的"复利"。
+  </p>
+<h2 id="five-pieces">五件套: 用处 → 场景 → 设计 → 实现</h2>
+<p>
+  最小 agent loop 拆成 5 个模块, 每个模块单一职责。 拆模块的边界
+  原则: <strong>"如果这一块要换实现, 改的代码越少越好"</strong>。
+  </p>
+<table class="terms">
+<thead>
+<tr>
+<th>模块</th>
+<th>职责</th>
+<th>依赖</th>
+<th>换实现时改哪里</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>history.ts</code></td>
+<td>管理对话消息序列</td>
+<td>无</td>
+<td>替换存储后端 (内存 / 文件 / Redis)</td>
+</tr>
+<tr>
+<td><code>llm.ts</code></td>
+<td>LLMClient 接口 + 默认 OpenAI 实现</td>
+<td>SDK (可选)</td>
+<td>换模型 / 换 SDK</td>
+</tr>
+<tr>
+<td><code>agent.ts</code></td>
+<td>agent.run() 6 步骨架</td>
+<td>history, llm</td>
+<td>几乎不改, 业务逻辑入口</td>
+</tr>
+<tr>
+<td><code>repl.ts</code></td>
+<td>readline 循环 + 命令分发</td>
+<td>agent, terminal</td>
+<td>换交互方式 (CLI / GUI / Web)</td>
+</tr>
+<tr>
+<td><code>index.ts</code></td>
+<td>Composition Root, 唯一组装点</td>
+<td>所有上述</td>
+<td>换测试 / 换部署, 改这一个文件</td>
+</tr>
+</tbody>
+</table>
+<p>
+  下面逐个讲。 每个模块按"用途 → 真实场景 → 设计思想 → 实现细节"
+  展开。
+  </p>
+<h3>History · 对话历史</h3>
+<p>
+  <strong>用途</strong>: 持久化"LLM 当前看到的所有消息"。 它是 loop 的
+  "事实状态", loop 每次迭代都从 history 读 messages 喂给 LLM,
+  把 LLM 回复和工具结果追加回 history。
+  </p>
+<p>
+  <strong>真实场景</strong>: 用户说 "刚才我让你改了什么?", LLM 答
+  "抱歉我不记得"。 原因就是 history 丢了。 一个 agent 跑 10 轮后
+  history 必须完整保留, 才能让 LLM 看到"过去发生了什么"。
+  </p>
+<p>
+  <strong>设计思想</strong>: History 的 API 必须<strong>收窄</strong>。
+  任何"能不能加一个 search" 的诱惑都先拒绝 — 后面有 hook /
+  memory 时再扩展。 这一版的 4 个方法, 覆盖了 80% 的场景: add /
+  getMessages / size / replaceEntries。 多一个方法, 就多一个
+  "会不会被滥用" 的地方。
+  </p>
+<p>
+  <strong>实现细节</strong>:
 </p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+interface History {
+  add(entry: HistoryEntry): void;
+  getMessages(): ChatCompletionMessageParam[];
+  size(): number;
+  replaceEntries(entries: HistoryEntry[]): void;  // 压缩用
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/history.ts#L1" rel="noreferrer" target="_blank">GitHub · src/history.ts History 实现 (L1)</a></p>
+<p>
+  4 个方法的边界:
+</p>
+<ul>
+<li>
+<strong><code>add</code> 只追加, 不修改历史</strong>: LLM 已经看到过的消息
+    不能改, 否则会出现"LLM 之前看到 A, 现在看到 A'" 的不一致。
+  </li>
+<li>
+<strong><code>getMessages</code> 是唯一出口</strong>: 返回
+    <code>ChatCompletionMessageParam[]</code>, 喂给 LLM。 history
+    内部可以有 metadata (时间戳 / token 数), 但出口必须干净。
+  </li>
+<li>
+<strong><code>size</code> 估算 token, 触发压缩</strong>: 简单按字符数估算,
+    中文字符 × 1.5, 英文 × 0.25。 不需要精确, 数量级对就行。
+  </li>
+<li>
+<strong><code>replaceEntries</code> 专给压缩用, 普通路径不调</strong>:
+    第 06 章 P2 全量压缩时, 把"最近 6 块 + 之前总结成 1 块"
+    整体替换。 这个方法权限大, 必须有显式调用点, 不能被普通业务乱调。
+  </li>
+</ul>
+<h3>LLMClient · LLM 抽象</h3>
+<p>
+  <strong>用途</strong>: 唯一跟"真实 LLM" 打交道的入口。 业务模块
+  (agent / tool) 不调 OpenAI SDK, 调 <code>LLMClient.chat()</code> 一个
+  方法。 换模型 / 换 SDK / 测试, 都通过换 LLMClient 实现完成。
+  </p>
+<p>
+  <strong>真实场景</strong>: 跑 100 轮对话后, 发现 Anthropic Claude 比
+  OpenAI gpt-4 在长上下文表现更好, 想切 Claude。 如果业务代码直接
+  调 <code>openai.chat.completions.create()</code>, 切换要改 20+ 处;
+  调 <code>LLMClient.chat()</code>, 切换只要换 LLMClient 实现。
+  </p>
+<p>
+  <strong>设计思想</strong>: 接口故意只暴露 chat。 temperature /
+  max_tokens / streaming 都不在第一版接口里, 是为了不让上层业务和
+  "这个 LLM SDK 有这个参数" 绑死。 后续章节会逐步加, 但加在
+  llm.ts 内部, 不外泄到 agent.ts。
+  </p>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>interface LLMClient {
+  chat(args: {
+    messages: ChatCompletionMessageParam[];
+    tools?: ChatCompletionTool[];
+  }): Promise&lt;LLMResponse&gt;;
+}
 
+interface LLMResponse {
+  content: string | null;
+  toolCalls: ChatCompletionMessageToolCall[];
+  finishReason: string | null;
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/llm.ts#L1" rel="noreferrer" target="_blank">GitHub · src/llm.ts LLMClient 接口 + Adapter (L1)</a></p>
+<p>
+  为什么 LLMResponse 字段这么少?
+  答: harness 关心的就是"模型说了什么, 调了哪些工具, 为啥停"。
+  这 3 个字段直接对应 history.add() 的 3 个参数。 多一个字段,
+  就多一个"会不会被滥用" 的地方。
+  </p>
+<h3>Agent · 主循环</h3>
+<p>
+  <strong>用途</strong>: 整个 harness 的业务入口。 用户调
+  <code>agent.run(query)</code>, agent 负责"写到 history → 调 LLM →
+  调工具 → 返回结果" 的完整流程。 所有其他模块 (history / llm /
+  tool) 都被 agent 协调。
+  </p>
+<p>
+  <strong>真实场景</strong>: REPL 收到用户输入, 调 <code>agent.run("帮我
+  看看 README")</code>, agent 内部: 写 user 到 history → 调 LLM →
+  LLM 返回 assistant (调 run_read) → 调 run_read 读 README → 写
+  tool result 到 history → 调 LLM 续问 → LLM 返回 assistant (没
+  tool call) → 返回最终回复。
+  </p>
+<p>
+  <strong>设计思想</strong>: 6 步骨架, 每步职责单一, 用 <code>for (;;)</code>
+  循环而不是 <code>for (let i = 0; i &lt; maxRounds; i++)</code>。
+  早期版本用后者更安全, 但后续会引入 TODO + SubAgent, "最大轮数"
+  应该由子 agent 自己的 maxRounds 控制, 不是主 loop 强制。 主 loop
+  只看"用户有没有得到回复", 终止条件是 LLM 返回无 tool_call。
+  </p>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export function createAgent(deps: { llm: LLMClient; history: History }): Agent {
+  return {
+    async run(query: string): Promise&lt;string&gt; {
+      // 第 1 步: 用户输入写入 history
+      deps.history.add({ role: "user", content: query });
+
+      for (;;) {
+        // 第 2 步: 从 history 拿 messages
+        const messages = deps.history.getMessages();
+        // 第 3 步: 调 LLM
+        const response = await deps.llm.chat({ messages });
+        // 第 4 步: 把回复写回 history
+        deps.history.add({
+          role: "assistant",
+          content: response.content,
+          tool_calls: response.toolCalls,
+        });
+        // 第 5 步 (本章占位): 没有 tool call, 返回最终回复
+        if (response.toolCalls.length === 0) {
+          return response.content ?? "";
+        }
+        // 第 5 步 (第 02 章展开): 有 tool call, 执行
+        // 第 6 步: 回到第 2 步继续 loop
+      }
+    },
+  };
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L1" rel="noreferrer" target="_blank">GitHub · src/agent.ts 6 步骨架完整实现 (L1)</a></p>
+<p>
+  这一章先不展开 step 5 (工具执行), 让 loop 跑通"两轮对话保留上下文"。
+  step 5 留到第 02 章, 那里会加 <code>ToolRegistry</code> 和 5 个常见 bug。
+</p>
+<h3>REPL · 终端循环</h3>
+<p>
+  <strong>用途</strong>: 让用户和 harness 对话。 用户在终端输入,
+  REPL 调 <code>agent.run()</code>, 把回复打回去。 是 harness 的
+  "I/O 边界" — 唯一接触终端的地方。
+  </p>
+<p>
+  <strong>真实场景</strong>: 用户跑 <code>npm run dev</code>, 看到
+  <code>&gt;</code> 提示符, 输入 "Hello", 看到 "Hi!", 输入 /exit 退出。
+  REPL 是这个交互循环的物理实现。
+  </p>
+<p>
+  <strong>设计思想</strong>: REPL 故意薄。 它只做 3 件事: 读一行, 调
+  agent.run, 打印回复。 复杂逻辑 (TODO 进度条 / SubAgent 状态)
+  不进 REPL, 那是 agent 自己的事。 REPL 越薄, 越容易换 (CLI →
+  GUI → Web, REPL 都不动, 业务模块都不动)。
+  </p>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export async function startRepl(agent: Agent, terminal: Terminal): Promise&lt;void&gt; {
+  terminal.println("Mini Agent REPL. 输入 /exit 退出。");
+  for (;;) {
+    const line = await terminal.question("&gt; ");
+    if (line === "/exit") break;
+    const reply = await agent.run(line);
+    terminal.println(reply);
+  }
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/repl.ts#L1" rel="noreferrer" target="_blank">GitHub · src/repl.ts REPL 实现 (L1)</a></p>
+<p>
+  Terminal 也是注入的, 不是 <code>readline</code> 直接 import。 这样
+  测试可以注入"自动回答" 的 fake terminal, 不需要真的 readline。
+  </p>
+<h3>Composition Root · 唯一组装点</h3>
+<p>
+  <strong>用途</strong>: 唯一 import 一切、new 一切的地方。 业务模块
+  (agent / history / llm) 内部不 import 彼此, 只接收注入。
+  换测试 = 换 <code>main()</code>, 业务代码 0 改动。
+  </p>
+<p>
+  <strong>真实场景</strong>: 你跑测试, 写 <code>testMain()</code> 注入
+  fake LLM / fake terminal; 你部署到 GUI, 写 <code>guiMain()</code>
+  注入 GUI 终端; 你部署到 CI, 写 <code>ciMain()</code> 不启动
+  REPL, 直接调 agent.run()。 三种 main 共享同一份业务模块。
+  </p>
+<p>
+  <strong>设计思想</strong>: 这是经典<strong>依赖反转原则</strong> (DIP) 的
+  极端形式。 业务模块不再"创建依赖", 而是"接收依赖"。 创建在哪
+  里? 集中在 1 个 <code>main()</code> 函数。 这避免了"业务模块
+  互相 new 对方" 的混乱图, 让依赖关系"塌缩成一个点"。
+  </p>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+export async function main() {
+  const llm = createOpenAILLMClient({ apiKey: process.env.OPENAI_API_KEY! });
+  const history = createHistory();
+  const agent = createAgent({ llm, history });
+  const terminal = createReadlineTerminal();
+  await startRepl(agent, terminal);
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/index.ts#L1" rel="noreferrer" target="_blank">GitHub · src/index.ts Composition Root (L1)</a></p>
+<p>
+  <code>main()</code> 是<strong>唯一</strong>import 一切、new 一切的地方。
+  业务模块 (agent / history / llm) 内部不 import 彼此, 只接收注入。
+  </p>
+<h2 id="loop-figure">loop 在仓库里的位置</h2>
+<figure class="figure">
+<div class="flow-map" role="img" aria-label="5 件套架构 + 数据流">
+<div class="flow-row--center">
+<span class="flow-node">index.ts<br/><small>Composition Root</small></span>
+<span class="flow-arrow">↘</span>
+<span class="flow-node flow-node--accent">agent.run(query)</span>
+<span class="flow-arrow">↙</span>
+<span class="flow-node">repl.ts<br/><small>读一行 → 调 run</small></span>
+</div>
+<div class="flow-row--center" style="margin-top: var(--space-3)">
+<span class="flow-node flow-node--accent">agent.run</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">history<br/><small>闭包内消息序列</small></span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">llm.chat<br/><small>OpenAI SDK</small></span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">history.add(assistant)</span>
+</div>
+</div>
+<figcaption>图 01-1 · 5 件套架构. Composition Root 注入所有依赖, agent.run 是业务入口, history 是状态, llm 是放大镜。</figcaption>
+</figure>
+<figure class="figure">
+<div class="flow-compare" role="img" aria-label="朴素反例 vs 工厂+闭包">
+<div class="flow-compare__col flow-compare__col--bad">
+<div class="flow-compare__label">❌ 朴素反例</div>
+<span class="flow-node">let history = []<br/><small>module-level 单例</small></span>
+<span class="flow-node">let llm = new OpenAI()<br/><small>业务直接调 SDK</small></span>
+<span class="flow-node">业务函数 new 一切<br/><small>父子 agent 共享</small></span>
+</div>
+<div class="flow-compare__col flow-compare__col--good">
+<div class="flow-compare__label">✅ 工厂 + 闭包</div>
+<span class="flow-node">createHistory()<br/><small>每次闭包独立</small></span>
+<span class="flow-node">createLLMClient()<br/><small>业务只见接口</small></span>
+<span class="flow-node">createAgent(deps)<br/><small>依赖注入</small></span>
+</div>
+</div>
+<figcaption>图 01-2 · 朴素反例 vs 工厂+闭包. 朴素写法短 1 行, 工厂写法长 3 行, 但加新场景时改 0 处。</figcaption>
+</figure>
+<figure class="figure">
+<div class="flow-stack" role="img" aria-label="稳定前缀 vs 动态 tail">
+<div class="flow-stack__layer flow-stack__layer--stable">
+<div class="flow-stack__label">稳定前缀 · 进 cache</div>
+<span class="flow-node">system prompt</span>
+<span class="flow-node">+ tool descriptions (按 skill 集合)</span>
+</div>
+<div class="flow-stack__arrow">↓</div>
+<div class="flow-stack__layer flow-stack__layer--dynamic">
+<div class="flow-stack__label">动态 tail · 不进 cache, 算增量</div>
+<span class="flow-node">history messages</span>
+<span class="flow-node">+ reminders (TODO / memory / skill)</span>
+<span class="flow-node">+ 当前 user query</span>
+</div>
+</div>
+<figcaption>图 01-3 · 稳定前缀 vs 动态 tail. 状态走 reminder, system prompt 写后不改 (第 10 章展开)。</figcaption>
+</figure>
+<h2 id="fake-llm-test">fake LLM 测试: 验证不是偶然跑通</h2>
+<p>
+  朴素做法"跑通" 是最危险的。 你跑了 1 次, 它通了, 你就觉得
+  "代码没问题", 改天改一行又挂了, 不知道为什么。
+  </p>
+<p>
+  <strong>设计思想</strong>: 关键洞见是 fake LLM 不仅能"假装模型",
+  还能"捕获模型收到的所有 messages"。 每次 <code>chat()</code> 调用
+  时, 真实 LLM 收到什么 messages, fake LLM 也能拿到一份。 我们
+  用这个能力写断言。
+  </p>
+<p>
+  为什么不用 snapshot 测试? snapshot 测试对比 messages 的
+  <strong>完整结构</strong> (role / content / tool_calls 全部字段)。
+  问题: 任何"无害的字段添加" (比如新增 metadata), 都会让
+  snapshot 挂。 我们用 <code>toContainEqual</code> 断言<strong>关键消息
+  存在</strong>, 不在意其他字段。 测试更稳定。
+  </p>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
+function createFakeLLM(responses: LLMResponse[]): LLMClient &amp; { lastMessages: () =&gt; any[] } {
+  let i = 0;
+  const calls: { messages: any[]; tools?: any[] }[] = [];
+  return {
+    async chat({ messages, tools }) {
+      calls.push({ messages, tools });
+      if (i &gt;= responses.length) throw new Error("no more fake responses");
+      return responses[i++];
+    },
+    lastMessages() { return calls[calls.length - 1].messages; },
+    allCalls() { return calls; },
+  };
+}
+
+test("agent.run 第二轮能看见第一轮的 user + assistant", async () =&gt; {
+  const llm = createFakeLLM([
+    { content: "Hi!", toolCalls: [], finishReason: "stop" },
+    { content: "Yes, I remember.", toolCalls: [], finishReason: "stop" },
+  ]);
+  const agent = createAgent({ llm, history: createHistory() });
+
+  await agent.run("Hello");
+  await agent.run("Do you remember?");
+
+  // 断言: 第二次 chat() 收到的 messages 包含第一次的 user + assistant
+  const lastCall = llm.allCalls()[1];
+  expect(lastCall.messages).toContainEqual({ role: "user", content: "Hello" });
+  expect(lastCall.messages).toContainEqual({ role: "assistant", content: "Hi!" });
+  expect(lastCall.messages).toContainEqual({ role: "user", content: "Do you remember?" });
+});</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/agent.test.ts#L1" rel="noreferrer" target="_blank">GitHub · src/agent.test.ts fake LLM 测试 (L1)</a></p>
+<p>
+  这条测试如果挂了, 你立刻知道 "history 没正确累积"。
+  跑了 1000 次还是 1000 次, 不会因为 LLM 升级突然挂。
+  </p>
+<h2 id="common-confusion">3 个常见误解</h2>
+<dl class="defs">
+<dt>误解 1 · "History 是给用户看的"</dt>
+<dd>
+    错。 History 是给 LLM 看的, 用户看的是 REPL 渲染。
+    History 里有 tool_call / tool_result / metadata, 这些不进 REPL 显示。
+    混了之后, "REPL 怎么不显示完整 tool result?" 这种问题答不上来。
+  </dd>
+<dt>误解 2 · "LLMClient 是单例"</dt>
+<dd>
+    错。 LLMClient 也是工厂创建的, 多个 agent 实例可以共享一个
+    LLMClient (避免双倍费用), 也可以各自独立 (测试场景)。
+    "共享 vs 独立" 是 Composition Root 决定的, 不是 LLMClient 决定的。
+  </dd>
+<dt>误解 3 · "Loop 是 for (let i; i &lt; N; i++)"</dt>
+<dd>
+    错。 Loop 是 <code>for (;;)</code>, 终止条件是 LLM 返回无 tool_call。
+    "最大轮数" 是 agent 收到的参数, 由主 agent / SubAgent / 评测
+    case 各自决定, 不在 loop 内部硬编码。
+  </dd>
+</dl>
+<h2 id="trap">反例梯度</h2>
+<div class="card card--trap">
+<div class="card__head">
+<span class="card__tag">新手错法 · A</span>
+</div>
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> module-level <code>let history = []</code>。
+    </p>
+<p>
+<strong>为什么错:</strong> 子智能体共享父 agent 的 history, 跨上下文泄露。
+    </p>
+<p>
+<strong>正确做法:</strong> <code>history</code> 在 <code>createAgent()</code> 闭包内。
+    </p>
+</div>
+</div>
+<div class="card card--trap">
+<div class="card__head">
+<span class="card__tag">中级错法 · B</span>
+</div>
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> agent.ts 直接 <code>import OpenAI from "openai"</code>。
+    </p>
+<p>
+<strong>为什么错:</strong> 测试要 mock SDK, 换模型要重写。
+    </p>
+<p>
+<strong>正确做法:</strong> agent.ts 只用 <code>LLMClient</code> 接口, SDK 在 llm.ts 内部 import。
+    </p>
+</div>
+</div>
+<div class="card card--trap">
+<div class="card__head">
+<span class="card__tag">高级错法 · C</span>
+</div>
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> Composition Root 不存在, 业务模块互相 import。
+    </p>
+<p>
+<strong>为什么错:</strong> 子智能体无法换 LLM, 测试无法换 fake。
+    </p>
+<p>
+<strong>正确做法:</strong> <code>index.ts</code> 是唯一 import 一切的地方, 业务模块只接收注入。
+    </p>
+</div>
+</div>
+<div class="card card--trap">
+<div class="card__head">
+<span class="card__tag">边界错法 · D</span>
+</div>
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> 测试断言"最终回复文本"。
+    </p>
+<p>
+<strong>为什么错:</strong> LLM 升级后措辞变化, 测试假阳性挂。
+    </p>
+<p>
+<strong>正确做法:</strong> 用 fake LLM 断言 <code>messages</code> 顺序, 不断言最终回复。
+    </p>
+</div>
+</div>
+<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
+<div class="card card--validation">
+<div class="card__head">
+<span class="card__tag">Validation · 第 01 章</span>
+</div>
+<div class="card__body">
+<p>
+<strong>两轮对话保留上下文:</strong> fake LLM, 第一轮问"Hello", 第二轮问
+      "Do you remember?", 第二次 chat() 收到的 messages 含
+      第一次的 user + assistant。
+    </p>
+<p>
+<strong>History 在闭包内:</strong> <code>grep -n '^let history\|^const history' src/agent.ts</code>
+      应当 0 行, 只能出现在 <code>createAgent()</code> 函数体内。
+    </p>
+<p>
+<strong>LLMClient 是窄接口:</strong> agent.ts 不 import SDK, 验证
+      <code>grep -n 'openai\|anthropic' src/agent.ts</code> 应当 0 行。
+    </p>
+<p>
+<strong>Composition Root 唯一组装:</strong> <code>index.ts</code> 是唯一 new 一切的地方,
+      验证 agent.ts / history.ts / llm.ts 互不 import。
+    </p>
+</div>
+</div>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
+<ul>
+<li>
+<strong>工厂模式</strong>: <code>createAgent()</code> 返回实例, history 在闭包内。
+    </li>
+<li>
+<strong>依赖注入</strong>: llm / history 通过参数传入, 不在内部 new。
+    </li>
+<li>
+<strong>Composition Root</strong>: index.ts 唯一组装点。
+    </li>
+<li>
+<strong>fake 测试</strong>: 不依赖真实 LLM, 用 scripted response 验证 messages 顺序。
+    </li>
+</ul>
+<h2 id="forward">前瞻张力: 留给后续章节</h2>
+<dl class="defs">
+<dt>工具调用</dt>
+<dd>
+    loop 第 5 步"有 tool_call 就执行" 留空, 第 02 章展开。
+    </dd>
+<dt>压缩</dt>
+<dd>
+    history 不会无限增长, 第 06 章加 P0 / P1 / P2 三层压缩。
+    </dd>
+<dt>权限</dt>
+<dd>
+    工具执行要不要先问人, 第 07 章展开。
+    </dd>
+</dl>
+<h2 id="prompt-card">Prompt Card (本章任务)</h2>
+<div class="card card--prompt">
+<div class="card__head">
+<span class="card__tag">Prompt Card · 第 01 章</span>
+<button class="card__copy" data-copy-card="" type="button">复制</button>
+</div>
+<div class="card__body">
+<p>
+<strong>目标:</strong> 把最小 agent loop 写成可测试 TypeScript 模块。
+    </p>
+<p>
+<strong>场景:</strong> 用户在 REPL 输入 "Hello", 再输入 "Do you remember?",
+      第二次 chat() 收到的 messages 含第一次的 user + assistant。
+    </p>
+<p>
+<strong>模块:</strong> <code>src/history.ts</code> (新) 暴露 <code>createHistory()</code>;
+      <code>src/llm.ts</code> (新) 暴露 <code>createOpenAILLMClient()</code> 和
+      <code>LLMClient</code> 接口; <code>src/agent.ts</code> (新) 暴露
+      <code>createAgent({ llm, history })</code> 和 6 步 loop;
+      <code>src/repl.ts</code> (新) 暴露 <code>startRepl()</code>;
+      <code>src/index.ts</code> (新) Composition Root。
+    </p>
+<p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+<ul>
+<li>history 在 <code>createAgent()</code> 闭包内, 不写 module-level 单例</li>
+<li>LLMClient 接口只暴露 <code>chat()</code>, 不暴露 temperature / max_tokens</li>
+<li>agent.ts 不 import SDK, SDK 只在 llm.ts 内部使用</li>
+<li>index.ts 是唯一 new 一切的地方, 业务模块互不 import</li>
+</ul>
+<p><strong>验证 (用 fake LLM + vitest, 逐条断言):</strong></p>
+<ul>
+<li>两轮对话后, 第二次 chat() 收到的 messages 含第一次的 user + assistant</li>
+<li>history 状态在两次 run() 之间累积, 不丢</li>
+<li>没有 tool_call 时, run() 返回 assistant content</li>
+<li>agent.ts 不出现 <code>openai</code> / <code>anthropic</code> 字符串</li>
+</ul>
+</div>
+</div>
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    按本章 4 条 Validation 断言写测试, 故意把 <code>getMessages()</code> 改回
-    <code>return this.messages;</code>, 验证测试会失败。
+<li>
+    故意把 history 写到 module-level, 跑测试, 看"两轮对话保留上下文" 是否抓到。
   </li>
-  <li>
-    在 <code>agent.ts</code> 里加一个分支: 如果 <code>query</code> 以
-    <code>/echo </code> 开头, 不调 LLM, 直接把剩余部分作为 assistant 写回
-    history。验证多轮 messages 序列仍然正确 (echo 也算一轮)。
+<li>
+    把 LLM SDK 直接 import 到 agent.ts, 跑测试, 看 fake LLM 是否被绕过。
   </li>
-  <li>
-    把 <code>index.ts</code> 故意塞进 <code>if (process.env.DRY_RUN)</code>
-    分支, 看看自己在看代码时能不能立刻识别"这里坏了" (第 00 章红灯 4)。
+<li>
+    让 <code>index.ts</code> 同时 import agent.ts 和 llm.ts 的内部实现,
+    看 composition root 唯一性是否被破坏。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本章按 6 段 Prompt Card 模板兑现了第 00 章的承诺: 7 个文件, 5 件套 +
-  Composition Root + fake LLM, 4 条 messages 顺序断言覆盖了"多轮上下文 真的由
-  History 承担"这件事。读完后, 你能自己写一份能通过全部 Validation 的实现,
-  也能识别 LLM 给的代码"看上去对但其实偷懒"的几种典型手法。
+  这一章把最小 agent loop 拆成 5 个模块, 每模块按"用途 → 场景 →
+  设计思想 → 实现细节" 展开, 全部走依赖注入。 3 条不变量:
+  history 在闭包内、LLM 是窄接口、Composition Root 唯一组装。
+  跑通的方式是用 fake LLM 断言 messages 顺序, 而不是断言最终回复文本。
+  下一章 (第 02 章) 给 loop 加上一双"手" — 工具调用。
 </p>
-
-<h2 id="next">下一章伏笔</h2>
-<p>
-  现在的 loop 只能聊天。下一章 (第 02 章) 把 tool call 分支接进来: 模型
-  只能提出结构化动作请求, 真正执行动作的是 harness; 工具执行前要过 permission,
-  工具结果要以 tool message 写回 History, 之后 loop 再走 下一轮。读完后, 你的
-  agent 就从"聊天循环"变成"能改代码的 agent"。
-</p>
+</content>

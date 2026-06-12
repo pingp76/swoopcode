@@ -1,573 +1,744 @@
-<p class="article__eyebrow">第 14 章 · 让时间触发 Agent</p>
-<h1 class="article__title">定时任务: Schedule</h1>
+<p class="article__eyebrow">第 14 章 · 定时触发复用 Async Run</p>
+<h1 class="article__title">Schedule: 5 秒 tick + 6 种 recurrence + missed 不补跑</h1>
 <p class="article__lede">
-  前面十三章让 harness 在单次会话内能聊天、调工具、跑子任务、压缩、拦权限、 留
-  hook、记 memory、cache 友好、recovery、记 task、跑后台。但任务必须 由 LLM
-  在会话内主动调 run_async 才能跑。这一章给 harness 加 Schedule 模块, 让 harness
-  按时间自动触发任务 (例如"每天 8 点跑一次测试"), 任务本质上是 async run,
-  scheduleManager 内部复用 asyncRunManager。
+  第 13 章的 Async Run 是"LLM 手动启动后台执行", 但生产里用户
+  经常想"每天 9 点跑一次全项目测试" / "每周一 10 点扫一下 TODO"
+  / "每 5 分钟查一下 CI 状态"。 这一章加 <code>src/schedules.ts</code>
+  模块: Schedule 是<strong>时间触发器</strong> (不是执行器),
+  复用 Async Run 作为执行单元, 5 秒 tick 一次扫所有 active
+  schedule, 6 种 recurrence (every_seconds / hourly / daily /
+  weekly / monthly / yearly), occurrence 含 stable id 防重复触发,
+  启动时检测 missed occurrence 但<strong>不补跑</strong>, overlap
+  policy 控制"上次还没跑完这次是否跳过"。 读完后, 你能讲清
+  "Schedule 不是 cron 替代品" 的边界 (in-process tick, 不持久
+  唤醒), 并能用 fake clock 验证"missed 不补" + "overlap skip" 两条
+  关键不变量。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-13">在第 13 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="real-failure">真实失败故事: cron 跑了 3 次, 团队 leader 才发现</h2>
 <p>
-  这一章加 schedule 持久化层 + 调度循环。schedule 数据落盘到
-  <code>~/.claude/schedules/&lt;schedule-id&gt;.json</code>, 包含 cron 表达式 /
-  命令 / 启用状态。harness 启动时加载所有 schedule, 后台调度循环 每分钟检查一次,
-  命中 cron 时派发到 async run。LLM 通过 schedule 工具创建 / 暂停 / 启用
-  schedule。 对应到代码, 改动集中在 4 个文件:
-  <code>src/schedules.ts</code> (新)、
-  <code>src/schedule-store.ts</code> (新)、<code>src/tools/schedule.ts</code>
-  (新, 含 create / list / enable / disable / delete)、<code>src/agent.ts</code>
-  (改每轮 LLM 调用前 drain schedule 通知)。
+  写代码之前, 先看一个真实痛点。 用户的 team 想"每天 9 点跑一次
+  全项目 e2e 测试", 写了 bash cron + harness 脚本, 跑了一周。
 </p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/schedules.ts: 调度管理器 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/schedule-store.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/schedule-store.ts: 调度存储 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
-    target="_blank"
-    rel="noreferrer"
-    >3. src/agent.ts: 每轮 LLM 调用前 drain schedule 通知</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts"
-    target="_blank"
-    rel="noreferrer"
-    >4. src/async-runs.ts: 调度命中时复用 (第 13 章)</a
-  >
+<ol>
+<li>
+<strong>症状 1: 重复触发</strong>: 网络抖了一下, cron 以为没跑,
+    第二天发现"同一天跑了 2 次", 资源浪费。
+  </li>
+<li>
+<strong>症状 2: 错过补跑</strong>: 周末 9 点团队不上班, harness
+    进程被关, 错过 1 次。 周一上班发现"周六没跑", 手动补跑,
+    但周六的 audit log 缺了。
+  </li>
+<li>
+<strong>症状 3: overlap 失控</strong>: 9 点的测试跑 1 小时, 10 点
+    又触发一次, 2 个测试并发, 互相干扰, 结果不可信。
+  </li>
+<li>
+<strong>真问题</strong>: 缺少<strong>in-process scheduler</strong>:
+    复用 Async Run 作为执行单元, 用 stable occurrence id 防重复,
+    overlap policy 决定"上次没跑完是否跳过", missed 不补跑只
+    记录审计。 不依赖 OS cron, 不依赖 systemd, 不依赖 k8s cronjob。
+  </li>
+</ol>
+<p>
+  朴素想法 1: "直接用 OS cron 调 bash 启动 harness?" 错。 OS cron
+  不知道"上次跑完没", 不会 dedupe, 不会 overlap skip, 不会写
+  occurrence 审计。 需要 harness 内部 scheduler 集中管理。
+</p>
+<p>
+  朴素想法 2: "schedule 跑完直接调 run_bash 同步执行?" 错。
+  schedule 应该复用 Async Run, 让 schedule 本身不执行, 只触发;
+  执行交给 Async Run 的并发限制 / 终态幂等 / 输出隔离 (第 13 章
+  全套)。
+</p>
+<p>
+  正确做法: 加 <code>src/schedules.ts</code> — ScheduleManager
+  是"时间触发器", 内部 5 秒 tick 一次, 扫所有 active schedule,
+  到点就调 <code>asyncRunManager.start(...)</code> 启动 Async Run。
+  Schedule 自己<strong>不执行</strong>, 真实执行交给 Async Run。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L7"><code>src/schedules.ts</code> 第 7-12 行的核心设计注释</a>:
+</p>
+<pre><code class="language-typescript">// 核心设计:
+// - ScheduleManager.tick(now) 是可测试的核心调度逻辑
+// - Schedule 到点后创建 Async Run, 不直接执行命令或运行 LLM
+// - occurrence 的 stable id 防止重复触发
+// - 启动时检测 missed occurrence, 只记录最近一次, 不补跑</code></pre>
+<h2 id="trigger-not-executor">Schedule 是触发器, 不是执行器</h2>
+<p>
+  <strong>用途</strong>: Schedule 自己<strong>不跑命令 / 不调
+  LLM</strong>, 到点就委托给 Async Run。 两条好处:
+  (a) Schedule 不需要重复实现并发限制 / 终态幂等 / 输出隔离,
+  复用 Async Run; (b) Schedule 出 bug 不影响 Async Run, 反之
+  亦然, 关注点分离。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户设 "每天 9 点跑全项目测试" 的
+  schedule, 9:00 触发, ScheduleManager 创建 occurrence +
+  调 <code>asyncRunManager.start({executor: "command", command: "npm test"})</code>,
+  拿到 run_id, 写 occurrence 记录。 Async Run 跑 5 分钟, 完事后
+  回调 ScheduleManager 更新 occurrence 终态 (completed / failed
+  / timeout)。 ScheduleManager 再写 notification 让 LLM 看到。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>层间清晰</strong> —
+  Reference 章节 "模式 7 · State Machine 状态机" 的延伸。 Schedule
+  管 active/cancelled/completed 状态, occurrence 管
+  triggered/skipped/missed/completed/failed/timeout/cancelled 状态,
+  Async Run 管 running/completed/failed/timeout/abandoned 状态。
+  三层状态机各管各的, 不互相污染。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L613"><code>src/schedules.ts</code> 第 613-624 行的教学导读</a>:
+</p>
+<pre><code class="language-typescript">// 教学导读:
+// ScheduleManager 是"时间触发器", 不是"执行器"。
+// 它只负责判断某个 schedule 是否到点、创建 occurrence 审计记录、
+// 然后把真正执行交给 AsyncRunManager。
+//
+// 这样设计可以避免两套执行生命周期:
+// - Async Run 管 running/completed/failed/timeout
+// - Schedule 管 active/cancelled/completed 和 occurrence 审计
+//
+// 学生读这段代码时, 可以把它想成一个小型调度循环:
+// scan/reload -&gt; 计算 nextRunAt -&gt; tick 到点 -&gt; 创建 occurrence -&gt; start async run -&gt; finish callback 写回终态</code></pre>
+<div class="figure figure--stack">
+  <div class="figure__title">图 1 · Schedule × Async Run 协作时序</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">1. tick 到点</div>
+      <div class="flow-stack__body">ScheduleManager.tick(now) 发现 schedule #5 到 9:00 了, 调 <code>asyncRunManager.start({trigger: {kind: "schedule", scheduleId, occurrenceId}})</code>。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">2. Async Run 启动</div>
+      <div class="flow-stack__body">AsyncRunManager 创建 record (status=running), 启动 executor (command 跑 npm test), 拿 run_id 返回给 ScheduleManager。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">3. Schedule 写 occurrence</div>
+      <div class="flow-stack__body">ScheduleManager 创建 occurrence (status=triggered, asyncRunId=&lt;run_id&gt;), 写 store.saveOccurrence(occ), notification 推 "triggered"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">4. Async Run 完成回调</div>
+      <div class="flow-stack__body">5 分钟后 npm test 跑完, AsyncRunManager.finishRun(record, "completed", output), 触发 onFinish 回调。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--good">
+      <div class="flow-stack__label">5. Schedule 收敛 occurrence</div>
+      <div class="flow-stack__body">onAsyncRunFinish(record) 找到 occurrence, status=completed, 写 finishedAt + outputRef, notification 推 "completed"。</div>
+    </div>
+  </div>
 </div>
-
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    用户想让 harness 每天 8 点自动跑测试并把报告发到 Slack, 但 harness
-    本身没有时间触发机制, 只能等用户主动开 harness 调 run_async。 现象是"harness
-    是被动的, 不是主动的"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"用 setInterval 检查 cron"。这有两个问题: 一是 setInterval
-    在进程退出后丢失, 跨进程重启调度状态不复用; 二是 时区问题, 用户的"每天 8 点"
-    在不同地区含义不同。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口: <code>interface Schedule { id, cron, command, enabled }</code>。
-    不变量三条: (1) schedule 落盘走 atomic write (第 15 章), 跨进程 保留, (2)
-    调度循环每分钟检查一次, 命中 cron 时派发到 async run (第 13 章), (3)
-    调度通知走单独的 source 标签 "&lt;system-reminder source='schedule'&gt;",
-    不与 async run 通知混。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    fake scheduleManager 预设 cron "* * * * *" (每分钟), 时间快进 1 分钟,
-    跑完调度循环 spy 验证 asyncRunManager.start 被调用 1 次; fake schedule
-    命中时, LLM 下一轮收到的 messages 含 schedule reminder 标签。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
-
-<div class="note">
-  <p class="note__title">观察 1 · setInterval 检查 cron, 不持久化</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// 错误: 用 setInterval 调度, 进程退出后丢失
-setInterval(() =&gt; {
-  for (const schedule of schedules) {
-    if (cronMatches(schedule.cron, new Date())) {
-      runAsync(schedule.command);  // 不持久化
-    }
-  }
-}, 60_000);</code></pre>
-  <p><strong>问:</strong>为什么不直接 setInterval?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 持久化: setInterval 状态在内存 里,
-    进程崩了 schedule 丢, 用户得重新配; 跨进程: 多进程同时跑 会重复触发,
-    需要文件锁; 状态可观测: 用户无法知道"下次触发时间" 和"上次触发时间",
-    调试困难。
-  </p>
+<p>
+  <strong>实现细节</strong>: 调度循环用 <code>setInterval(tick, TICK_INTERVAL_MS = 5000)</code>,
+  5 秒一次, 不需要秒级精度 (schedule 大多是分钟 / 小时 / 天级别)。
+  想秒级精度, 改 TICK_INTERVAL_MS 常量, 不需要改核心逻辑。
+</p>
+<h2 id="recurrence">6 种 recurrence: 5 分钟到 1 年</h2>
+<p>
+  <strong>用途</strong>: LLM / 用户创建 schedule 时指定 recurrence
+  类型, ScheduleManager 据此算 nextRunAt。 6 种枚举覆盖 90%
+  场景: every_seconds (5 分钟级) / hourly / daily / weekly /
+  monthly / yearly。 多了维护成本上升, 少了不够用。
+</p>
+<p>
+  <strong>真实场景</strong>: "每 5 分钟查 CI 状态" 用 every_seconds
+  (5 * 60 = 300 秒); "每天 9 点跑测试" 用 daily (9:00); "每周一
+  10 点扫 TODO" 用 weekly (mon, 10:00); "每月 1 号清理日志" 用
+  monthly (1, 00:00); "每年 1 月 1 号跑年度报告" 用 yearly
+  (1/1, 00:00)。 6 种全覆盖。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>固定枚举 + 字段类型</strong> —
+  6 种是固定枚举, 不允许动态加第 7 种 (避免代码膨胀); 每种带
+  各自字段 (weekly 必须含 weekday, monthly 必须含 day), 编译
+  期可见, 漏字段直接 TS 报错。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L35"><code>src/schedules.ts</code> 第 35-42 行的 recurrence import</a>:
+</p>
+<pre><code class="language-typescript">import type {
+  ScheduleTiming, RecurrenceRule, Weekday,
+  EverySecondsRule, HourlyRule, DailyRule,
+  WeeklyRule, MonthlyRule, YearlyRule,
+} from "./schedule-store.js";</code></pre>
+<div class="figure figure--stack">
+  <div class="figure__title">图 2 · 6 种 recurrence 的字段差异</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">every_seconds (5 分钟级)</div>
+      <div class="flow-stack__body">字段: <code>{kind: "every_seconds", seconds: 300}</code>。 用于"每 5 分钟查 CI" "每 30 秒检查 build 状态"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">hourly (整点触发)</div>
+      <div class="flow-stack__body">字段: <code>{kind: "hourly", minute: 0}</code>。 用于"每小时整点扫日志"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">daily (每天某时某分)</div>
+      <div class="flow-stack__body">字段: <code>{kind: "daily", hour: 9, minute: 0}</code>。 用于"每天 9 点跑测试"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">weekly (每周某天某时)</div>
+      <div class="flow-stack__body">字段: <code>{kind: "weekly", weekday: "mon", hour: 10, minute: 0}</code>。 用于"每周一 10 点扫 TODO"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">monthly (每月某日某时)</div>
+      <div class="flow-stack__body">字段: <code>{kind: "monthly", day: 1, hour: 0, minute: 0}</code>。 用于"每月 1 号清理日志"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">yearly (每年某月某日)</div>
+      <div class="flow-stack__body">字段: <code>{kind: "yearly", month: 1, day: 1, hour: 0, minute: 0}</code>。 用于"每年 1 月 1 号年度报告"。</div>
+    </div>
+  </div>
 </div>
-
-<div class="note">
-  <p class="note__title">观察 2 · schedule 通知和 async run 通知混在一起</p>
-  <pre class="code-block"><code>// 教学简化版
-const notifications = [
-  ...asyncRunManager.drainNotifications(),
-  ...scheduleManager.drainNotifications(),
-];</code></pre>
-  <p><strong>问:</strong>为什么不混?</p>
-  <p>
-    <strong>答:</strong>两者 source 不同, 混在一起 LLM 区分不出"这是 定时任务"
-    还是"这是后台 agent", 处理策略也不同。schedule 通知 含 schedule_id,
-    用户可据此取消; async run 通知含 run_id, 用户 可读输出。混了之后 LLM
-    没办法精确响应。
-  </p>
-</div>
-
-<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export interface Schedule {
-  id: string;                   // harness 生成的 UUID
-  cron: string;                 // 标准 cron 表达式
-  command: string;              // 调用的工具名 (例如 "run_bash")
-  args: Record&lt;string, unknown&gt;;  // 工具参数
-  title: string;                // 给用户看的标题
-  enabled: boolean;
-  timezone: string;             // IANA timezone, 例如 "Asia/Shanghai"
-  createdAt: number;
-  lastFiredAt?: number;         // 上次触发时间
-  nextFireAt?: number;          // 下次预期触发时间
-}
-
-export interface ScheduleStore {
-  get(id: string): Promise&lt;Schedule | null&gt;;
-  list(filter?: { enabled?: boolean }): Promise&lt;Schedule[]&gt;;
-  create(spec: Omit&lt;Schedule, "id" | "createdAt" | "lastFiredAt" | "nextFireAt"&gt;): Promise&lt;Schedule&gt;;
-  update(id: string, patch: Partial&lt;Schedule&gt;): Promise&lt;Schedule&gt;;
-  delete(id: string): Promise&lt;boolean&gt;;
-}
-
-export interface ScheduleNotification {
-  scheduleId: string;
-  occurrenceId: string;         // 每次触发一个唯一 id
-  type: "fired" | "missed" | "orphan_recovered";
-  message: string;
-  asyncRunId?: string;          // 派发到的 async run id
-  outputId?: string;            // 调度运行的输出 (可选)
-}
-
-export interface ScheduleManager {
-  // 添加 / 启用 / 禁用 / 删除
-  create(spec: Omit&lt;Schedule, "id" | "createdAt"&gt;): Promise&lt;Schedule&gt;;
-  enable(id: string): Promise&lt;void&gt;;
-  disable(id: string): Promise&lt;void&gt;;
-  delete(id: string): Promise&lt;void&gt;;
-  // 每分钟调用一次, 内部检查 cron, 命中时派发到 async run
-  tick(): Promise&lt;void&gt;;
-  // 取走未读通知
-  drainNotifications(): ScheduleNotification[];
+<p>
+  <strong>实现细节</strong>: nextRunAt 计算纯函数, 输入 (rule +
+  now), 输出 nextRunAt。 测试可以用任意 Date 算, 不需要等真实时间。
+  教学版不处理"闰秒" / "夏令时" (教学项目优先简单), 工业版要
+  考虑。
+</p>
+<h2 id="occurrence-id">occurrence stable id: 防重复触发的核心</h2>
+<p>
+  <strong>用途</strong>: 每个 schedule 到点会触发一次, 那次触发
+  是一次 <strong>occurrence</strong>, 必须有 stable id (基于
+  schedule_id + scheduledAt), 不能每次重启重新生成。 这样:
+  (a) 启动时检测"上次该触发但没触发" 的 occurrence, 不重复创建;
+  (b) Async Run 回调能通过 occurrenceId 找到对应 occurrence 写
+  回终态。
+</p>
+<p>
+  <strong>真实场景</strong>: schedule #5 配置 daily 9:00, 周一 9:00
+  触发 (occurrence #5_2026-06-09T09:00, id stable)。 harness 周二
+  重启, 启动时检测 "周一 9:00 该触发但没记录", 写一条
+  <code>missed</code> occurrence (id 仍然是 <code>#5_2026-06-09T09:00</code>,
+  不会和新触发的混淆)。 周二 9:00 触发时, occurrence id 是
+  <code>#5_2026-06-10T09:00</code>, 区分清楚。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>幂等 id</strong> — Reference
+  章节 "模式 19 · Idempotent 幂等" + "模式 16 · Stable Identity
+  稳定身份" 的应用。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L155"><code>src/schedules.ts</code> 第 155 行的 <code>generateOccurrenceId</code></a>:
+</p>
+<pre><code class="language-typescript">function generateOccurrenceId(scheduleId: string, scheduledAt: Date): string {
+  const y = String(scheduledAt.getFullYear());
+  const m = String(scheduledAt.getMonth() + 1).padStart(2, "0");
+  const d = String(scheduledAt.getDate()).padStart(2, "0");
+  const H = String(scheduledAt.getHours()).padStart(2, "0");
+  const M = String(scheduledAt.getMinutes()).padStart(2, "0");
+  // ... 拼成 sch_<id>_<date>_<time> 形式
 }</code></pre>
-
-<h2 id="cron">cron 解析</h2>
 <p>
-  本章使用标准 5 段 cron 表达式 (分 / 时 / 日 / 月 / 周), 不支持秒级。
-  解析器只识别 <code>*</code> / <code>数字</code> / <code>逗号列表</code> /
-  <code>斜杠步长</code> 四种语法, 不支持复杂的 <code>L</code> / <code>W</code> /
-  <code>?</code> 扩展。复杂调度需求 (例如"每月最后一个周五") 应当拆成 多个
-  schedule。
+  <strong>实现细节</strong>: occurrence id = <code>occ_&lt;scheduleId&gt;_&lt;ISO 时间&gt;</code>,
+  时间精确到分钟 (daily 精确到 hour:minute, every_seconds 精确到
+  second)。 这样不同次触发生成不同 id, 同一 schedule + 同一时间
+  永远同一 id, 启动时检测"已存在则跳过" / "已存在则标记 missed"。
+</p>
+<h2 id="missed-no-backfill">missed occurrence: 记录不补跑</h2>
+<p>
+  <strong>用途</strong>: harness 进程在 schedule 触发时间点不在线
+  (周末 / 维护 / 崩溃), 错过触发, 启动时检测到 "上次该跑没跑",
+  写一条 <code>missed</code> occurrence, 但<strong>不补跑</strong>
+  (只记录审计, 不追溯执行)。 这是教学版的<strong>故意简化</strong>,
+  工业版可以配置 "missed 时是否补跑"。
 </p>
 <p>
-  调度循环读当前时间 (用 <code>timezone</code> 字段转时区), 计算 nextFireAt;
-  tick() 时检查 (now &gt;= nextFireAt), 命中则派发到 async run, 写 lastFiredAt,
-  重新计算 nextFireAt。
+  <strong>真实场景</strong>: 周末 harness 进程不在线, 错过周六 9:00
+  的 daily schedule。 周一上班, 启动 harness, tick 检测到
+  "周六 9:00 没记录", 写一条 missed occurrence (audit: "missed
+  at 2026-06-08T09:00, recovered at 2026-06-10T09:00")。 周一 9:00
+  该跑的还是按周一 9:00 跑, 不会"补周六 9:00 一次 + 周一 9:00
+  一次"。
 </p>
+<p>
+  <strong>设计思想</strong>: <strong>故意简化</strong> — Reference
+  章节 "模式 10 · Atomic Write 原子写" 的延伸, 注释明确说
+  "当前教学实现不回补 missed run, 只记录审计并推进到未来下一次"。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L774"><code>src/schedules.ts</code> 第 774 行的注释</a>:
+</p>
+<pre><code class="language-typescript">// 当前教学实现不回补 missed run, 只记录审计并推进到未来下一次。
+// 这样可以避免"周末补跑 7 个 daily 跑 7 个命令" 的资源滥用。
+// 工业级 Schedule 可能会让用户配置 missed_policy = "skip" | "backfill" | "skip_silently"。</code></pre>
+<div class="figure figure--stack">
+  <div class="figure__title">图 3 · 启动时 missed 检测流程</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">1. 启动 reload</div>
+      <div class="flow-stack__body">harness 启动, ScheduleManager.reloadActiveSchedules() 扫磁盘读所有 active schedule.json, 计算每个的 lastScheduledAt。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">2. 检测 missed</div>
+      <div class="flow-stack__body">如果 <code>lastScheduledAt &lt; nextRunAt &lt; now</code> (有该跑没跑的时间点), 写 missed occurrence (status=missed, missedAt=now)。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">3. 不补跑</div>
+      <div class="flow-stack__body">只记录审计, 不启动 Async Run 补执行。 nextRunAt 推到未来下一次 (今天 9:00 / 明天 9:00)。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--good">
+      <div class="flow-stack__label">4. 未来照常</div>
+      <div class="flow-stack__body">之后的 tick 按 nextRunAt 正常触发, 不受 missed 影响。 用户的"周一 9:00 测试" 周一还是按周一 9:00 跑。</div>
+    </div>
+  </div>
+</div>
+<p>
+  <strong>实现细节</strong>: missed 检测在 <code>tick(now)</code>
+  第一次调用时跑, 之后只算 "nextRunAt &lt;= now" 的触发, 不再检测
+  missed。 简化逻辑, 避免每个 tick 都重扫历史。
+</p>
+<h2 id="overlap-policy">overlap policy: allow vs skip</h2>
+<p>
+  <strong>用途</strong>: schedule 到点时, 上一次 occurrence 还没
+  跑完 (Async Run 仍在 running), 怎么办? 两种策略:
+  <code>overlapPolicy: "allow"</code> (允许并发, 启动新的 Async Run) 或
+  <code>overlapPolicy: "skip"</code> (跳过, 写一条 skipped_overlap occurrence)。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户设 "每 5 分钟跑 CI 检查" 的
+  schedule, CI 跑了 7 分钟还没完, 下一个 5 分钟到点:
+  <code>allow</code> 策略会启动新的 CI 检查 (总共 2 个 CI 并发,
+  互相干扰); <code>skip</code> 策略会跳过这次触发, 写
+  skipped_overlap, 5 分钟后再尝试。 大多数 schedule 用 skip 更安全。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>用户可配 + 默认安全</strong> —
+  字段在 schedule.execution 里, 用户创建 schedule 时指定; 默认
+  skip (教学项目优先安全, 并发容易出问题)。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L645"><code>src/schedules.ts</code> 第 645 行的 <code>runningOccurrences</code></a>:
+</p>
+<pre><code class="language-typescript">// 跟踪正在 running 的 occurrence, 用于 overlap 检测
+const runningOccurrences = new Map&lt;string, Set&lt;string&gt;&gt;(); // scheduleId -&gt; Set&lt;occurrenceId&gt;</code></pre>
+<p>
+  <strong>实现细节</strong>: overlap 检测在 tick 到点时跑:
+  (a) 查 <code>runningOccurrences.get(scheduleId)</code> 是否非空;
+  (b) 非空 + policy=skip → 写 skipped_overlap occurrence, 不启动
+  Async Run; (c) 非空 + policy=allow → 直接启动新 Async Run (Async
+  Run 自己有 3 并发限制, 可能 reject)。 runningOccurrences 在
+  Async Run finish 回调里 remove (onAsyncRunFinish 内)。
+</p>
+<h2 id="linked-task">linked task: 触发后更新 task 状态</h2>
+<p>
+  <strong>用途</strong>: schedule 可以<strong>链接</strong>到一个
+  task (groupId + taskId), occurrence 触发后根据结果更新 task
+  状态: <code>linkedTaskUpdate: "never"</code> (不更新) /
+  <code>"append_note"</code> (追加 note) /
+  <code>"mark_failed_on_failure"</code> (failed 时把 task 标 failed)。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户设 "每天 9 点跑 nightly test"
+  schedule, 链接到 migration-001 group 的 task_nightly_test。
+  test 通过 → 不改 task 状态; test 失败 → task 标 failed +
+  note 写 "auto-failed by schedule at 2026-06-12T09:05:23, reason:
+  5 tests failed"。 LLM 下次开 session 看到 task failed, 知道
+  "夜跑挂了, 去看下"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>桥接 schedule ↔ task</strong> —
+  Reference 章节 "模式 6 · Pipeline 管道" 的应用。 schedule 不
+  知道 task 内部结构, 只通过 linkedTask 字段 + 3 种 update
+  policy 触发 task 状态变化。 task 状态变化由 TaskManager
+  (第 12 章) 处理, 保持职责分离。
+</p>
+<p>
+  <strong>实现细节</strong>: linked task 写在
+  <code>schedule.linkedTask = {groupId, taskId}</code>, 触发后
+  onAsyncRunFinish 回调里根据 result 调
+  <code>taskManager.updateTask(groupId, taskId, patch)</code>。
+  3 种 policy 对应不同的 patch 构造。
+</p>
+<h2 id="output-policy">output policy: save / notify / summary</h2>
+<p>
+  <strong>用途</strong>: occurrence 完成后, 输出的处理策略:
+  <code>saveRawOutput: true</code> (写到 OutputStore LRU) /
+  <code>notifyLlm: true</code> (推 notification) /
+  <code>summaryPrompt?: string</code> (用 prompt 让 LLM 生成摘要
+  塞进 notification)。
+</p>
+<p>
+  <strong>真实场景</strong>: nightly test schedule 配置
+  <code>saveRawOutput: true, notifyLlm: true, summaryPrompt: "总结测试结果, 失败的列前 3"</code>。
+  test 跑完后, 原始输出 5MB 写 OutputStore, LLM 调 summaryPrompt
+  生成 "5/100 失败, Top 3: [list]", notification 推给 LLM。
+  LLM 看到摘要, 想看全文调 <code>readOutput(runId)</code>。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>短摘要 + 长全文分离</strong> —
+  Reference 章节 "模式 13 · Error→Action 错误转动作" 的延伸。
+  notification 短, output 长, LLM 按需读, history 不撑爆。
+</p>
+<p>
+  <strong>实现细节</strong>: summaryPrompt 是可选, 有就调 LLM
+  生成摘要, 没有就用 Async Run 的 preview 字段。 LLM 调生成
+  摘要本身是一个小 Async Run (嵌套), 教学版可以简化为 "用
+  preview 字段当摘要"。
+</p>
+<h2 id="permission-profile">permission profile: readonly / ci / workspace_write</h2>
+<p>
+  <strong>用途</strong>: schedule 触发的 Async Run 可能有写操作
+  (如"每天 9 点跑测试 + 修复") 或纯只读 ("每天 9 点扫日志")。
+  3 种 permission profile: readonly (只读命令) / ci (允许 build /
+  test / install) / workspace_write (允许 workspace 内写)。
+</p>
+<p>
+  <strong>真实场景</strong>: nightly test schedule 用 ci profile
+  (允许 npm install + npm test); "每天清理 7 天前的日志" schedule
+  用 workspace_write (允许 rm 工作区文件); "每天扫 TODO" 用
+  readonly (只 grep 不改)。 3 种 profile 表达"这个 schedule 的写
+  权限边界"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>3 种 profile 表达权限边界</strong> —
+  Reference 章节 "模式 3 · 窄接口 + Adapter" 的应用。 permission
+  profile 透传给 Async Run 的 executionPolicy, 让 Async Run 自己
+  校验。 Schedule 不实现权限, 只声明。
+</p>
+<p>
+  <strong>实现细节</strong>: profile 字段在
+  <code>schedule.execution.permissionProfile</code>, 透传到
+  <code>asyncRunManager.start({..., permissionProfile: "ci"})</code>。
+  Async Run 内部用 executionPolicy 校验每个 command 是否在
+  profile 允许范围内, 不在就 reject。
+</p>
+<h2 id="start-stop">start / stop: 进程内 timer 生命周期</h2>
+<p>
+  <strong>用途</strong>: ScheduleManager 自己持有 <code>setInterval</code>
+  timer, <code>start()</code> 启动 timer, <code>stop()</code> 清除
+  timer + 把 running occurrence 标 abandoned。 进程退出时
+  <code>stop()</code> 自动调用 (或者外部 hook), 不留 zombie。
+</p>
+<p>
+  <strong>真实场景</strong>: harness 启动, scheduleManager.start()
+  启动 5 秒 tick 循环, 开始调度。 user ctrl-c 退出, harness 收到
+  SIGINT, 调 scheduleManager.stop(), timer 清除 + running occurrence
+  收敛 abandoned, 干净退出。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>进程内 timer, 不持久化</strong> —
+  Reference 章节 "模式 19 · Idempotent 幂等" 的延伸。 timer
+  是<strong>进程级</strong>资源, 进程退出 timer 自然消失; schedule
+  数据 (ScheduleFile) 持久化, 进程重启 reload 即可恢复。 教学版
+  简单, 工业版可以用 systemd timer / k8s cronjob 替代。
+</p>
+<p>
+  <strong>实现细节</strong>: timer 在
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L643"><code>src/schedules.ts</code> 第 643 行</a>
+  持有, start() 用 setInterval 5 秒一次, stop() clearInterval +
+  清理 runningOccurrences。 start / stop 幂等, 多次调用安全。
+</p>
+<h2 id="loop-integration">主循环集成: start 启动 timer, 进程退出 stop</h2>
+<p>
+  <strong>用途</strong>: ScheduleManager 在 Composition Root 创建,
+  注入 agent + 注册工具 (schedule_create / read / list /
+  cancel / list_occurrences)。 主循环集成点 2 个:
+</p>
+<ol>
+<li>
+<strong>index.ts 启动时</strong>: <code>scheduleManager.start()</code>
+    启动 timer, 之后 schedule 开始被调度。
+  </li>
+<li>
+<strong>进程退出 hook</strong>: SIGINT / SIGTERM handler 调
+    <code>scheduleManager.stop()</code> + <code>asyncRunManager.shutdown()</code>,
+    干净退出。
+  </li>
+</ol>
+<p>
+  <strong>设计思想</strong>: <strong>显式生命周期</strong> —
+  ScheduleManager 不自动 start, 必须显式调, 避免 Composition
+  Root 创建时立即触发未预期的 tick。
+</p>
+<p>
+  <strong>实现细节</strong>: <code>scheduleManager.start()</code>
+  是幂等的, 重复调用不创建多个 timer。 <code>stop()</code> 也幂等,
+  重复调用不抛错。 这是 Reference 章节 "模式 1 · 工厂 + 闭包"
+  的应用 — 状态在闭包内, 外部不能误改 timer handle。
+</p>
+<h2 id="fake-test">fake test: 用 fake clock 验证 missed + overlap</h2>
+<p>
+  <strong>用途</strong>: ScheduleManager 测试用<strong>fake clock</strong>
+  + <strong>fake asyncRunManager</strong> — 不等真实时间, 不真
+  跑命令, 完全可控。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户写测试覆盖 4 条不变量:
+  (a) 创建 daily 9:00 schedule, fake clock 推到 9:00, 触发 Async
+  Run; (b) 创建 daily 9:00, fake clock 推到周一 8:00 → 周二 10:00
+  (跳过 9:00 触发点), 重启时检测 missed occurrence; (c) 创建
+  overlap=skip, 上次 occurrence 还在 running, 触发点写到
+  skipped_overlap; (d) overlap=allow, 启动新的 Async Run。
+</p>
+<pre><code class="language-typescript">test("missed 不补跑", () =&gt; {
+  let now = new Date("2026-06-08T08:00:00Z");
+  const mgr = createScheduleManager({
+    store: ...,
+    asyncRunManager: fakeAsyncRun,
+    projectRoot: "/test",
+    now: () =&gt; now,
+  });
+  mgr.create({
+    title: "daily 9am test",
+    intent: { prompt: "test" },
+    timing: { kind: "daily", hour: 9, minute: 0 },
+    execution: { ..., overlapPolicy: "allow", ... },
+  });
+  mgr.start();
+  // 推进到 6 月 10 日 10:00 (跳过 6/9 9:00)
+  now = new Date("2026-06-10T10:00:00Z");
+  mgr.tick(now);
+  const occs = mgr.listOccurrences({ scheduleId: ..., limit: 10 });
+  // 应该有 1 条 missed + 1 条 triggered (6/10 9:00)
+  const missed = occs.filter((o) =&gt; o.status === "missed");
+  const triggered = occs.filter((o) =&gt; o.status === "triggered");
+  expect(missed).toHaveLength(1);
+  expect(triggered).toHaveLength(1);
+  // 验证: fakeAsyncRun.start 只被调 1 次 (6/10 9:00), 没补跑 6/9 9:00
+  expect(fakeAsyncRun.start).toHaveBeenCalledTimes(1);
+});
 
-<h2 id="loop-integration">loop 接入: schedule 通知走单独 source</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-async function run(query: string) {
-  history.add({ role: "user", content: query });
+test("overlap=skip: 上次还在 running 时跳过", () =&gt; {
+  // ... 创建一个 occurrence, 标记为 running (不进 finishRun)
+  // 推进到下次触发点
+  // 验证: 新 occurrence 状态 = skipped_overlap, fakeAsyncRun.start 没被调
+});
 
-  for (;;) {
-    // 1. drain async run 通知 (第 13 章)
-    const asyncNotifications = asyncRunManager.drainNotifications();
-    for (const n of asyncNotifications) { /* ... 第 13 章 ... */ }
-
-    // 2. drain schedule 通知 (本章) — 单独 source 标签
-    const scheduleNotifications = scheduleManager.drainNotifications();
-    for (const n of scheduleNotifications) {
-      const lines = ["Schedule updates:"];
-      lines.push(
-        `- schedule: ${n.scheduleId}`,
-        `  occurrence: ${n.occurrenceId}`,
-        `  type: ${n.type}`,
-        `  message: ${n.message}`,
-      );
-      if (n.asyncRunId) lines.push(`  async_run: ${n.asyncRunId}`);
-      if (n.outputId) lines.push(`  full_output: use run_output_read with output_id ${n.outputId}`);
-      const reminder = `&lt;system-reminder source="schedule"&gt;\n${lines.join("\n")}\n&lt;/system-reminder&gt;`;
-      history.add({ role: "user", content: reminder });
-    }
-
-    // 3. 正常 LLM 调用 + 工具执行
-    const messages = history.getMessages();
-    const assistant = await llm.chat(messages);
-    /* ... */
-  }
-}</code></pre>
-
-<h2 id="tick-loop">tick 循环: 每分钟检查</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// Composition Root 启动时开后台 tick 循环
-const tickInterval = setInterval(async () =&gt; {
-  await scheduleManager.tick();
-}, 60_000);
-
-process.on("SIGTERM", () =&gt; {
-  clearInterval(tickInterval);
+test("overlap=allow: 上次还在 running 时启动新的", () =&gt; {
+  // ... 同上, 但 overlapPolicy=allow
+  // 验证: fakeAsyncRun.start 被调了 2 次
 });</code></pre>
 <p>
-  tick 循环在 harness 启动时开, 每分钟调一次 scheduleManager.tick()。 tick()
-  内部读所有 enabled schedule, 检查 cron 是否命中, 命中时 派发到 async run, 写
-  lastFiredAt, 重新计算 nextFireAt。进程退出 时清掉 interval, 防止泄漏。
+  <strong>实现细节</strong>: fake clock 通过 deps.now 注入,
+  ScheduleManager 完全用 deps.now() 拿时间, 不调
+  <code>new Date()</code>。 fake asyncRunManager 通过 deps.asyncRunManager
+  注入, 只暴露 <code>start / setOnFinish</code> 两个方法 (用
+  <code>Pick&lt;AsyncRunManager, "start" | "setOnFinish"&gt;</code>
+  类型限制)。
 </p>
-
-<h2 id="trap">反例梯度</h2>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
+<h2 id="common-confusion">常见误解: Schedule 不是 cron 替代品</h2>
+<p>
+  <strong>误解 1: "Schedule = harness 内部的 cron?"</strong>
+  半对。 Schedule 确实像 cron (time-based trigger), 但<strong>不</strong>
+  替代 OS cron: (a) Schedule 进程退出时不持久化, 重启依赖
+  missed detection; (b) Schedule 不支持秒级精度 (5 秒 tick);
+  (c) Schedule 不支持 system reboot 触发。 想要这些特性,
+  用 OS cron / k8s cronjob 调 harness CLI。
+</p>
+<p>
+  <strong>误解 2: "missed occurrence 自动补跑?"</strong> 错。
+  教学版不补跑, 只记录审计。 工业级 Schedule 可能有
+  <code>missedPolicy: "skip" | "backfill"</code> 配置, 教学版
+  固定 skip。
+</p>
+<p>
+  <strong>误解 3: "overlap=allow 永远安全?"</strong> 不一定。
+  allow 启动新的 Async Run, 但 Async Run 自己有 3 并发限制 (第
+  13 章), 可能 reject "Maximum concurrent async runs (3) reached"。
+  overlap=allow 适合"独立任务" (日志清理 + 报告生成), 不适合
+  "同一资源" (CI 检查 + build)。
+</p>
+<p>
+  <strong>误解 4: "schedule 跑完直接改 task 状态?"</strong>
+  错。 通过 <code>linkedTaskUpdate: "append_note" | "mark_failed_on_failure"</code>
+  3 种 policy 间接改, 不是任意改。 "任意改 task 状态" 仍
+  走 TaskManager (第 12 章), 保持职责分离。
+</p>
+<h2 id="trap">反例梯度: 4 个常见错误</h2>
+<div class="cards-grid">
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 1 · 不用 Async Run, 自己跑</span></div>
+    <div class="card__body">
+      <p>Schedule 到点直接 <code>await run_bash(command)</code>,
+        不走 Async Run。 错。 Schedule 自己跑没有并发限制, 没有
+        终态幂等, 没有输出隔离。 复跑 / 重叠触发 / 进程退出 mid-write
+        全部出问题。 正确: Schedule 只负责触发, 真实执行委托给
+        Async Run, 复用其全部基础设施 (3 并发 + finishRun 幂等
+        + OutputStore LRU)。</p>
+    </div>
   </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>用 setInterval 调度, schedule 不落盘。</p>
-    <p>
-      <strong>为什么错:</strong>进程崩了 schedule 丢, 多进程重复触发,
-      状态不可观测。
-    </p>
-    <p>
-      <strong>正确做法:</strong>schedule 走 store 落盘, tick
-      内部只做检查和派发。
-    </p>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 2 · missed 自动补跑</span></div>
+    <div class="card__body">
+      <p>启动时检测到 3 个 missed occurrence, 立即 3 个并发启动
+        Async Run 补跑。 错。 周末 7 天 × 1 daily = 7 个 missed,
+        启动 7 个并发, 立刻触发 Async Run 3 并发限制, 资源滥用。
+        正确: 只记录 missed audit, 不补跑, 推进到未来下一次。</p>
+    </div>
   </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 3 · occurrence id 随机生成</span></div>
+    <div class="card__body">
+      <p>occurrence id 用 <code>Math.random()</code> 生成, 每次
+        tick 都重新计算。 错。 启动时检测 missed 无法判断"这是不是
+        已存在 occurrence", 重复创建 + 重复触发。 正确: id 用
+        <code>scheduleId + scheduledAt</code> 拼, stable + idempotent,
+        同一时间点永远同一 id。</p>
+    </div>
   </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>schedule 通知和 async run 通知混在同一个 source
-      标签。
-    </p>
-    <p>
-      <strong>为什么错:</strong>LLM 区分不出"定时任务" vs "后台 agent",
-      处理策略不同。
-    </p>
-    <p>
-      <strong>正确做法:</strong>schedule 通知走 source="schedule", 单独标签,
-      不与 source="async-run" 混。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>cron 命中时直接 await exec, 阻塞 tick 循环。
-    </p>
-    <p>
-      <strong>为什么错:</strong>一个长任务会让 tick 循环卡住, 其他 schedule
-      不能按点触发。
-    </p>
-    <p>
-      <strong>正确做法:</strong>tick 内部只派发到 async run, 不 await,
-      立即返回。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>不区分时区, 用户的"每天 8 点" 用了本地系统时区。
-    </p>
-    <p>
-      <strong>为什么错:</strong>harness 部署在服务器, 服务器时区与用户时区不同,
-      触发时间错位。
-    </p>
-    <p>
-      <strong>正确做法:</strong>schedule 显式带 timezone 字段, tick
-      时按用户时区解析 cron。
-    </p>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 4 · overlap=allow 默认值</span></div>
+    <div class="card__body">
+      <p>默认 overlap=allow, LLM / user 创建 schedule 不指定就
+        allow。 错。 大多数 schedule (CI / 测试 / 扫描) 应该 skip,
+        allow 容易出并发问题。 正确: 默认 skip, 用户明确想并发
+        才显式 allow, 符合"安全默认值" 原则。</p>
+    </div>
   </div>
 </div>
-
-<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
-<div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · 第 14 章</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>tick 派发到 async run:</strong>fake schedule 预设 cron "* * * *
-      *", 时间快进 1 分钟, 跑完 tick, spy 验证 asyncRunManager.start 被调用 1
-      次。
-    </p>
-    <p>
-      <strong>schedule 通知单独 source:</strong>fake schedule 触发, 跑完后 LLM
-      下一轮 messages 含 &lt;system-reminder source="schedule"&gt; 标签, 不含
-      source="async-run"。
-    </p>
-    <p>
-      <strong>disabled schedule 不触发:</strong>fake schedule enabled=false,
-      跑完 tick, spy 验证 asyncRunManager.start 没被调用。
-    </p>
-    <p>
-      <strong>timezone 字段被解析:</strong>fake schedule
-      timezone="Asia/Shanghai", cron="0 8 * * *", 跑完 tick, lastFiredAt 是 8 点
-      (UTC+8 解析后)。
-    </p>
-    <p>
-      <strong>schedule 落盘走 atomic write:</strong>create() 后 spy 验证 走
-      write tmp + fsync + rename 路径, 不直接改原文件。
-    </p>
-  </div>
-</div>
-
-<h2 id="lookback">回望第 00–13 章: 哪些原则在本章兑现了</h2>
+<h2 id="validate">Validation: 4 条不变量检验</h2>
+<ol>
+<li>
+<strong>occurrence id 稳定</strong>: 同一 schedule + 同一时间点
+    调 generateOccurrenceId 2 次, 返回值字节相等。 验证: 单测
+    覆盖 daily / weekly / monthly, 同一时间点 2 次调用相等。
+  </li>
+<li>
+<strong>missed 不补跑</strong>: fake clock 跳到"该跑没跑" 的
+    时间点之后, tick 跑一次, 验证: missed occurrence 写一条,
+    fake asyncRunManager.start 调 0 次 (不补跑)。
+  </li>
+<li>
+<strong>overlap=skip 行为</strong>: 上次 occurrence 还在 running,
+    触发点到, 验证: 写 skipped_overlap occurrence, fake
+    asyncRunManager.start 调 0 次。
+  </li>
+<li>
+<strong>overlap=allow 行为</strong>: 上次 occurrence 还在 running,
+    触发点到, overlap=allow, 验证: fake asyncRunManager.start
+    调 1 次 (启动新 run, 假设备用 fakeAsyncRun 不 reject)。
+  </li>
+</ol>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
 <ul>
-  <li>
-    <strong>async run 复用:</strong>schedule 命中时派发到 async run,
-    不重新发明后台执行机制。
+<li>
+<strong>触发器, 不是执行器</strong>: Schedule 自己不跑, 委托
+    Async Run, 复用并发限制 / 终态幂等 / 输出隔离。
   </li>
-  <li>
-    <strong>reminder 标签 source 区分:</strong>schedule 通知和 async run
-    通知走不同 source, LLM 可精确响应。
+<li>
+<strong>层间状态机</strong>: Schedule 管 active/cancelled,
+    occurrence 管 triggered/skipped/missed, Async Run 管
+    running/completed, 三层各管各的。
   </li>
-  <li>
-    <strong>原子写落盘:</strong>schedule 走第 15 章 atomic write, 跨进程保留。
+<li>
+<strong>稳定 id</strong>: occurrence id = scheduleId + scheduledAt,
+    幂等, 启动时检测 missed 不重复创建。
   </li>
-  <li>
-    <strong>工厂模式:</strong>scheduleManager / scheduleStore 都是工厂,
-    Composition Root 唯一 new。
+<li>
+<strong>missed 不补跑</strong>: 教学版故意简化, 只记录审计, 避免
+    资源滥用。
+  </li>
+<li>
+<strong>overlap 默认 skip</strong>: 安全默认, 用户明确 allow 才
+    启动新 run。
   </li>
 </ul>
-
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
-  <dt>schedule 触发时的 permission</dt>
-  <dd>定时任务仍然过 permission, 危险命令 deny, 不在后台偷偷跑。</dd>
-  <dt>schedule 输出存档</dt>
-  <dd>第 15 章 transcript 记录 schedule 每次触发的命令 / 时间 / 结果。</dd>
-  <dt>schedule 与 task 协作</dt>
-  <dd>
-    schedule 命中的命令可以读 task 状态, 自动激活下一个 task (例如"每天 8
-    点检查测试 task 是否完成")。
+<dt>missed_policy 配置</dt>
+<dd>
+    教学版 fixed skip, 工业版可让用户配
+    <code>missedPolicy: "skip" | "backfill"</code>。 留 P2 阶段。
   </dd>
-  <dt>schedule 跨多 harness 实例</dt>
-  <dd>
-    多进程同时跑时, schedule 触发需要文件锁防重复, 本章用 atomic write +
-    timestamp 简单互斥, 第 15 章会展开文件锁细节。
+<dt>跨进程 schedule 触发</dt>
+<dd>
+    当前 Schedule 是进程内 timer, 进程退出 schedule 不触发。
+    想要 "harness 进程退出, schedule 仍触发" 需要外部
+    scheduler (systemd timer / k8s cronjob), 调 harness CLI
+    启动新的 harness 进程。
+  </dd>
+<dt>Schedule 持久化运行 (类似 k8s cronjob)</dt>
+<dd>
+    当前 schedule 数据持久化, 运行不持久化 (进程退出 timer
+    丢)。 工业级可以加 "schedule worker 进程" 持续运行,
+    harness 主进程只是其中之一, 多个进程协调触发 (lock)。
+    留 P2 阶段。
   </dd>
 </dl>
-
-<h2 id="vibe-coding-14">本次如何 vibe code: 第 14 章的三件套</h2>
-
-<h3 id="vibe-feed-14">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>Schedule</code> /
-    <code>ScheduleStore</code> / <code>ScheduleManager</code> /
-    <code>ScheduleNotification</code> 四个 interface, 以及 cron
-    解析规则文档。本轮不写实现, 重点钉"schedule 命中时复用 async run" 和"通知
-    source 区分"。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
-    <code>createScheduleManager()</code> 是 stub (tick 永远不命中), agent.run
-    不接入 drain。本轮 review 重点: scheduleManager 实例在
-    <code>index.ts</code> 只 new 一次, 复用同一个 asyncRunManager。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createScheduleManager + schedule
-    工具 + agent.run 接入 drain + tick 循环 + 原子写。本轮 review 重点: 通知单独
-    source, tick 不 await, timezone 解析。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。让 LLM 写
-    <code>test/schedules.test.ts</code>。本轮 review 重点: "tick 派发到 async
-    run" 和 "schedule 通知单独 source" 两条必须有 spy 验证。
-  </li>
-</ol>
-
-<h3 id="vibe-review-14">Review: 第 14 章专属 checklist</h3>
-<ol>
-  <li>
-    <strong>schedule 落盘走 atomic write。</strong>验证: spy 验证 create/update
-    走 write tmp + fsync + rename 路径。
-  </li>
-  <li>
-    <strong>通知 source="schedule" 与 source="async-run" 区分。</strong>验证:
-    <code>grep -n 'source="schedule"' src/agent.ts</code> ≥ 1 行, 与
-    source="async-run" 不在同一段。
-  </li>
-  <li>
-    <strong>tick 不 await。</strong>验证: tick() 内部
-    <code>asyncRunManager.start(spec)</code> 之前没有 await, fire-and-forget。
-  </li>
-  <li>
-    <strong>timezone 字段被解析。</strong>验证: cron 解析函数接受 timezone 参数,
-    不读 process.env.TZ。
-  </li>
-  <li>
-    <strong>scheduleManager 工厂化。</strong>验证:
-    <code>grep -n 'new ScheduleManager' src/</code> 应当 0 行。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-14">调试: 第 14 章典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · 通知 source 写错, 用了 async-run。</strong>症状: schedule
-    通知走 &lt;system-reminder source="async-run"&gt; 标签。验证: Validation
-    卡片"schedule 通知单独 source" 那条测试通过 (messages 含
-    source="schedule")。
-  </li>
-  <li>
-    <strong>伪装 B · tick 内部 await, 阻塞循环。</strong>症状: tick 内部
-    <code>await asyncRunManager.start(spec)</code>。验证: Validation 卡片"tick
-    派发到 async run" 那条, spy 验证 start 被调用, 但 tick 立即返回。
-  </li>
-  <li>
-    <strong>伪装 C · 不读 timezone, 用系统时区。</strong>症状: cron 解析时直接用
-    new Date() (系统本地时区), 忽略 schedule.timezone。验证: Validation
-    卡片"timezone 字段被解析" 那条测试通过 (lastFiredAt 是用户时区的 8 点,
-    不是系统时区的 8 点)。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-14">迭代: 第 14 章 4 个 commit 节点</h3>
-<ol>
-  <li>
-    <code
-      >feat(ch14): 钉 Schedule / ScheduleStore / ScheduleManager /
-      ScheduleNotification 接口与 cron 规则</code
-    >
-    —— tsc 通过, 无实现。
-  </li>
-  <li>
-    <code>feat(ch14): createScheduleManager 工厂 + schedule 工具 stub</code> ——
-    tsc 通过, tick 永远 noop。
-  </li>
-  <li>
-    <code
-      >feat(ch14): tick 派发到 async run + 通知单独 source + timezone 解析 +
-      atomic write</code
-    >
-    —— 跑通 Validation 卡片前 4 条。
-  </li>
-  <li>
-    <code>test(ch14): disabled schedule 不触发 + 落盘 spy 验证</code> —— 全绿。
-  </li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
   <div class="card__head">
     <span class="card__tag">Prompt Card · 第 14 章</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
+    <button class="card__copy" data-copy-card="" type="button">复制</button>
   </div>
   <div class="card__body">
-    <p>
-      <strong>目标:</strong>实现 Schedule 模块, 让 harness 按 cron 自动触发任务,
-      内部复用 async run 派发, 通知走单独 source 标签。
-    </p>
-    <p>
-      <strong>场景:</strong>用户创建 schedule "每天 8 点跑 npm test", harness
-      启动时加载, 每天 8 点 tick 命中, 派发到 async run, 完成时通知走
-      source="schedule" reminder 注入主 loop。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/schedules.ts</code> (新) 暴露
-      <code>createScheduleManager()</code>;
-      <code>src/schedule-store.ts</code> (新) 实现存储后端;
-      <code>src/tools/schedule.ts</code> (新) 实现 create / list / enable /
-      disable / delete; <code>src/agent.ts</code> 每轮 LLM 调用前 drain schedule
-      通知 (单独 source); <code>src/index.ts</code> 接线 scheduleManager + tick
-      循环。
-    </p>
+    <p><strong>目标:</strong> 给 harness 加 Schedule 定时调度, 5 秒
+      tick 一次, 6 种 recurrence, 复用 Async Run 作为执行单元,
+      missed 不补跑, overlap 默认 skip。</p>
+    <p><strong>场景:</strong> 用户设 "每天 9 点跑 nightly test"
+      schedule, executor=command, command="npm test", permission=ci。
+    harness 启动, timer 5 秒 tick, 9:00 触发, 调 asyncRunManager.start
+    启动 npm test, 跑 5 分钟, 完成回调写 occurrence (completed +
+    outputRef), 推 notification 给 LLM。 周末进程不在线, 周一启动
+    检测周六 missed, 写 missed audit, 不补跑, 周一 9:00 照常触发。</p>
+    <p><strong>模块:</strong> <code>src/schedules.ts</code> (新)
+      暴露 <code>createScheduleManager({store, asyncRunManager, ...})</code>;
+      <code>src/tools/schedule-*.ts</code> (新) 包装 LLM 接口;
+      <code>src/index.ts</code> (改) Composition Root 创建 +
+      start() + SIGINT hook 调 stop()。</p>
     <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
     <ul>
-      <li>schedule 落盘走 atomic write</li>
-      <li>通知 source="schedule" 单独标签, 不与 source="async-run" 混</li>
-      <li>tick 内部不 await asyncRunManager.start, fire-and-forget</li>
-      <li>cron 解析用 schedule.timezone 字段, 不读 process.env.TZ</li>
-      <li>
-        scheduleManager 工厂, Composition Root 唯一 new, 复用同一个
-        asyncRunManager
-      </li>
+      <li>6 种 recurrence 固定枚举 every_seconds / hourly / daily / weekly / monthly / yearly, 不可新增</li>
+      <li>occurrence id = scheduleId + scheduledAt 拼, stable + idempotent, 不可随机生成</li>
+      <li>missed occurrence 只记录审计, 不补跑, 推进到未来下一次</li>
+      <li>overlap 默认 skip, allow 需显式指定, 上次 running 时 allow 启动新 Async Run</li>
+      <li>Schedule 自己不跑命令 / 不调 LLM, 必须委托给 Async Run, 不重复实现执行生命周期</li>
+      <li>5 秒 tick (TICK_INTERVAL_MS = 5000), start / stop 幂等, 重复调用安全</li>
+      <li>linkedTaskUpdate 3 种 policy: never / append_note / mark_failed_on_failure, 不可任意改 task 状态</li>
+      <li>permissionProfile 3 种: readonly / ci / workspace_write, 透传给 Async Run 校验</li>
     </ul>
-    <p>
-      <strong
-        >验证 (用 fake scheduleManager + spy asyncRunManager, 逐条落到
-        vitest):</strong
-      >
-    </p>
+    <p><strong>验证 (用 fake clock + fake asyncRunManager + vitest, 逐条断言):</strong></p>
     <ul>
-      <li>
-        fake cron "* * * * *", 时间快进 1 分钟, tick 后 spy 验证
-        asyncRunManager.start 被调用 1 次
-      </li>
-      <li>
-        fake 触发, LLM 下一轮 messages 含 source="schedule" 标签, 不含
-        source="async-run"
-      </li>
-      <li>fake enabled=false, tick 后 spy 验证 start 没被调用</li>
-      <li>
-        fake timezone="Asia/Shanghai" cron="0 8 * * *", tick 后 lastFiredAt 是 8
-        点 (UTC+8)
-      </li>
-      <li>create() 后 spy 验证走 write tmp + fsync + rename</li>
+      <li>occurrence id 稳定: 同一 scheduleId + scheduledAt, 2 次调用字节相等</li>
+      <li>missed 不补跑: fake clock 跳到过去, tick 后写 1 条 missed, fakeAsyncRun.start 调 0 次</li>
+      <li>overlap=skip: 上次 running, 触发点写 skipped_overlap, fakeAsyncRun.start 调 0 次</li>
+      <li>overlap=allow: 上次 running, 触发点 fakeAsyncRun.start 调 1 次</li>
+      <li>6 种 recurrence nextRunAt 计算正确: 5 个 case 覆盖 daily / weekly / monthly / hourly / every_seconds</li>
     </ul>
   </div>
 </div>
-
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    故意让 tick 内部 await asyncRunManager.start, 跑测试, 看"tick 派发到 async
-    run" 是否抓到 (会卡在 start 上)。
+<li>
+    故意让 Schedule 自己跑 (不委托 Async Run), 跑 schedule 触发
+    测试, 看"Schedule 是触发器不是执行器" 是否抓到 (并发失控 /
+    终态不一致 vs. Async Run 集中管理)。
   </li>
-  <li>
-    把通知 source 标签写成 "async-run", 跑测试, 看"schedule 通知单独 source"
-    是否抓到。
+<li>
+    故意让 missed 自动补跑, 跑 7 天没启动 harness 后重启的测试,
+    看"missed 不补跑" 是否抓到 (7 个 missed → 7 个并发 Async Run
+    vs. 1 条 missed audit + 0 个补跑)。
   </li>
-  <li>
-    cron 解析用 process.env.TZ 而不是 schedule.timezone, 跑测试, 看"timezone
-    字段被解析" 是否抓到。
+<li>
+    故意让 occurrence id 随机生成, 跑"启动时检测 missed" 测试,
+    看"稳定 id" 是否抓到 (重复创建 missed occurrence vs. 同一
+    id 幂等)。
+  </li>
+<li>
+    故意让 overlap 默认 allow, 跑"上次还在 running" 测试, 看
+    "overlap 默认 skip" 是否抓到 (2 个 CI 并发 vs. 1 个 running
+    + 1 个 skipped)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本章给 harness 加了 Schedule 模块, 让 harness 按 cron 自动触发任务。 schedule
-  落盘走 atomic write, 内部复用 async run 派发, 通知走 单独 source="schedule"
-  标签。tick 循环在 harness 启动时开, 每 分钟检查一次。下一章 (第 15 章)
-  我们会处理"长期运行卫生" 的 问题——Runtime Hardening,
-  包括日志轮转、原子写、output handle、 清理 dry-run 等, 让 harness
-  在长期运行下保持稳定。
+  Schedule 是给"时间触发" 的调度器, 复用 Async Run 作为执行
+  单元。 核心是 5 个设计:
 </p>
-
-<h2 id="next">下一章伏笔</h2>
+<ul>
+<li>
+<strong>触发器, 不是执行器</strong>: Schedule 自己不跑, 委托
+    Async Run, 复用其并发 / 终态 / 输出 / abort 全部基础设施。
+  </li>
+<li>
+<strong>6 种 recurrence</strong>: every_seconds / hourly / daily /
+    weekly / monthly / yearly, 固定枚举, 不可新增。
+  </li>
+<li>
+<strong>occurrence 稳定 id</strong>: scheduleId + scheduledAt
+    拼, 幂等, 启动时检测 missed 不重复。
+  </li>
+<li>
+<strong>missed 不补跑</strong>: 教学版故意简化, 只记录审计,
+    推进到未来下一次。
+  </li>
+<li>
+<strong>overlap 默认 skip</strong>: 安全默认, allow 需显式指定。
+  </li>
 <p>
-  第 14 章让 harness 有了定时任务, 但 schedule / async run / memory / task
-  这些持久化数据在长期运行下会无限增长。下一章 Runtime Hardening
-  会处理"卫生系统": 原子写 (write tmp + fsync + rename)、日志轮转、 output
-  handle 引用计数、清理 dry-run、时间语义统一 (epoch ms 而非 Date 字符串), 让
-  harness 在真实使用中慢慢腐烂时不至于崩溃。
+  下一章 (第 15 章) 展开 harness 跑生产时的<strong>运行时安全</strong>
+  — 日志轮转 / 配置优先级 / 终端兼容性 / 多 session 隔离 /
+  normalize 协议差异 / LLM Provider 多后端支持 / 上下文排序 /
+  Prompt 策略, 把前面 14 章的所有模块在生产里跑稳。
 </p>

@@ -1,505 +1,732 @@
-<p class="article__eyebrow">第 12 章 · 长期计划落盘</p>
-<h1 class="article__title">跨会话的 plan: Persistent Task</h1>
+<p class="article__eyebrow">第 12 章 · 跨会话的长期任务</p>
+<h1 class="article__title">Task: 带依赖图的持久化任务组</h1>
 <p class="article__lede">
-  前面十一章让 harness 在单次会话内能聊天、调工具、跑子任务、压缩、拦权限、 留
-  hook、记 memory、cache 友好、recovery。但"用户的长期计划" (例如"未来 3
-  周要重构 X") 仍然只在会话内 TODO 里, 关掉就丢。这一章给 harness 加 Persistent
-  Task 模块, 区分"会话内 TODO" (第 03 章) 和"项目级 task" (持久化到
-  <code>~/.claude/tasks/</code>), 跨会话保留, 让用户离开一周
-  回来仍然能看到"上次没做完的事"。
+  第 03 章的 TODO 是"当前会话的短期执行清单", 但 LLM 跑长任务
+  (1 小时跑测试 / 半天跑全项目扫描 / 3 天跑大型迁移) 时, session
+  早就关掉了, TODO 一起丢。 这一章加 <strong>Task 系统</strong>:
+  TaskGroup 持久化到 <code>.tasks/groups/*.json</code>, 跨 session
+  恢复, 带<strong>依赖图</strong> (task_2 blockedBy task_1) +
+  <strong>状态机</strong> (pending → in_progress → completed /
+  failed / cancelled) + <strong>派生 ready / blocked</strong>
+  (不写入磁盘, 读取时算) + <strong>audit events</strong> (轻量
+  审计线索)。 读完后, 你能讲清"Task vs TODO" 的边界 (跨会话持久
+  化 vs 当前 session), 并能用 tmp 目录验证"环依赖拒绝" +
+  "ready 派生正确" + "terminal status 后不可改" 3 条不变量。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-11">在第 11 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="real-failure">真实失败故事: session 关闭, 跑了 2 小时的任务状态全丢</h2>
 <p>
-  这一章在 Composition Root 加 task 持久化层。task 数据落盘到
-  <code>~/.claude/tasks/&lt;task-id&gt;.md</code> 这样的 markdown 文件, 包含
-  plan / status / dependencies / next action 几个字段。agent 主循环在
-  SessionStart 时把 active task 列表注入到 system prompt, 会话过程中 LLM 可通过
-  update_task 工具更新 task 状态。task 与 session TODO (第 03 章) 严格分离: TODO
-  是会话内清单, task 是跨会话 plan。 对应到代码, 改动集中在 3 个文件:
-  <code>src/tasks.ts</code> (新)、
-  <code>src/tools/update_task.ts</code> (新)、<code>src/agent.ts</code> (改
-  SessionStart 注入 task)。
+  写代码之前, 先看一个真实痛点。 用户的 team 用 harness 跑大型
+  迁移: "把 500 个 JS 文件转成 TS, 每天跑 1 小时, 5 天完成"。
+  团队 leader 看着第 1 天的 TODO 列表很开心, 关电脑下班。
+  第二天上班开 session, TODO 列表是空的, LLM 不知道"昨天转了
+  哪些文件" 也 "今天该从哪个开始"。
 </p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/tasks.ts: Task 持久化 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/task-store.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/task-store.ts: Task 存储后端 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
-    target="_blank"
-    rel="noreferrer"
-    >3. src/agent.ts: SessionStart 注入 active tasks</a
-  >
-</div>
-
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    用户周一开了 harness, 列了一周计划 (3 个 task), 周三处理完第 1 个。
-    周五回来, harness 完全不记得"还剩 2 个 task"。现象是"会话内 TODO OK, 跨会话
-    plan 缺失"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"task 写在 memory 里"。这有两个问题: 一是 memory 是
-    "用户级偏好" (例如"我喜欢简洁解释"), task 是"项目级 plan", 两者 职责不同;
-    二是 task 有 dependencies / status 字段, 写成 markdown
-    散文不适合状态机校验。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口:
-    <code
-      >interface TaskStore { get(id), list({status, scope}), update(id, patch)
-      }</code
-    >。 不变量三条: (1) task 数据结构化 (status / dependencies / next_action
-    字段化), 不写散文, (2) task 落盘走 atomic write (第 15 章), (3) SessionStart
-    注入 active task 时按 status 过滤, 只注入 pending / in_progress, 不注入
-    completed。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    fake taskStore 预设 3 个 task (1 pending, 1 in_progress, 1 completed), 跑完
-    SessionStart 注入, LLM 看到的 system prompt 含 2 个 task (pending +
-    in_progress), completed 不出现。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
-
-<div class="note">
-  <p class="note__title">观察 1 · task 写在 memory 里</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// 错误: 复用 memory 写 task
-await memoryStore.set("project", "project.tasks", `
-  1. 重构 user 组件 (status: in_progress)
-  2. 跑测试 (status: pending)
-  3. 部署 (status: pending)
-`);</code></pre>
-  <p><strong>问:</strong>为什么不复用 memory 写 task?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 职责: memory 是"用户级偏好", task
-    是"项目级 plan"; 结构: 散文无法做 status / dependencies 字段 校验, LLM
-    改写时容易写错; 状态: task 列表渲染时需要按 status 过滤, 散文做不到。
-  </p>
-</div>
-
-<div class="note">
-  <p class="note__title">观察 2 · 不区分 status, 所有 task 全量注入</p>
-  <pre class="code-block"><code>// 教学简化版
-const allTasks = await taskStore.list();
-const prompt = allTasks.map(t =&gt; `- ${t.id}: ${t.description}`).join("\n");</code></pre>
-  <p><strong>问:</strong>为什么不区分 status?</p>
-  <p>
-    <strong>答:</strong>completed task 不应该再被 LLM 看到, 注入会占用 context
-    还误导 LLM "这件事还没做完"。active 过滤是 harness 的 默认行为。
-  </p>
-</div>
-
-<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export type TaskStatus = "pending" | "in_progress" | "completed" | "cancelled";
-export type TaskScope = "user" | "project";
-
-export interface Task {
-  id: string;
-  scope: TaskScope;
-  title: string;
-  description: string;
-  status: TaskStatus;
-  dependencies: string[];       // 依赖的其他 task id
-  nextAction?: string;           // 下一步具体动作
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface TaskStore {
-  get(id: string): Promise&lt;Task | null&gt;;
-  list(filter?: { status?: TaskStatus; scope?: TaskScope }): Promise&lt;Task[]&gt;;
-  create(task: Omit&lt;Task, "id" | "createdAt" | "updatedAt"&gt;): Promise&lt;Task&gt;;
-  update(id: string, patch: Partial&lt;Task&gt;): Promise&lt;Task&gt;;
-  // 渲染 active task (pending + in_progress) 为 system prompt 片段
-  renderActive(): Promise&lt;string&gt;;
-}</code></pre>
-
-<h2 id="status-rules">status 状态机</h2>
 <ol>
-  <li>pending → in_progress (激活)</li>
-  <li>in_progress → completed (完成)</li>
-  <li>in_progress → pending (回退, 例如发现需要先做其他事)</li>
-  <li>pending / in_progress → cancelled (取消, 不再恢复)</li>
-  <li>
-    不允许 pending → completed (跳过 in_progress, 与第 03 章 TODO
-    状态机规则一致)
+<li>
+<strong>症状</strong>: 关闭 session = TODO 全丢, LLM 重复跑
+    已完成的文件 (浪费 token) 或跳过依赖未完成的文件 (出现
+    编译错误)。
+  </li>
+<li>
+<strong>根因</strong>: TODO 是 session 内存状态, 不持久化。
+    session 关闭 = TODO 数组销毁。
+  </li>
+<li>
+<strong>误诊</strong>: 团队以为是 LLM "忘了", 写复杂 prompt
+    让 LLM "记住" — LLM 没法跨 session 持久化, 写了也丢。
+  </li>
+<li>
+<strong>真正的修法</strong>: 持久化 Task 系统 — 任务组写到
+    <code>.tasks/groups/migration-001.json</code>, 跨 session
+    恢复; 任务带依赖图, LLM 知道"task_5 依赖 task_3, task_3
+    没完成所以 task_5 不能开始"; 状态机保证"completed 不能
+    变回 in_progress"。
   </li>
 </ol>
-
-<h2 id="loop-integration">loop 接入: SessionStart 注入 active task</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// SessionStart 阶段
-const activeTaskPrompt = await taskStore.renderActive();  // 仅 pending + in_progress
-const basePrompt = history.getSystemPrompt() ?? "";
-history.setSystemPrompt(`${basePrompt}\n\n# Active Tasks\n${activeTaskPrompt}`);
-
-// update_task 工具
-async function updateTask(args) {
-  // 状态机校验
-  const current = await taskStore.get(args.id);
-  if (!current) return { toolCallId: call.id, content: `Unknown task ${args.id}` };
-  if (current.status === "pending" &amp;&amp; args.status === "completed") {
-    return { toolCallId: call.id, content: `Error: cannot skip in_progress for ${args.id}` };
-  }
-  await taskStore.update(args.id, { status: args.status, ...args.patch });
-  return { toolCallId: call.id, content: `Task ${args.id} → ${args.status}` };
-}</code></pre>
-
-<h2 id="todo-vs-task">会话内 TODO vs 项目级 Task</h2>
-<dl class="defs">
-  <dt>会话内 TODO (第 03 章)</dt>
-  <dd>
-    短期, 当次会话用完即弃; 粒度细, 一行一个; 由 LLM 自由创建 / 修改;
-    状态机约束轻 (允许 pending → completed)。
-  </dd>
-  <dt>项目级 Task (本章)</dt>
-  <dd>
-    长期, 跨会话保留; 粒度粗, 一个 task 可以拆多个 TODO; 由 LLM 通过 update_task
-    工具改写; 状态机严格, 不允许 pending → completed。
-  </dd>
-</dl>
 <p>
-  两者不冲突: Task 是"项目级 plan", TODO 是"会话内 step"。LLM 在做 Task 时,
-  通常会拆出几个 TODO 放进会话内, 跑完一个 TODO 更新一次 Task status。
+  朴素想法 1: "把 TODO 写到磁盘不就行了?" 不够。 TODO 是
+  <strong>当前 session</strong> 的短期清单, 写磁盘变 <strong>长期
+  任务</strong>, 但 TODO 没<strong>依赖图</strong> (只能单
+  链表), 没<strong>状态机</strong> (状态字段是字符串, 任意改),
+  没<strong>audit event</strong> (谁改的不知道)。 Task 是新的
+  抽象, 不是"持久化的 TODO"。
 </p>
-
-<h2 id="trap">反例梯度</h2>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>task 写进 memory。</p>
-    <p>
-      <strong>为什么错:</strong>职责混淆, 结构化字段变成散文, 状态机校验失效。
-    </p>
-    <p>
-      <strong>正确做法:</strong>task 独立落盘, 结构化字段, 走 atomic write。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>不区分 status, completed task 仍然注入。</p>
-    <p><strong>为什么错:</strong>占 context, 误导 LLM 以为 task 没做完。</p>
-    <p>
-      <strong>正确做法:</strong>renderActive() 仅返回 pending + in_progress,
-      completed 过滤掉。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>update_task 跳过状态机校验。</p>
-    <p>
-      <strong>为什么错:</strong>LLM 倾向"全部勾选", 没有状态机就会 pending →
-      completed, 跳过了 in_progress。
-    </p>
-    <p>
-      <strong>正确做法:</strong>工具入口校验, 拒绝 pending → completed 跳跃, 写
-      error tool message。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>task id 由 LLM 自由发挥, 每次 update 都新建 id。
-    </p>
-    <p><strong>为什么错:</strong>同一个 task 变成多个, dependencies 失效。</p>
-    <p>
-      <strong>正确做法:</strong>id 由 harness 生成 (UUID / 时间戳), LLM
-      不允许自创 id, update 只能改 status / nextAction 等字段。
-    </p>
+<p>
+  朴素想法 2: "用数据库?" 太重。 教学项目要 <code>group.json</code>
+  + git 友好的纯文本, 不用 SQLite/Postgres。 规模也小 (一个项目
+  几个 group, 几十个 task), 内存里读 + 偶尔写磁盘完全够。
+</p>
+<p>
+  正确做法: 加 <code>src/tasks.ts</code> + <code>src/task-store.ts</code>
+  — TaskStore 管文件 IO, TaskManager 管业务规则 (状态机 + 依赖
+  校验 + activeTaskGroupId)。 这是 Reference 章节 "模式 7 ·
+  State Machine 状态机" + "模式 10 · Atomic Write 原子写" 的
+  联合应用。
+</p>
+<h2 id="task-vs-todo">Task vs TODO: 跨会话 vs 当前 session</h2>
+<p>
+  <strong>用途</strong>: 两个抽象职责正交, 不能互相替代。 任何
+  "应该持久化" 的事用 Task, "只是当前 session 短期跟踪" 用 TODO。
+  混淆会导致"重要任务被 TODO 化" 丢状态, 或"TODO 当 Task 用"
+  阻塞依赖检查。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户让 LLM "跑 5 天的迁移",
+  LLM 创建 TaskGroup "migration-001" 含 500 个 task, 每个
+  task_1 / task_2 / ... 标记依赖关系; 同一 session 内, LLM
+  同时维护一个 TODO 列表 "今天先跑 task_1 ~ task_50, 然后
+  看进度调整", TODO 是"今天的执行清单", Task 是"整个 5 天的
+  计划"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>职责正交, 数据隔离</strong> —
+  Task 持久化在 <code>.tasks/groups/</code>, TODO 在 session
+  内存; Task 有依赖图, TODO 是单链表; Task 有状态机, TODO 是
+  简单 3 状态 (pending / in_progress / done)。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L122"><code>src/tasks.ts</code> 第 122 行的教学导读注释</a>:
+</p>
+<pre><code class="language-typescript">// TaskManager 是持久化 Task 的业务层。
+// 它不关心 group.json 写在哪里, 也不关心 LLM tool 参数长什么样;
+// 它只负责长期任务组的状态机:
+// - 创建 group / task
+// - 校验依赖图
+// - 控制 task 状态转换
+// - 自动派生 group 完成状态
+//
+// 这和 todo.ts 的 session TODO 不同:
+// TODO 是当前会话的短期执行清单; Task 是跨会话、可恢复、带依赖图的长期计划。</code></pre>
+<div class="figure figure--compare">
+  <div class="figure__title">图 1 · Task vs TODO 的边界</div>
+  <div class="flow-compare">
+    <div class="flow-compare__col flow-compare__col--good">
+      <div class="flow-compare__head">Task · 跨会话持久化</div>
+      <div class="flow-compare__body">存在 <code>.tasks/groups/&lt;id&gt;.json</code>, 关闭 session 不丢。 带依赖图 (DAG) + 状态机 (6 态) + audit events。 适合跑 1 小时以上的任务。</div>
+    </div>
+    <div class="flow-compare__col flow-compare__col--bad">
+      <div class="flow-compare__head">TODO · session 内存</div>
+      <div class="flow-compare__body">存在 <code>history[]</code> 或 session state, 关闭 session 销毁。 单链表 + 3 态 (pending / in_progress / done)。 适合当前 turn 的执行清单。</div>
+    </div>
   </div>
 </div>
+<p>
+  <strong>实现细节</strong>: TaskStore 写 JSON 文件, TaskManager
+  不直接调 fs, 通过 store 接口。 这是 Reference 章节 "模式 1 ·
+  工厂 + 闭包" + "模式 10 · Atomic Write 原子写" 的应用 — store
+  接口可以换 (内存 / 文件 / git), TaskManager 不变。
+</p>
+<h2 id="group-structure">TaskGroup 结构: 1 group = 1 .json 文件</h2>
+<p>
+  <strong>用途</strong>: 1 个 TaskGroup 持久化到 1 个
+  <code>.tasks/groups/&lt;id&gt;.json</code> 文件, 方便 git diff
+  / review / 合并冲突解决。 1 个 group 包含 1 个 task 列表 + 1 个
+  events 列表 + 1 个 group 元数据。
+</p>
+<p>
+  <strong>真实场景</strong>: team 5 人同时编辑 "migration-001"
+  group (分配不同 task), 每人 commit 自己的 group.json 修改, PR
+  review 看 git diff 看清楚"谁加了什么 task / 谁改了什么状态"。
+  如果 1 个 group = 多个文件, 改 1 个 task 要改多个文件, 合并
+  冲突爆炸。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>人类可读 + git 友好</strong> —
+  JSON 格式, 字段顺序稳定, 多行 (task 数组每行 1 个), git diff
+  显示"task_3 状态从 in_progress 变 completed" 而不是"第 47 行
+  改了一个字符不知道改哪"。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L204"><code>src/tasks.ts</code> 第 204 行的 group 创建</a>:
+</p>
+<pre><code class="language-typescript">const group: TaskGroupFile = {
+  version: 1,
+  kind: "task_group",
+  id: groupId,
+  scope: projectRoots.length &gt; 1 ? "multi_project" : "project",
+  projectRoots,
+  title,
+  status: "active",
+  createdAt,
+  updatedAt: createdAt,
+  tasks,
+  events: [
+    { id: ..., type: "group_created", message: `Created task group: ${title}` },
+  ],
+};</code></pre>
+<p>
+  <strong>实现细节</strong>: <code>version: 1</code> 字段给未来 schema
+  迁移留空间; <code>kind: "task_group"</code> 字段防止和别的 JSON
+  文件 (memory / skill) 混淆; <code>scope</code> 字段标记单项目
+  vs 多项目 group, 决定依赖图校验规则。
+</p>
+<h2 id="state-machine">6 状态状态机: pending → in_progress → completed/failed/cancelled</h2>
+<p>
+  <strong>用途</strong>: 任务状态变化必须<strong>受控</strong>,
+  任意字符串改会破坏状态机 (LLM 可能写出"pending → completed →
+  pending" 的死循环, 没人能解释)。 6 状态是<strong>固定枚举</strong>,
+  转换规则<strong>显式定义</strong>。
+</p>
+<p>
+  <strong>真实场景</strong>: LLM 完成 task_3, 调
+  <code>updateTask(groupId, "task_3", {status: "completed"})</code>。
+  TaskManager 校验当前 status (in_progress) → 目标 status
+  (completed) 合法, 更新 + 写 event + 检查依赖 (task_5 现在
+  ready 了)。 如果 LLM 想"completed → pending" (回滚), TaskManager
+  拒绝并 throw。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>状态机 + 显式转换</strong> —
+  Reference 章节 "模式 7 · State Machine 状态机" 的应用。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L92"><code>src/tasks.ts</code> 第 92 行的 <code>TERMINAL_TASK_STATUSES</code></a>:
+</p>
+<pre><code class="language-typescript">const TERMINAL_TASK_STATUSES: ReadonlySet&lt;TaskStatus&gt; = new Set([
+  "completed", "cancelled", "deleted",
+]);
 
-<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
-<div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · 第 12 章</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>renderActive 过滤 completed:</strong>fake taskStore 预设 3 个 task
-      (1 pending, 1 in_progress, 1 completed), 跑完 SessionStart 注入, system
-      prompt 含 pending 和 in_progress, 不含 completed。
-    </p>
-    <p>
-      <strong>update_task 状态机校验:</strong>update_task 调用把 pending 直接
-      completed, 写 error tool message, task 状态不变。
-    </p>
-    <p>
-      <strong>task 落盘走 atomic write:</strong>spy 验证 update_task 走 write
-      tmp + fsync + rename 路径, 不直接改原文件。
-    </p>
-    <p>
-      <strong>dependencies 解析:</strong>fake taskStore 预设 task A 依赖 task B,
-      list({ status: "pending" }) 返回 A 和 B, A 的 dependencies 字段含 "B"。
-    </p>
-    <p>
-      <strong>completed task 不再注入:</strong>第二次 run() 把 task 改成
-      completed, 第三次 run() SessionStart, system prompt 不再 含这个 task。
-    </p>
+const STATUS_SYMBOLS: Record&lt;TaskStatus, string&gt; = {
+  pending: "[ ]",
+  in_progress: "[&gt;]",
+  completed: "[x]",
+  failed: "[!]",
+  cancelled: "[_]",
+  deleted: "[-]",
+};</code></pre>
+<div class="figure figure--stack">
+  <div class="figure__title">图 2 · 6 状态状态机 + 合法转换</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">pending · 未开始</div>
+      <div class="flow-stack__body">[ ] 初始状态。 可转 in_progress / cancelled / deleted。 不可直接 completed。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">in_progress · 进行中</div>
+      <div class="flow-stack__body">[&gt;] 正在做。 可转 completed / failed / cancelled / deleted。 不允许重复 in_progress。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--good">
+      <div class="flow-stack__label">completed · 已完成 (终态)</div>
+      <div class="flow-stack__body">[x] 成功。 不可转其他状态。 Group 派生完成状态时检查所有非 deleted task 都 completed。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">failed · 失败 (终态)</div>
+      <div class="flow-stack__body">[!] 失败。 不可转其他状态。 Group 派生完成状态时若仍有 in_progress 任务, 仍是 active。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">cancelled · 取消 (终态)</div>
+      <div class="flow-stack__body">[_] 用户取消。 不可转其他状态。 走 archive_group 才能清理磁盘。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">deleted · 删除 (终态)</div>
+      <div class="flow-stack__body">[-] 软删除。 不可转其他状态。 仍被其他 task 依赖时拒绝 delete (悬空引用)。</div>
+    </div>
   </div>
 </div>
+<p>
+  <strong>实现细节</strong>: 6 状态分两类 — 3 个非终态 (pending /
+  in_progress / ...), 3 个终态 (completed / cancelled / deleted)。
+  非终态可继续转换, 终态锁定。 状态转换在
+  <code>applyStatusTransition</code> 函数内显式定义, 不允许
+  <code>task.status = "..."</code> 直接赋值。
+</p>
+<h2 id="dependency-graph">依赖图: blockedBy + 环检测 + 悬空引用</h2>
+<p>
+  <strong>用途</strong>: task 之间有依赖 ("task_5 必须等 task_3
+  完成才能开始"), 用 <code>blockedBy: ["task_3"]</code> 表达。
+  依赖图必须<strong>无环</strong> + <strong>无悬空</strong> (引用
+  存在的 task), 否则 ready / blocked 派生状态无法解释。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户迁移 500 个 JS 文件, task_1
+  改 <code>src/a.js</code>, task_2 改 <code>src/b.js</code>
+  (依赖 task_1 因为 b.js import a.js), task_3 改
+  <code>src/c.js</code> (依赖 task_1)。 LLM 创建 group 后,
+  group.json 含依赖图; LLM 跑 task_1 完成, 系统自动
+  派生 task_2 / task_3 ready; LLM 跑 task_2 完成, 派生 task_3
+  (如果 task_1 也完成) ready。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>DAG 校验 + 派生状态</strong> —
+  Reference 章节 "模式 7 · State Machine 状态机" 的延伸。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L229"><code>src/tasks.ts</code> 第 229 行的 <code>ensureDependencyGraphValid</code></a>:
+</p>
+<pre><code class="language-typescript">// 创建时就检查依赖图, 避免把有环或引用不存在 task 的 group 写入持久化层。
+ensureDependencyGraphValid(group);</code></pre>
+<div class="figure figure--stack">
+  <div class="figure__title">图 3 · 依赖图校验的 3 条规则</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">规则 1 · 引用存在</div>
+      <div class="flow-stack__body">task_5.blockedBy 含 "task_99", 但 group 没 task_99。 拒绝创建, 错误 "blockedBy references missing task: task_99"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">规则 2 · 无环</div>
+      <div class="flow-stack__body">task_1.blockedBy=[task_2], task_2.blockedBy=[task_1]。 拒绝创建, 错误 "circular dependency detected: task_1 → task_2 → task_1"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">规则 3 · 不可删被依赖</div>
+      <div class="flow-stack__body">task_3 仍被 task_5 依赖 (task_5.blockedBy 含 task_3), 拒绝 delete task_3, 错误 "Cannot delete task_3; it is required by task_5"。</div>
+    </div>
+  </div>
+</div>
+<p>
+  <strong>实现细节</strong>: <code>ensureDependencyGraphValid</code>
+  在 <code>createGroup</code> / <code>addTask</code> /
+  <code>updateTask</code> 之后都跑一次, 保证任何修改后依赖图
+  都合法。 3 条规则对应 Reference 章节 "模式 15 · Identity Check
+  身份校验" 的应用。
+</p>
+<h2 id="derived-state">ready / blocks: 派生, 不写入磁盘</h2>
+<p>
+  <strong>用途</strong>: <code>ready</code> (任务是否可开始) 和
+  <code>blocks</code> (反向依赖, 谁依赖我) 是<strong>派生状态</strong>,
+  读取时算, 不写入磁盘。 写入磁盘会和 source-of-truth 冲突
+  (LLM 改 status 没及时 rebuild 派生)。
+</p>
+<p>
+  <strong>真实场景</strong>: LLM 调 <code>readGroup(groupId)</code>
+  拿到 <code>TaskGroupView</code>, 每个 task 有 <code>ready: true/false</code>
+  + <code>blocks: ["task_5"]</code>。 LLM 看到 task_3.ready=true
+  知道可以开始, 看到 task_3.blocks 含 task_5 知道"我完成会解锁
+  task_5"。 派生每次重算, 不存在"过期" 问题。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>派生数据, 不冗余</strong> —
+  磁盘只存 source-of-truth (status, blockedBy, ...), 派生
+  (ready, blocks, progress) 读取时算。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L432"><code>src/tasks.ts</code> 第 432 行的 <code>buildTaskGroupView</code></a>:
+</p>
+<pre><code class="language-typescript">function buildTaskGroupView(group: TaskGroupFile): TaskGroupView {
+  const completedIds = new Set(
+    group.tasks.filter((task) =&gt; task.status === "completed").map((t) =&gt; t.id),
+  );
+  const blocksById = new Map&lt;string, string[]&gt;();
+  for (const task of group.tasks) {
+    for (const dep of task.blockedBy) {
+      blocksByid.set(dep, [...(blocksById.get(dep) ?? []), task.id]);
+    }
+  }
+  const tasks: TaskView[] = group.tasks.map((task) =&gt; {
+    const missing = task.blockedBy.filter((id) =&gt; !completedIds.has(id));
+    return {
+      ...task,
+      blockedBy: [...task.blockedBy],
+      ready: task.status === "pending" &amp;&amp; missing.length === 0,
+      blocks: blocksById.get(task.id) ?? [],
+    };
+  });
+  return { group, tasks };
+}</code></pre>
+<p>
+  <strong>实现细节</strong>: <code>ready = (status === "pending") &amp;&amp; (blockedBy 都 completed)</code>,
+  这条规则让 LLM 跑完 task_1 立刻看到 task_2 / task_3 变 ready。
+  <code>blocks</code> 反向索引从 blockedBy 反推, LLM 知道"完成我
+  会解锁谁"。
+</p>
+<h2 id="events">audit events: 轻量审计线索</h2>
+<p>
+  <strong>用途</strong>: 每次业务修改 (创建 / 更新 / 删除 / 归档)
+  追加一条 event 到 group.events[], 含 id / timestamp / actor /
+  type / message。 审计线索轻量, 不驱动状态机, 只给"谁改了什么"
+  留记录。
+</p>
+<p>
+  <strong>真实场景</strong>: team leader 想知道"task_3 谁改的
+  completed", 看 group.events 找到
+  <code>{actor: "main", type: "task_updated", message: "Updated task_3", timestamp: "2026-06-12T10:00"}</code>。
+  actor 标记 "main" (主 agent) 或未来 "subagent:explore" /
+  "user" 等, 帮助定位责任。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>事件流, 不状态机</strong> —
+  events 是<strong>追加日志</strong>, 不参与 status 决策; status
+  仍以 task.status 字段为准。 这是 Reference 章节 "模式 10 ·
+  Atomic Write 原子写" 的延伸 — event 跟着 group 一起写, 不
+  单独 append (单独 append 会破坏原子性)。
+</p>
+<p>
+  <strong>实现细节</strong>: 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L143"><code>src/tasks.ts</code> 第 143 行的 <code>createEvent</code></a>
+  — event id 用 <code>event_${Date.now()}_${random}</code> 生成,
+  教学版够用; 工业版应该用 ULID 之类保证排序稳定。
+</p>
+<h2 id="active-id">activeTaskGroupId: session 级轻状态, 不持久化</h2>
+<p>
+  <strong>用途</strong>: "当前正在关注哪个 group" 是 session 级
+  状态, 不写磁盘。 activeTaskGroupId 是 LLM 调
+  <code>readGroup(id)</code> 后自动 set, 工具输出和 reminder
+  告诉模型"现在关注这个 group"。
+</p>
+<p>
+  <strong>真实场景</strong>: user 跑 "migration-001" 跑到一半
+  session 关闭, 下次开 session 不知道"我之前在跑什么"。 应该
+  user 主动 <code>setActiveGroupId("migration-001")</code> 或
+  工具调 <code>readGroup("migration-001")</code> 自动 set,
+  reminder 告诉 LLM "现在关注 migration-001, 进度 50/500"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>轻状态, 不持久化</strong> —
+  activeTaskGroupId 是 <strong>指针</strong>, 真实数据在磁盘
+  group.json; session 关闭指针丢, 数据不丢。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L137"><code>src/tasks.ts</code> 第 137 行</a>:
+</p>
+<pre><code class="language-typescript">// activeTaskGroupId 是 session 级状态, 不写入磁盘。
+// 它只是帮助工具输出和 reminder 告诉模型"当前正在关注哪个长期任务组"。
+let activeTaskGroupId: string | null = null;</code></pre>
+<p>
+  <strong>实现细节</strong>: <code>readGroup()</code> / <code>createGroup()</code>
+  自动 set, <code>setActiveGroupId(null)</code> 显式清空; 设置
+  前先 <code>store.read(groupId)</code> 验证 group 存在, 避免
+  指针指向不存在的持久化对象。
+</p>
+<h2 id="format">formatTaskGroupView: 状态符号 + 进度条</h2>
+<p>
+  <strong>用途</strong>: 给 LLM / 用户读的人类可读格式 — 每个
+  task 一行, 用状态符号 ([ ] / [>] / [x] / [!] / [_] / [-])
+  + owner + blockedBy + note, 末尾进度条
+  (completed/total, in_progress, ready, blocked)。
+</p>
+<p>
+  <strong>真实场景</strong>: LLM 调 <code>formatTaskGroupView(view)</code>
+  拿到一段字符串塞回 conversation, 让 LLM 看到"task_3 [>] 正在做,
+  blockedBy task_1 (未完成), 进度 50/500"。 LLM 据此决定下一步
+  (完成 task_1 或等 task_1)。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>结构化文本</strong> — 用
+  状态符号 + 缩进表达层级, 不用表格 (markdown 表格 LLM 不易
+  parse)。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L400"><code>src/tasks.ts</code> 第 400 行的 <code>formatTaskGroupView</code></a>:
+</p>
+<pre><code class="language-typescript">export function formatTaskGroupView(view: TaskGroupView): string {
+  const { group, tasks } = view;
+  const lines = [`[${group.status}] ${group.id}: ${group.title}`];
+  for (const task of tasks) {
+    const symbol = task.ready &amp;&amp; task.status === "pending" ? "[?]" : STATUS_SYMBOLS[task.status];
+    lines.push(`${symbol} ${task.id}: ${task.subject}`);
+    lines.push(`    owner: ${task.owner}`);
+    lines.push(`    blockedBy: ${task.blockedBy.length &gt; 0 ? task.blockedBy.join(", ") : "-"}`);
+    if (task.blockedReason) lines.push(`    blocked: ${task.blockedReason}`);
+    if (task.note) lines.push(`    note: ${task.note}`);
+  }
+  const progress = computeTaskGroupProgress(group);
+  lines.push(`progress: ${progress.completed}/${progress.total} completed, ...`);
+  return lines.join("\n").trimEnd();
+}</code></pre>
+<p>
+  <strong>实现细节</strong>: <code>[?]</code> 符号表示"ready
+  但 pending" (派生状态), <code>[ ]</code> 表示"pending 但
+  仍 blocked" (派生状态), 让 LLM 一眼区分"现在能跑" vs "现在
+  跑不了"。
+</p>
+<h2 id="loop-integration">主循环集成: reminder 注入 active group</h2>
+<p>
+  <strong>用途</strong>: TaskManager 在 Composition Root 创建,
+  注入 agent 主循环; 每轮 LLM 调用前, reminder 注入
+  "[active group: migration-001, progress 50/500, next ready:
+  task_51, task_52]"。 让 LLM 知道"我之前在跑什么, 接下来
+  该跑什么"。
+</p>
+<p>
+  <strong>真实场景</strong>: 5 天迁移, 每天开 session 看到
+  reminder "active: migration-001, progress 100/500,
+  next ready: task_101, task_102"。 LLM 直接接着跑, 不用
+  问 "我之前到哪了"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>主动告知 vs 被动查询</strong> —
+  reminder 主动注入 (LLM 不需要问), 工具被动查询 (LLM 主动
+  调 <code>readGroup</code> 拿完整列表)。 两者配合, LLM 不会
+  丢上下文。
+</p>
+<p>
+  <strong>实现细节</strong>: reminder 在 agent.ts 第 3 步前生成,
+  类似 TODO reminder (第 03 章), 拼到 user message 末尾。
+  reminder 内容只含"active group + progress + next 3 ready
+  task", 不含完整 task 列表 (避免 history 撑爆)。
+</p>
+<h2 id="fake-test">fake test: 用 tmp 目录 + 内存 store 覆盖 3 条不变量</h2>
+<p>
+  <strong>用途</strong>: TaskManager 测试用<strong>真实 tmp
+  目录 + 文件 store</strong>, 不需要 mock fs (mock fs 的
+  行为和真实 fs 微妙不同, 反而测不准)。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户写测试覆盖 3 条不变量:
+  (a) 创建 group 含环依赖 → throw; (b) task_1 pending, task_2
+  blockedBy task_1, task_1 completed → task_2 ready 派生; (c)
+  task_3 completed 后 update status → throw。
+</p>
+<pre><code class="language-typescript">test("环依赖拒绝", () =&gt; {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "task-test-"));
+  const store = createFileTaskStore({ dir });
+  const mgr = createTaskManager({ store, projectRoot: dir });
+  expect(() =&gt; mgr.createGroup({
+    title: "x",
+    tasks: [
+      { subject: "a", blockedBy: ["task_2"] },
+      { subject: "b", blockedBy: ["task_1"] },
+    ],
+  })).toThrow(/circular dependency/);
+});
 
-<h2 id="lookback">回望第 00–11 章: 哪些原则在本章兑现了</h2>
+test("ready 派生: task_1 完成, task_2 变 ready", () =&gt; {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "task-test-"));
+  const store = createFileTaskStore({ dir });
+  const mgr = createTaskManager({ store, projectRoot: dir });
+  const group = mgr.createGroup({
+    title: "x",
+    tasks: [
+      { subject: "a" },
+      { subject: "b", blockedBy: ["task_1"] },
+    ],
+  });
+  // 初始 task_2.ready=false
+  let view = mgr.readGroup(group.id)!;
+  expect(view.tasks[1]!.ready).toBe(false);
+  // 完成 task_1
+  mgr.updateTask(group.id, "task_1", { status: "in_progress" });
+  mgr.updateTask(group.id, "task_1", { status: "completed" });
+  // 派生 task_2.ready=true
+  view = mgr.readGroup(group.id)!;
+  expect(view.tasks[1]!.ready).toBe(true);
+});
+
+test("终态后不可改", () =&gt; {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "task-test-"));
+  const store = createFileTaskStore({ dir });
+  const mgr = createTaskManager({ store, projectRoot: dir });
+  const group = mgr.createGroup({ title: "x", tasks: [{ subject: "a" }] });
+  mgr.updateTask(group.id, "task_1", { status: "in_progress" });
+  mgr.updateTask(group.id, "task_1", { status: "completed" });
+  expect(() =&gt; mgr.updateTask(group.id, "task_1", { status: "in_progress" }))
+    .toThrow(/terminal status/);
+});</code></pre>
+<p>
+  <strong>实现细节</strong>: 3 个测试覆盖 (a) 环依赖校验,
+  (b) ready 派生, (c) 终态锁定。 真实 tmp 目录, 测完清理,
+  不污染环境。
+</p>
+<h2 id="common-confusion">常见误解: Task 不替代数据库</h2>
+<p>
+  <strong>误解 1: "Task 替代数据库?"</strong> 不替代。 Task 是
+  跨会话<strong>任务计划</strong>, 不是通用数据存储。 想要
+  通用数据库, 用 SQLite / Postgres, Task 不该滥用。
+</p>
+<p>
+  <strong>误解 2: "ready 字段写入磁盘?"</strong> 错。 ready 是
+  派生状态, 读取时算。 写入会和 source-of-truth (status) 冲突。
+</p>
+<p>
+  <strong>误解 3: "completed 状态能回滚到 pending?"</strong>
+  错。 3 个终态 (completed / cancelled / deleted) 不可转。
+  "我改主意了" 也不行, 要回滚就新建 group。
+</p>
+<p>
+  <strong>误解 4: "events 数组能 1000+ 条?"</strong> 性能 OK
+  但 git diff 难读。 50 个 task 的 group 大约 100 个 event, 工业
+  规模建议定期 archive 旧 group, 不让 events 无限增长。
+</p>
+<h2 id="trap">反例梯度: 4 个常见错误</h2>
+<div class="cards-grid">
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 1 · 环依赖接受</span></div>
+    <div class="card__body">
+      <p>LLM 创建 group, task_1.blockedBy=[task_2], task_2.blockedBy=[task_1],
+        TaskManager 不校验就写磁盘。 错。 环依赖导致 ready 派生
+        死循环 (task_1 等 task_2, task_2 等 task_1, 永远没 ready)。
+        正确: <code>ensureDependencyGraphValid</code> 在 create / addTask /
+        updateTask 后都跑一次, 检测到环 throw, 拒绝写磁盘。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 2 · 终态可改</span></div>
+    <div class="card__body">
+      <p>TaskManager 不限制状态转换, LLM 想 completed → pending
+        直接改。 错。 状态机失去意义, audit trail 出现"completed
+        → pending → in_progress → completed" 死循环, 没人能
+        解释。 正确: <code>applyStatusTransition</code> 检查当前
+        status 是不是终态, 终态拒绝任何转换, throw。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 3 · ready 写入磁盘</span></div>
+    <div class="card__body">
+      <p>把 ready 字段写入 group.json, LLM 改 status 时同步改 ready。
+        错。 双写导致不一致 (改 status 忘改 ready, 或反过来)。
+        正确: 磁盘只存 source-of-truth (status, blockedBy), 派生
+        (ready, blocks, progress) 读取时算, <code>buildTaskGroupView</code>
+        永远从 status 重算。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 4 · activeTaskGroupId 写磁盘</span></div>
+    <div class="card__body">
+      <p>把 activeTaskGroupId 存到 <code>.tasks/active.json</code>,
+        跨 session 复用。 错。 active 是 session 级<strong>指针</strong>,
+        不是数据; 写到磁盘会和"哪个 group 重要" 的逻辑耦合 (用户
+        关 session 1 个月后回来, active group 可能已 archive)。
+        正确: activeTaskGroupId 是闭包内状态, session 关闭丢;
+        用户新 session 主动 <code>setActiveGroupId(...)</code>。</p>
+    </div>
+  </div>
+</div>
+<h2 id="validate">Validation: 4 条不变量检验</h2>
+<ol>
+<li>
+<strong>依赖图无环无悬空</strong>: 创建 group / addTask / updateTask
+    后, 跑 <code>ensureDependencyGraphValid</code>, 含环或悬空
+    引用 throw。 验证: 3 个 case (环 / 引用不存在 / 引用已
+    deleted), 全部 throw。
+  </li>
+<li>
+<strong>ready 派生正确</strong>: task_X 状态从 pending 变
+    completed, 所有 blockedBy 含 task_X 的 task, 派生 ready
+    变 true (假设其他 blocker 也 completed)。 验证: 创建 3
+    个 task (1 独立, 2 依赖 1, 3 依赖 2), 完成 1 后 task_2
+    ready, 完成 2 后 task_3 ready。
+  </li>
+<li>
+<strong>终态锁定</strong>: 3 个终态 (completed / cancelled /
+    deleted) 任何 update 都 throw。 验证: 3 个 case, update
+    status / owner / note / blockedBy 全部 throw。
+  </li>
+<li>
+<strong>删除仍被依赖的任务拒绝</strong>: task_X 仍被
+    task_Y.blockedBy 引用, delete task_X throw。 验证: 创建
+    2 个 task (2 依赖 1), 试图 delete task_1, 错误含
+    "required by task_2"。
+  </li>
+</ol>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
 <ul>
-  <li>
-    <strong>事实与视图分离:</strong>task 是结构化数据 (status / dependencies
-    字段), renderActive 是视图, 视图按 status 过滤不影响事实。
+<li>
+<strong>状态机 + 显式转换</strong>: 6 状态固定枚举, 转换规则
+    <code>applyStatusTransition</code> 显式定义, 终态锁定。
   </li>
-  <li>
-    <strong>状态机约束:</strong>第 03 章 TODO 状态机 + 本章 task 状态机,
-    一致的设计哲学。
+<li>
+<strong>DAG 校验</strong>: 引用存在 + 无环 + 不可删被依赖, 3 条
+    规则在 create / addTask / updateTask 后都跑。
   </li>
-  <li>
-    <strong>Composition Root 唯一接线:</strong>taskStore 在
-    <code>index.ts</code> 创建, 注入 agent。
+<li>
+<strong>派生不写入</strong>: ready / blocks / progress 读取时
+    算, 磁盘只存 source-of-truth。
   </li>
-  <li>
-    <strong>稳定前缀原则:</strong>task 拼到 system prompt 的固定位置 "# Active
-    Tasks", prefix 锚点稳定, 第 10 章的伏笔。
+<li>
+<strong>事件流</strong>: events 是追加日志, 不驱动状态机, 给
+    "谁改了什么" 留审计线索。
+  </li>
+<li>
+<strong>职责分离</strong>: TaskStore 管文件 IO, TaskManager 管
+    业务规则, store 可换 (内存 / 文件 / git) 不影响 manager。
   </li>
 </ul>
-
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
-  <dt>task 跨进程冲突</dt>
-  <dd>第 15 章 atomic-write 兜底, task 写新文件 + rename, 不直接改原文件。</dd>
-  <dt>task 与 async run 协作</dt>
-  <dd>
-    第 13 章 async run 完成后, 通知 LLM "task X 已完成, 接下来做 Y", reminder
-    注入。
+<dt>并发执行多个 task</dt>
+<dd>
+    当前 task 一个一个跑 (LLM 按 ready 顺序). 多 task 并发
+    跑是第 13 章 Async Run 的范畴, 涉及并发限制 + 输出隔离。
   </dd>
-  <dt>task 与 schedule 协作</dt>
-  <dd>
-    第 14 章 schedule 定时检查 task dependencies, 满足条件时自动激活下一个
-    task。
+<dt>定时 / 周期跑 task</dt>
+<dd>
+    当前 task 跑完即结束. 想要"每天 9 点跑一次全项目测试"
+    是第 14 章 Schedule 的范畴, 复用 Async Run 作为执行单元。
   </dd>
-  <dt>task 太多怎么办</dt>
-  <dd>
-    task 累积到 50+ 时, SessionStart 注入也会撑爆, 需要按 status / scope
-    进一步分页, 类似第 06 章 compress 思路。
+<dt>Task 与子 agent 配合</dt>
+<dd>
+    LLM 想"派子 agent 跑 task_3", 子 agent 跑完更新 task_3.status。
+    这涉及 subagent 边界 + 错误传播 (第 11 章延伸), 留 P2
+    阶段。
   </dd>
 </dl>
-
-<h2 id="vibe-coding-12">本次如何 vibe code: 第 12 章的三件套</h2>
-
-<h3 id="vibe-feed-12">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>Task</code> /
-    <code>TaskStore</code> / <code>TaskStatus</code> 三个 interface,
-    以及状态机规则文档。本轮不写实现, 重点钉"结构化字段" 和"状态机约束"。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
-    <code>createTaskStore()</code> 接受目录, SessionStart 注入仍是 stub
-    (永远注入空 task 列表)。本轮 review 重点: taskStore 实例在
-    <code>index.ts</code> 只 new 一次。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createTaskStore + update_task
-    工具 + agent.SessionStart 接入。本轮 review 重点: renderActive 过滤
-    completed, 状态机校验, atomic write。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。让 LLM 写
-    <code>test/tasks.test.ts</code>。本轮 review 重点: "renderActive 过滤
-    completed" 和 "update_task 状态机校验" 两条必须有反向断言。
-  </li>
-</ol>
-
-<h3 id="vibe-review-12">Review: 第 12 章专属 checklist</h3>
-<ol>
-  <li>
-    <strong>task 独立于 memory。</strong>不写在 memoryStore 里。验证:
-    <code>grep -n 'memoryStore' src/tasks.ts</code> 应当 0 行。
-  </li>
-  <li>
-    <strong>renderActive 过滤 completed。</strong>renderActive() 实现内 filter
-    status 不含 completed。验证:
-    <code>grep -n 'completed' src/tasks.ts</code> 在 renderActive() 函数体内应当
-    0 行 (filter 排除)。
-  </li>
-  <li>
-    <strong>update_task 状态机校验在工具入口。</strong>不是上层 agent
-    校验。验证:
-    <code>grep -n 'pending.*completed' src/tools/update_task.ts</code> ≥ 1 行。
-  </li>
-  <li>
-    <strong>task id 由 harness 生成。</strong>LLM 不允许自创 id。验证:
-    <code>grep -n 'crypto.randomUUID\|uuidv4' src/tasks.ts</code> ≥ 1 行 (id
-    生成器)。
-  </li>
-  <li>
-    <strong>taskStore 工厂化。</strong>验证:
-    <code>grep -n 'new TaskStore' src/</code> 应当 0 行。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-12">调试: 第 12 章典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · renderActive 不过滤 completed。</strong>症状: 注入 system
-    prompt 时所有 task 都出现。验证: Validation 卡片"renderActive 过滤
-    completed" 那条测试通过。
-  </li>
-  <li>
-    <strong>伪装 B · update_task 不校验状态机。</strong>症状: LLM 调 update_task
-    把 pending 直接 completed。验证: Validation 卡片"update_task 状态机校验"
-    那条测试通过 (写 error tool message)。
-  </li>
-  <li>
-    <strong>伪装 C · LLM 自由生成 task id。</strong>症状: update_task
-    工具接受任意 id 字符串, LLM 写 "task-1" / "task-2" 这种自由 id。验证:
-    <code>grep -n 'args.id\|taskId' src/tools/update_task.ts</code> 看是否走
-    harness 生成的 id, 还是直接用 LLM 传的字符串。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-12">迭代: 第 12 章 4 个 commit 节点</h3>
-<ol>
-  <li>
-    <code>feat(ch12): 钉 Task / TaskStore / TaskStatus 接口与状态机规则</code>
-    —— tsc 通过, 无实现。
-  </li>
-  <li>
-    <code>feat(ch12): createTaskStore 工厂 + update_task 工具 stub</code> —— tsc
-    通过, 写空文件。
-  </li>
-  <li>
-    <code
-      >feat(ch12): renderActive 过滤 + 状态机校验 + atomic write + SessionStart
-      注入</code
-    >
-    —— 跑通 Validation 卡片前 4 条。
-  </li>
-  <li>
-    <code>test(ch12): completed 不再注入 + dependencies 解析</code> —— 全绿。
-  </li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
   <div class="card__head">
     <span class="card__tag">Prompt Card · 第 12 章</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
+    <button class="card__copy" data-copy-card="" type="button">复制</button>
   </div>
   <div class="card__body">
-    <p>
-      <strong>目标:</strong>实现 Persistent Task 模块, 跨会话保留项目级 plan,
-      区分会话内 TODO 和项目级 task。
-    </p>
-    <p>
-      <strong>场景:</strong>用户周一创建 3 个 task (重构 / 跑测试 / 部署),
-      周三完成第 1 个, 周五回来 harness 仍然能列出 "Active Tasks: 跑测试, 部署"
-      两条。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/tasks.ts</code> (新) 暴露
-      <code>createTaskStore()</code>; <code>src/task-store.ts</code> (新)
-      实现存储后端; <code>src/tools/update_task.ts</code> (新) 实现工具;
-      <code>src/agent.ts</code> 改 SessionStart 注入 active tasks;
-      <code>src/index.ts</code> 接线 taskStore。
-    </p>
+    <p><strong>目标:</strong> 给 harness 加持久化 Task 系统, TaskGroup
+      写到 .tasks/groups/&lt;id&gt;.json, 跨 session 恢复, 带依赖
+      图 + 状态机 + 派生 ready/blocks + audit events。</p>
+    <p><strong>场景:</strong> 5 天迁移 500 个 JS → TS, LLM 创建
+      migration-001 group 含 500 个 task, task_5 blockedBy
+      [task_1, task_3], LLM 跑 task_1 完成, 系统派生 task_2
+      ready, LLM 跑 task_3 完成, task_5 变 ready, 关 session
+      不丢状态。</p>
+    <p><strong>模块:</strong> <code>src/task-store.ts</code> (新)
+      文件 IO; <code>src/tasks.ts</code> (新) 暴露
+      <code>createTaskManager({store, projectRoot})</code> +
+      <code>formatTaskGroupView(view)</code>; <code>src/agent.ts</code>
+      (改) reminder 注入 active group + 进度。</p>
     <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
     <ul>
-      <li>task 独立于 memory, 不写进 memoryStore</li>
-      <li>renderActive() 过滤 completed, 只返回 pending + in_progress</li>
-      <li>update_task 状态机校验: 拒绝 pending → completed 跳跃</li>
-      <li>task id 由 harness 生成 (UUID), LLM 不允许自创</li>
-      <li>task 落盘走 atomic write</li>
+      <li>6 状态固定枚举 pending / in_progress / completed / failed / cancelled / deleted, 不可新增</li>
+      <li>3 个终态 (completed / cancelled / deleted) 不可转其他状态, 任何 update throw</li>
+      <li>依赖图无环 + 无悬空, create / addTask / updateTask 后 ensureDependencyGraphValid 必跑</li>
+      <li>ready / blocks / progress 派生状态不写入磁盘, 读取时 buildTaskGroupView 算</li>
+      <li>activeTaskGroupId 是 session 级闭包内状态, 不写磁盘, 不持久化</li>
+      <li>events 是追加日志, 不驱动状态机, id 用 event_${ts}_${random} 生成</li>
+      <li>删除被依赖 task throw, 错误信息含 "required by" + 任务列表</li>
     </ul>
-    <p><strong>验证 (用 fake taskStore + spy, 逐条落到 vitest):</strong></p>
+    <p><strong>验证 (用 tmp 目录 + FileTaskStore + vitest, 逐条断言):</strong></p>
     <ul>
-      <li>
-        fake 预设 3 个 task (pending / in_progress / completed), renderActive()
-        只返回前 2 个
-      </li>
-      <li>
-        update_task 把 pending 直接 completed, 写 error tool message, task
-        状态不变
-      </li>
-      <li>spy 验证 update_task 走 write tmp + fsync + rename 路径</li>
-      <li>fake 预设 task A 依赖 B, A.dependencies 字段含 "B"</li>
-      <li>
-        把 task 改成 completed 后, 下次 SessionStart system prompt 不再含这个
-        task
-      </li>
+      <li>环依赖 create throw, 错误信息含 "circular dependency"</li>
+      <li>引用不存在的 task throw, 错误信息含 "references missing task"</li>
+      <li>task_1 pending → in_progress → completed, 派生 task_2.ready 变 true</li>
+      <li>completed 后 updateTask({status: "in_progress"}) throw, 错误信息含 "terminal status"</li>
+      <li>delete task_1 但 task_2 仍依赖, throw, 错误信息含 "required by task_2"</li>
     </ul>
   </div>
 </div>
-
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    故意让 renderActive 不过滤 completed, 跑测试, 看"renderActive 过滤
-    completed" 是否抓到。
+<li>
+    故意不写 <code>ensureDependencyGraphValid</code>, 创建含环
+    依赖的 group, 跑测试, 看"环依赖拒绝" 是否抓到 (group 写到
+    磁盘 vs. throw)。
   </li>
-  <li>
-    在 update_task 里不校验状态机, 跑测试, 看"update_task 状态机校验" 是否抓到。
+<li>
+    故意不在 <code>applyStatusTransition</code> 检查终态, 跑
+    completed → pending 测试, 看"终态锁定" 是否抓到 (改成功 vs.
+    throw)。
   </li>
-  <li>
-    让 LLM 自由生成 task id (不调 harness 的 id 生成器), 跑测试, 看"task id 由
-    harness 生成" 是否抓到 (deps 解析会失败)。
+<li>
+    把 ready 字段加到 TaskItem 接口, 写磁盘, 跑 ready 派生测试,
+    看"派生不写入" 是否抓到 (磁盘 ready 过期 vs. 派生重算一致)。
+  </li>
+<li>
+    把 activeTaskGroupId 存到 <code>.tasks/active.json</code>,
+    重启 session 看 active 是否恢复, 看"active 不持久化" 是否
+    抓到 (新 session 应该没有 active, 让用户主动 set)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本章给 harness 加了 Persistent Task 模块, 跨会话保留项目级 plan。 task
-  是结构化数据 (status / dependencies 字段), 与会话内 TODO 严格分离, 走 atomic
-  write 落盘。下一章 (第 13 章) 我们会处理"长 任务不阻塞主 loop" 的问题——Async
-  Run, 让 agent.run() 内部 启动后台任务, 主 loop 继续等用户输入,
-  后台任务完成时通过 reminder 通知。
+  Task 是给跨会话<strong>长期任务</strong>的持久化系统, 区别
+  于 TODO 的 session 内存清单。 核心是 5 个设计:
 </p>
-
-<h2 id="next">下一章伏笔</h2>
+<ul>
+<li>
+<strong>6 状态状态机</strong>: pending / in_progress / 3 个终态,
+    显式转换, 终态锁定。
+  </li>
+<li>
+<strong>DAG 依赖图</strong>: 引用存在 + 无环 + 不可删被依赖,
+    <code>ensureDependencyGraphValid</code> 3 处必跑。
+  </li>
+<li>
+<strong>派生不写入</strong>: ready / blocks / progress 读取时算,
+    磁盘只存 source-of-truth, 双写会冲突。
+  </li>
+<li>
+<strong>audit events</strong>: 追加日志, 不驱动状态机, 给 "谁改
+    了什么" 留线索。
+  </li>
+<li>
+<strong>职责分离</strong>: TaskStore 管文件, TaskManager 管业务,
+    store 可换, manager 不变。
+  </li>
 <p>
-  第 12 章让 harness 有了跨会话 plan, 但 plan 里的"长任务" (例如 "跑 5
-  分钟测试") 仍然会阻塞主 loop。下一章 Async Run 会让 agent.run()
-  内部启动后台任务, 主 loop 继续工作, 后台任务完成 时通过 reminder 通知
-  LLM。这是 harness 第一次具备"并行处理" 能力。
+  下一章 (第 13 章) 展开 Task 的<strong>并发执行</strong> —
+  LLM 跑长任务时怎么"同时跑 3 个独立 task, 不阻塞主对话", 用
+  Async Run Manager + 并发限制 3 + 输出隔离。
 </p>

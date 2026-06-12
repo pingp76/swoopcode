@@ -1,542 +1,716 @@
 <p class="article__eyebrow">第 07 章 · 给工具画边界</p>
-<h1 class="article__title">在工具执行前同步拦截: Permission</h1>
+<h1 class="article__title">Permission: 工具调用前要不要问人</h1>
 <p class="article__lede">
-  前面六章让 harness 能聊天、能调工具、能跑子任务、能压缩 context。但 LLM
-  仍然可能发出"删除项目根目录" 这样的危险命令。这一章给 harness 加 权限管理:
-  在工具执行前同步拦截, 通过 schema 校验 + 用户确认 + 路径边界 三个机制, 让
-  harness 在模型与真实世界之间加一道可观察屏障。
+  第 06 章的压缩解决了"context 撑爆" 问题, 但 harness 现在能调
+  <code>run_write</code> / <code>run_bash</code> 改文件, 没人把关的话, LLM 可能误删 /
+  误改重要文件。 这一章给 harness 加 Permission 系统: 三种模式
+  (plan / auto / default), 黑白名单, 路径边界, ask 降级。 读完后,
+  你能讲清"plan 模式" 和 "default 模式" 的区别, 并能用 fake terminal
+  验证"ask 时被拒, tool result 写 Permission denied" 的协议。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-06">在第 06 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="real-failure">真实失败故事: 跑 5 分钟测试卡死主循环</h2>
 <p>
-  这一章在 agent 主循环的工具执行分支里加 permission 检查。loop 跑到 "调 LLM →
-  拿到 tool_calls → 准备执行" 时, 每条 tool_call 都先过 permission.check(), 根据
-  action (allow / ask / deny) 决定直接执行、 询问用户、写 error tool
-  message。permission 策略在 Composition Root 注入, 工具 schema 在 permission
-  模块里被复用做参数级校验。 对应到代码, 改动集中在 3 个文件:
-  <code>src/permission.ts</code> (新)、
-  <code>src/agent.ts</code> (改工具执行分支)、<code>src/index.ts</code>
-  (改接线, 注入 permissionManager)。
-</p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/permission.ts"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/permission.ts: 权限决策模块 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/agent.ts: 工具执行前同步检查</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/command-safety.ts"
-    target="_blank"
-    rel="noreferrer"
-    >3. src/command-safety.ts: 危险命令检测 (新)</a
-  >
-</div>
-
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    LLM 接到"清理临时文件" 的指令, 可能输出 "rm -rf /tmp/*"。如果 harness 不拦,
-    项目目录可能一起被删。现象是"模型把工具当成了万能接口, 任何指令
-    都直接落到真实世界"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"完全信任 LLM 输出, 直接执行"。这有两个问题: 一是 LLM
-    生成的文本可能包含危险命令 (例如 "rm -rf"、 "sudo"), 二是 LLM
-    不会做"路径是否在项目内" 的判断, 可能误删系统目录。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口:
-    <code
-      >interface PermissionManager { check({toolName, args}): Decision }</code
-    >。 不变量三条: (1) permission 在工具 execute 之前同步执行, 不允许异步延后,
-    (2) 危险命令 deny 之后必须写 tool message 告诉 LLM, 不允许沉默拒绝, (3)
-    用户确认 (ask) 必须在工具 execute 之前, 不能"先执行再撤销"。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    fake registry 暴露一个 run_bash 工具, fake permission 配置 "rm -rf" 为 deny,
-    跑完后 history 末尾有 tool message 描述 "Permission denied: rm -rf in args",
-    registry.execute 没被调用 (用 spy 验证)。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
-
-<div class="note">
-  <p class="note__title">观察 1 · 危险命令过滤写在工具 execute 内</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// 错误位置: 写在工具内部
-async function runBash(args) {
-  if (args.cmd.includes("rm -rf")) throw new Error("blocked");
-  return await exec(args.cmd);
-}</code></pre>
-  <p><strong>问:</strong>为什么不写在工具内部, 而要单独搞 permission 模块?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 复用: 每个工具都要写一遍"危险模式"
-    检查, 30 个工具就有 30 处 if; 测试: 工具单测要同时测"正常情况" 和
-    "permission 拒绝" 两条路径; 策略: 用户无法集中管理"我允许 / 我禁止"
-    的工具列表, 只能改源代码。
+  写代码之前, 先看一个真实场景。 跑一段真实场景: 用户用 harness 跑一个
+  "全项目 e2e 测试", 命令是 <code>npm run test:e2e</code>, 跑 5 分钟。
   </p>
-</div>
-
-<div class="note">
-  <p class="note__title">观察 2 · 异步延后 permission 检查</p>
-  <pre class="code-block"><code>// 教学简化版
-const result = await tool.execute(args);  // 先执行
-permission.check({ toolName, args }).then(decision =&gt; {
-  if (decision.action === "deny") rollback(result);  // 再撤销
-});</code></pre>
-  <p><strong>问:</strong>为什么不"先执行再撤销"?</p>
-  <p>
-    <strong>答:</strong>不是所有副作用都能撤销。rm -rf 删完 100 个文件 之后,
-    撤销 API 是不存在的; 写到网络端的命令也无法回滚。permission
-    必须在执行前同步拦截, 接受这个延迟换"绝对安全"。
-  </p>
-</div>
-
-<h2 id="interfaces">接口形状: 在写实现前钉死</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export type Decision = {
-  action: "allow" | "ask" | "deny";
-  reason: string;
-  message?: string;  // 当 action 是 "ask" 时, 给用户看的询问
-};
-
-export interface PermissionRequest {
-  toolName: string;
-  args: Record&lt;string, unknown&gt;;
-}
-
-export interface PermissionManager {
-  check(request: PermissionRequest): Decision;
-  // 子智能体 ask 降级为 deny 时不抛错, 由 harness 写 tool message
-  downgradeAsk?(request: PermissionRequest): Decision;
-}
-
-export type AskUserFn = (message: string) =&gt; Promise&lt;boolean&gt;;</code></pre>
-
-<h2 id="policy">策略层: 工具级 + 参数级 + 命令级</h2>
-<p>完整的 permission 策略是三层叠加的:</p>
 <ol>
-  <li>
-    <strong>工具级</strong>: 哪些工具被允许 (allowlist) / 禁止 (denylist)。
-    这是最粗的边界, 通常配置在项目根 <code>.claude/settings.json</code> 里。
+<li>
+<strong>误删</strong>: LLM 试图"清理项目里的临时文件",
+    跑 <code>rm -rf /tmp/some-keep-this</code>, 重要数据没了。
+    </li>
+<li>
+<strong>误改</strong>: LLM 试图"fix 一个 typo", 但它用 <code>run_edit</code>
+    模糊匹配, 把同名 pattern 的 5 个文件全改了。 用户只想要 1 个。
   </li>
-  <li>
-    <strong>参数级</strong>: 工具被允许, 但参数不允许。例如 "run_bash" 被允许,
-    但参数里如果出现 "rm -rf" 就拒绝。
-  </li>
-  <li>
-    <strong>命令级</strong>: 针对 run_bash 这种"自由文本命令" 工具, 进一步 用
-    command-safety.ts 检测危险模式 (例如删除、sudo、网络下载并执行)。
+<li>
+<strong>网络外泄</strong>: LLM 试图"看 React 文档", 调
+    <code>curl https://...</code> 把本地文件内容发到外网。
+    </li>
+<li>
+<strong>危险命令</strong>: LLM 试图"重启服务", 跑
+    <code>sudo systemctl restart nginx</code>, 整个环境挂了。
   </li>
 </ol>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export function createPermissionManager(config: PermissionConfig): PermissionManager {
-  const toolAllowlist = new Set(config.allowlist ?? []);
-  const toolDenylist = new Set(config.denylist ?? []);
+<p>
+  朴素想法 1: "LLM 应该聪明到不犯这些错?"
+  错。 LLM 是"下一个 token 预测器", 它在压力下 (上下文满、跑长任务)
+  会选错工具。 把安全责任完全推给 LLM, 就像让司机"靠记忆" 开车
+  不系安全带。
+  </p>
+<p>
+  朴素想法 2: "禁止 LLM 调危险工具?"
+  那 LLM 啥都干不了。 需要<strong>人工把关</strong>。
+  </p>
+<p>
+  正确做法: <strong>Permission 层在 LLM 和工具之间加一道
+  人工把关</strong>。 危险操作前先问用户, 用户拒绝就跳过, 不假装成功。
+  </p>
+<h2 id="three-modes">三种模式: plan / auto / default</h2>
+<p>
+  <strong>用途</strong>: Permission 系统提供 3 种模式, 用户的"信任程度"
+  不同。 默认 <code>default</code>, 用户启动时通过
+  <code>/mode plan|auto|default</code> 切换。
+  </p>
+<p>
+  <strong>真实场景</strong>: 用户首次使用 harness, 不知道 harness 行为,
+  选 <code>plan</code> 模式"看着它做"; 跑 CI / 批处理时选 <code>auto</code>
+  信任 harness; 日常使用选 <code>default</code> 平衡。
+  </p>
+<p>
+  <strong>设计思想</strong>: 经典<strong>策略模式</strong> — 同一操作在不同
+  模式下有不同决策 (allow / ask / deny), 用查表代替 if/else 链。
+  这是 Reference 章节的"模式 8 · Strategy 策略模式" 的具体应用。
+  </p>
+<table class="terms">
+<thead>
+<tr>
+<th>模式</th>
+<th>行为</th>
+<th>典型场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>plan</code></td>
+<td>所有写操作都要用户确认, 只读操作不确认</td>
+<td>用户首次使用, 不知道 harness 行为, 想"看着它做"</td>
+</tr>
+<tr>
+<td><code>auto</code></td>
+<td>所有操作直接执行, 不问</td>
+<td>用户信任 harness, 跑批量任务 (CI / 自动化)</td>
+</tr>
+<tr>
+<td><code>default</code></td>
+<td>按"危险度" 决定: 危险操作问, 安全操作直接做</td>
+<td>日常使用, 大部分操作自动, 危险操作确认</td>
+</tr>
+</tbody>
+</table>
+<p>
+  3 个模式的边界:
+</p>
+<ol>
+<li>
+<strong>plan 模式</strong>: 防御性, 适合新用户。 但用户会被"问得太多" 烦。
+    跑 10 轮对话可能问 8 次。
+  </li>
+<li>
+<strong>auto 模式</strong>: 信任模式, 跑 CI / 批处理必备。 但用户
+    失去"撤销" 机会 — 误删了没办法。
+  </li>
+<li>
+<strong>default 模式</strong>: 平衡模式, 大部分情况自动, 危险
+    操作问。 适合日常使用。
+  </li>
+</ol>
+<p>
+  默认是 <code>default</code>, 用户启动时通过 <code>/mode auto</code> /
+  <code>/mode plan</code> / <code>/mode default</code> 切换。 mode 状态
+  存在 sessionEventBuffer (第 08 章), 跨 turn 保留。
+  </p>
+<h2 id="ask-flow">ask 流程: 怎么问用户</h2>
+<p>
+  Permission 检查命中"需要问" 时, 走 ask 流程:
+</p>
+<ol>
+<li>harness 检测到危险操作 (run_write / run_bash 危险命令)</li>
+<li>调 <code>terminal.askUser(prompt)</code> 弹出确认</li>
+<li>用户在 REPL 看到 <code>Allow run_write to /etc/hosts? (y/n)</code></li>
+<li>用户输入 <code>y</code> 或 <code>n</code></li>
+<li>harness 根据回答继续 (y: 执行, n: 跳过)</li>
+</ol>
+<p>
+  关键: ask 必须<strong>同步</strong>等用户回答。 REPL 不能继续读
+  下一行, 直到用户回答当前 ask。 这跟普通 readline 不同 — readline
+  是一问一答, ask 是一问一等 + 必须答。
+  </p>
+<h2 id="naive">朴素反例: 权限检查写在工具里</h2>
+<pre class="code-block"><code>// ❌ 反例: 权限写在工具里
+async function runWrite(args) {
+  if (args.path.startsWith("/etc")) {
+    if (!confirm("Allow run_write to /etc/hosts? (y/n)")) {
+      return { content: "Permission denied", error: true };
+    }
+  }
+  await fs.writeFile(args.path, args.content);
+  return { content: "OK" };
+}
 
-  return {
-    check(request) {
-      // 1. 工具级
-      if (toolDenylist.has(request.toolName)) {
-        return { action: "deny", reason: `Tool "${request.toolName}" is denied` };
-      }
-      if (toolAllowlist.size &gt; 0 &amp;&amp; !toolAllowlist.has(request.toolName)) {
-        return { action: "deny", reason: `Tool "${request.toolName}" is not in allowlist` };
-      }
+// 同样逻辑要在 run_bash / run_edit / run_delete / 等等各写一份</code></pre>
+<p>
+  5 件事立刻坏掉:
+</p>
+<ol>
+<li>
+<strong>重复代码</strong>: 同样的"问 / 拒绝" 逻辑在 5 个工具里各写一份,
+    维护噩梦。
+  </li>
+<li>
+<strong>模式切换写不出</strong>: <code>plan</code> / <code>auto</code> / <code>default</code>
+    怎么切? 每个工具都要知道当前 mode, mode 状态散在各处。
+  </li>
+<li>
+<strong>测试难写</strong>: 测试时每个工具都要 mock 自己的 confirm。
+    不能用一个 fake terminal 统一替换。
+  </li>
+<li>
+<strong>规则不一致</strong>: run_write 问 /etc 路径, run_bash 问
+    哪些命令, run_edit 问哪些 pattern — 各自一套规则, 容易有漏洞。
+  </li>
+<li>
+<strong>工具作者必须懂权限</strong>: 写 run_web_fetch 的工程师
+    要决定"问不问", 工具作者增加心智负担。
+  </li>
+</ol>
+<p>
+  解决方式: Permission 层在 ToolRegistry.invoke 之前拦截, 工具
+  不知道也不关心权限。
+  </p>
+<h2 id="permission-manager">PermissionManager: 集中权限决策</h2>
+<p>
+  把权限检查抽出来, 集中在一个 manager:
+</p>
+<pre class="code-block"><code>interface PermissionManager {
+  check(input: {
+    toolName: string;
+    args: Record&lt;string, unknown&gt;;
+    mode: "plan" | "auto" | "default";
+  }): PermissionDecision;
+  setMode(mode: "plan" | "auto" | "default"): void;
+  addBlacklist(pattern: string): void;
+  addWhitelist(pattern: string): void;
+}
 
-      // 2. 参数级 (run_bash 的命令字符串检测)
-      if (request.toolName === "run_bash") {
-        const cmd = String(request.args["cmd"] ?? "");
-        if (detectDangerousCommand(cmd)) {
-          return { action: "deny",
-            reason: `Dangerous command detected: ${describeDanger(cmd)}` };
-        }
-      }
+type PermissionDecision =
+  | { kind: "allow" }
+  | { kind: "deny"; reason: string }              // 硬黑名单 (危险命令), 不问
+  | { kind: "ask"; prompt: string };              // 需要用户确认</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/permission.ts#L1" rel="noreferrer" target="_blank">GitHub · src/permission.ts PermissionManager 实现 (L1)</a></p>
+<p>
+  3 种 decision 的边界:
+</p>
+<ol>
+<li>
+<strong>allow</strong>: 直接执行, 不问用户。 工具白名单 / 安全操作。
+  </li>
+<li>
+<strong>deny</strong>: 硬黑名单, 拒绝, 不问。 比如 <code>rm -rf /</code>、
+    <code>sudo</code>、<code>/etc</code> 写。 即使 auto 模式也拒绝。
+  </li>
+<li>
+<strong>ask</strong>: 调 terminal.askUser, 问用户。 plan 模式全 ask,
+    default 模式危险操作 ask, auto 模式不 ask。
+  </li>
+</ol>
+<p>
+  ❌ / ✅: 错误做法是 deny 和 ask 混为一谈。
+</p>
+<pre class="code-block"><code>// ❌ deny 和 ask 都是 ask, 让用户决定
+async function check(toolName, args, mode) {
+  if (isDangerous(toolName, args)) {
+    const allowed = await ask(`Allow ${toolName}?`);
+    return allowed ? { kind: "allow" } : { kind: "deny" };
+  }
+  return { kind: "allow" };
+}
+// 问题: <code>rm -rf /</code> 也让用户决定, 用户可能误答 y
 
-      // 3. 写操作默认 ask (让用户确认)
-      if (isWriteOperation(request.toolName)) {
-        return { action: "ask",
-          message: `Allow ${request.toolName}(${summarizeArgs(request.args)})?` };
-      }
+// ✅ deny 是硬规则, 不让用户选择
+async function check(toolName, args, mode) {
+  if (isBlacklisted(toolName, args)) return { kind: "deny", reason: "hard blacklist" };
+  if (isDangerous(toolName, args) &amp;&amp; mode !== "auto") {
+    return { kind: "ask", prompt: `Allow ${toolName}?` };
+  }
+  return { kind: "allow" };
+}</code></pre>
+<h2 id="blacklist">黑名单: 危险命令的硬规则</h2>
+<p>
+  黑名单是 hard rule, 永远拒绝, 不让用户选择。 常见黑名单:
+</p>
+<pre class="code-block"><code>const HARDCODED_BLACKLIST = [
+  /rm\s+-rf\s+\//,                    // rm -rf /
+  /sudo/,                              // sudo 命令
+  /mkfs/,                             // 格式化
+  /dd\s+if=/,                         // dd 写盘
+  /:\(\)\s*\{.*\s*:\s*&apos;\1;.*\}/,  // fork bomb
+  /chmod\s+-R\s+777\s+\//,             // chmod 777 根
+];</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/command-safety.ts#L1" rel="noreferrer" target="_blank">GitHub · src/command-safety.ts HARDCODED_BLACKLIST (L1)</a></p>
+<p>
+  这些规则来自 <code>command-safety.ts</code>, 跨工具共享 (run_bash
+  和 ExecutionPolicy 都用)。 集中在一处, 避免两处实现漂移。
+  </p>
+<p>
+  黑名单的判断: 先用正则匹配命令字符串, 匹配成功就 deny。 这种
+  简单匹配能挡掉 90% 的常见误操作。 复杂 shell 语法解析不可靠时
+  宁可拒绝。
+  </p>
+<h2 id="mode-decision-table">3 种模式的决策表</h3>
+<table class="terms">
+<thead>
+<tr>
+<th>工具 + 操作</th>
+<th><code>plan</code></th>
+<th><code>default</code></th>
+<th><code>auto</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>run_read (任何路径)</td>
+<td>allow</td>
+<td>allow</td>
+<td>allow</td>
+</tr>
+<tr>
+<td>run_bash (安全命令如 ls / cat / echo)</td>
+<td>ask</td>
+<td>allow</td>
+<td>allow</td>
+</tr>
+<tr>
+<td>run_bash (危险命令如 rm / sudo)</td>
+<td>deny</td>
+<td>deny</td>
+<td>deny</td>
+</tr>
+<tr>
+<td>run_write (workspace 内)</td>
+<td>ask</td>
+<td>ask</td>
+<td>allow</td>
+</tr>
+<tr>
+<td>run_write (workspace 外)</td>
+<td>deny</td>
+<td>deny</td>
+<td>deny</td>
+</tr>
+<tr>
+<td>run_edit (workspace 内)</td>
+<td>ask</td>
+<td>ask</td>
+<td>allow</td>
+</tr>
+<tr>
+<td>run_web_fetch (任意 URL)</td>
+<td>ask</td>
+<td>ask</td>
+<td>allow</td>
+</tr>
+<tr>
+<td>黑名单 (任何模式)</td>
+<td>deny</td>
+<td>deny</td>
+<td>deny</td>
+</tr>
+</tbody>
+</table>
+<figure class="figure">
+<div class="flow-compare" role="img" aria-label="3 模式决策对比">
+<div class="flow-compare__col flow-compare__col--good">
+<div class="flow-compare__label">plan</div>
+<span class="flow-node">run_read: allow</span>
+<span class="flow-node">run_bash: ask</span>
+<span class="flow-node">run_write: ask</span>
+<span class="flow-node">黑名单: deny</span>
+</div>
+<div class="flow-compare__col flow-compare__col--good">
+<div class="flow-compare__label">default</div>
+<span class="flow-node">run_read: allow</span>
+<span class="flow-node">安全 run_bash: allow</span>
+<span class="flow-node">危险 run_bash: ask</span>
+<span class="flow-node">run_write: ask</span>
+</div>
+<div class="flow-compare__col flow-compare__col--good">
+<div class="flow-compare__label">auto</div>
+<span class="flow-node">run_read: allow</span>
+<span class="flow-node">run_bash: allow</span>
+<span class="flow-node">run_write: allow</span>
+<span class="flow-node">黑名单: deny (仍然)</span>
+</div>
+</div>
+<figcaption>图 07-1 · 3 模式决策对比. 黑名单跨模式都 deny, ask / allow 随模式变, 跑 CI 选 auto 跑日常选 default 跑学习选 plan。</figcaption>
+</figure>
+<p>
+  关键点: 黑名单是硬规则, 跨模式都拒绝。 workspace 外写也是硬规则,
+  不让用户"破例" — workspace 是项目边界, 突破就破坏隔离。
+  </p>
+<h2 id="path-boundary">路径边界: workspace 内的 hard rule</h2>
+<p>
+  <strong>用途</strong>: 写操作必须限制在 workspace 内, 这是 hard rule, 跟
+  模式无关。 防止 LLM 误写到 /etc / 用户的 home / 任何项目外。
+  </p>
+<p>
+  <strong>真实场景</strong>: LLM 调 <code>run_write("/etc/hosts", ...)</code>
+  修改系统 hosts, 任何模式都拒绝。 workspace 是项目边界, 突破就
+  破坏隔离。
+  </p>
+<p>
+  <strong>设计思想</strong>: 路径边界用 <code>path.resolve()</code> 解析相对路径和
+  <code>..</code>, 然后判断 resolved 是否在 workspaceRoot 下。 不在就 deny。
+  </p>
+<p>
+  <strong>实现细节</strong>:
+</p>
+<pre class="code-block"><code>// 教学简化版
+function isPathInWorkspace(path: string, workspaceRoot: string): boolean {
+  const resolved = path.resolve(workspaceRoot, path);
+  return resolved.startsWith(path.resolve(workspaceRoot) + path.sep);
+}
 
-      return { action: "allow", reason: "ok" };
-    },
+// 决策
+if (toolName === "run_write" &amp;&amp; !isPathInWorkspace(args.path, workspaceRoot)) {
+  return { kind: "deny", reason: "path outside workspace" };
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/permission.ts#L1" rel="noreferrer" target="_blank">GitHub · src/permission.ts 路径边界检查 (L1)</a></p>
+<p>
+  边界检查的细节: 用 <code>path.resolve()</code> 解析相对路径和 <code>..</code>,
+  然后判断 resolved 是否在 workspaceRoot 下。 不在就 deny。
+  <code>startsWith(workspaceRoot + sep)</code> 避免 <code>/tmp/foo</code>
+  误判为 <code>/tmp/foobar</code> 的子路径。
+  </p>
+<h2 id="terminal-askuser">Terminal.askUser 同步等待</h2>
+<p>
+  ask 必须<strong>同步</strong>等用户回答。 这跟普通 readline.question()
+  不一样, 后者是一问一答, 前者是一问一等 + 必须答。
+  </p>
+<pre class="code-block"><code>// 教学简化版
+interface Terminal {
+  question(prompt: string): Promise&lt;string&gt;;        // 普通 readline
+  askUser(prompt: string): Promise&lt;boolean&gt;;       // 同步 ask, 必须答
+  println(text: string): void;
+  close(): void;
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/terminal.ts#L1" rel="noreferrer" target="_blank">GitHub · src/terminal.ts Terminal 接口 (L1)</a></p>
+<p>
+  真实 readline 实现的 askUser:
+</p>
+<pre class="code-block"><code>async function askUser(prompt: string): Promise&lt;boolean&gt; {
+  // 暂停 readline 主循环, 弹出确认
+  this.rl.pause();
+  process.stdout.write(`${prompt} (y/n) `);
+  return new Promise((resolve) =&gt; {
+    const onLine = (line: string) =&gt; {
+      this.rl.removeListener("line", onLine);
+      this.rl.resume();
+      resolve(line.trim().toLowerCase() === "y");
+    };
+    this.rl.on("line", onLine);
+  });
+}</code></pre>
+<p>
+  关键: <code>rl.pause()</code> 暂停主 readline 循环, 否则用户在主
+  readline 输的内容会被吞。 ask 完 <code>rl.resume()</code> 恢复。
+  </p>
+<h2 id="deny-pretends-success">拒绝时怎么写 tool result</h2>
+<p>
+  拒绝时, tool message 应该明确写"Permission denied", 不能假装成功:
+</p>
+<pre class="code-block"><code>// 教学简化版
+if (decision.kind === "deny") {
+  history.add({
+    role: "tool",
+    tool_call_id: call.id,
+    content: `Permission denied: ${decision.reason}. 请重新决定或换其他方案。`,
+    // 不标 error: true, 因为这是预期行为, 不是工具错误
+  });
+  continue;  // 跳过 invoke
+}
+if (decision.kind === "ask" &amp;&amp; !(await terminal.askUser(decision.prompt))) {
+  history.add({
+    role: "tool",
+    tool_call_id: call.id,
+    content: "Permission denied by user. 请重新决定或换其他方案。",
+  });
+  continue;  // 用户拒绝, 跳过 invoke
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L1" rel="noreferrer" target="_blank">GitHub · src/agent.ts 拒绝时写 tool message (L1)</a></p>
+<p>
+  ❌ / ✅: 不要拒绝时 throw。
+</p>
+<pre class="code-block"><code>// ❌ 拒绝时 throw, 整个 loop 崩
+if (!allowed) throw new Error("Permission denied");
+
+// ✅ 拒绝时写 tool message, LLM 看到后自己调整
+if (!allowed) history.add({ role: "tool", tool_call_id: call.id, content: "Permission denied by user." });</code></pre>
+<h2 id="ask-degrade">ask 降级: 用户不在时怎么办</h2>
+<p>
+  ask 流程的边界: 用户不在 REPL 旁边怎么办?
+  </p>
+<ol>
+<li>
+<strong>CI / 批处理</strong>: 跑 auto 模式, 不 ask。 permission 系统
+    检测到 plan/auto 模式时不调 askUser。
+    </li>
+<li>
+<strong>用户不在但 harness 在跑</strong>: ask 会卡住。 permission
+    系统给 ask 设 timeout, 默认超时 (比如 60 秒), 超时按 deny 处理。
+    </li>
+<li>
+<strong>异步执行 (第 13 章)</strong>: Async Run 默认 auto 模式, 不 ask。
+    </li>
+</ol>
+<p>
+  超时降级很重要, 否则 harness 卡在 ask 等用户, 跑 1 小时没动静,
+  用户以为死了。
+  </p>
+<h2 id="fake-test">fake terminal 测试: 拒绝时 tool result 写 denied</h2>
+<pre class="code-block"><code>test("ask 时用户拒绝, tool result 写 Permission denied", async () =&gt; {
+  const fakeTerminal = {
+    askUser: async (prompt: string) =&gt; false,  // 用户拒绝
+    question: async (prompt: string) =&gt; "test input",
+    println: () =&gt; {},
   };
-}</code></pre>
+  const permissionManager = createPermissionManager({ mode: "default", terminal: fakeTerminal });
+  const fakeLLM = createFakeLLM([
+    { content: null, toolCalls: [{ id: "w1", function: { name: "run_write", arguments: '{"path":"foo.txt","content":"x"}' } }], finishReason: "tool_calls" },
+    { content: "Permission denied, I will not modify files.", toolCalls: [], finishReason: "stop" },
+  ]);
+  const agent = createAgent({ llm: fakeLLM, history, tools, permissionManager, terminal: fakeTerminal });
+  await agent.run("Modify foo.txt");
 
-<h2 id="loop-integration">loop 接入: 三个 action 三条路径</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-for (const call of assistant.tool_calls) {
-  // 1. permission 检查 (同步, 必须先于 execute)
-  const decision = permissionManager.check({ toolName: call.name, args: call.args });
-
-  if (decision.action === "deny") {
-    // 写 error tool message, 不执行
-    history.add({ role: "tool", tool_call_id: call.id,
-      content: `Permission denied: ${decision.reason}` });
-    continue;
-  }
-
-  if (decision.action === "ask") {
-    // 子智能体没有 askUserFn, 降级为 deny
-    if (!askUserFn) {
-      history.add({ role: "tool", tool_call_id: call.id,
-        content: `Permission denied (no confirmation): ${decision.message ?? ""}` });
-      continue;
-    }
-    const approved = await askUserFn(decision.message ?? "");
-    if (!approved) {
-      history.add({ role: "tool", tool_call_id: call.id, content: "User denied" });
-      continue;
-    }
-  }
-
-  // 2. 通过检查才执行
-  const tool = registry.get(call.name);
-  const result = await tool.execute(call.args);
-  history.add({ role: "tool", tool_call_id: call.id, content: result.content });
-}</code></pre>
-
+  // 验证: history 含 "Permission denied" 的 tool message
+  const lastToolMsg = fakeLLM.lastCapturedMessages().filter(m =&gt; m.role === "tool").pop();
+  expect(lastToolMsg.content).toMatch(/Permission denied/);
+  // 验证: LLM 收到 Permission denied 后, 最终回复提到它
+  expect(fakeLLM.lastCapturedMessages().pop().content).toMatch(/Permission denied/);
+});</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/permission.test.ts#L1" rel="noreferrer" target="_blank">GitHub · src/permission.test.ts ask 拒绝测试 (L1)</a></p>
+<p>
+  这条测试如果挂, 你立刻知道 ask / deny 流程有 bug。
+  2 个断言: tool message 含 denied, LLM 最终回复提到它。
+  </p>
+<h2 id="common-confusion">3 个常见误解</h2>
+<dl class="defs">
+<dt>误解 1 · "Permission 应该写在工具里"</dt>
+<dd>
+    错。 写进工具里 = 重复代码 + 难测试 + 规则不一致。 Permission
+    必须在 ToolRegistry.invoke 之前拦截, 工具不感知权限。
+  </dd>
+<dt>误解 2 · "黑名单和 ask 是同一回事"</dt>
+<dd>
+    错。 黑名单是 hard rule, 不让用户选择。 ask 是 user choice,
+    用户可以 y 或 n。 <code>rm -rf /</code> 绝不能 ask, 必须 deny。
+  </dd>
+<dt>误解 3 · "auto 模式 = 不检查权限"</dt>
+<dd>
+    错。 auto 模式 = 不 ask, 但黑名单仍然 deny。 <code>rm -rf /</code>
+    在 auto 模式也拒绝。 auto 只是"不打扰用户", 不是"放飞"。
+  </dd>
+</dl>
 <h2 id="trap">反例梯度</h2>
-
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>permission 写在工具 execute 内部。</p>
-    <p><strong>为什么错:</strong>无法复用, 无法测试, 用户无法集中管理。</p>
-    <p>
-      <strong>正确做法:</strong>permission 在 agent 主循环同步执行, 工具 execute
-      假定输入已校验。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">新手错法 · A</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> 权限检查写进每个工具里。
+    </p>
+<p>
+<strong>为什么错:</strong> 重复代码, 模式切换写不出, 工具作者增加
+      心智负担, 规则不一致。
+    </p>
+<p>
+<strong>正确做法:</strong> PermissionManager 在 ToolRegistry.invoke
+      之前拦截, 工具不感知权限。
+    </p>
+</div>
+</div>
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>deny 时不写 tool message, 沉默拒绝。</p>
-    <p>
-      <strong>为什么错:</strong>LLM 不知道"刚才为什么没执行", 会反复重试同样的
-      tool_call, 死循环。
-    </p>
-    <p>
-      <strong>正确做法:</strong>deny 必写 role: "tool" 消息, content
-      描述拒绝原因。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">中级错法 · B</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> 拒绝时 throw, 让 loop 崩。
+    </p>
+<p>
+<strong>为什么错:</strong> 拒绝是业务行为, 不是 harness 错误, throw 会让
+      整个 loop 崩, messages 序列错乱。
+    </p>
+<p>
+<strong>正确做法:</strong> 拒绝时写 "Permission denied" tool message,
+      LLM 看到后自己调整。
+    </p>
+</div>
+</div>
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>子智能体在 ask 路径上阻塞, 等用户确认。</p>
-    <p>
-      <strong>为什么错:</strong>子智能体本来就在后台跑, 阻塞等用户会让主 loop
-      卡住, 体验差。
-    </p>
-    <p>
-      <strong>正确做法:</strong>子智能体没有 askUserFn, 自动降级为 deny, 写 tool
-      message 告诉模型"需要用户确认, 跳过此步骤"。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">高级错法 · C</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> <code>rm -rf /</code> 让用户决定 (ask 而非 deny)。
+    </p>
+<p>
+<strong>为什么错:</strong> 黑名单是 hard rule, 用户可能误答 y, 误删
+      整个系统。 跨模式都拒绝。
+    </p>
+<p>
+<strong>正确做法:</strong> 黑名单和 ask 分开, 黑名单永远 deny, 不让
+      用户选择。
+    </p>
+</div>
+</div>
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>denylist 配置后没生效, 工具仍然执行。</p>
-    <p>
-      <strong>为什么错:</strong>denylist 检查写在 allow 检查之后, allow
-      命中就跳过了 denylist。验证: 写一个测试, 工具在 allowlist 和 denylist
-      都出现, 应当 deny。
-    </p>
-    <p><strong>正确做法:</strong>先 denylist 后 allowlist, deny 优先。</p>
-  </div>
+<div class="card__head">
+<span class="card__tag">边界错法 · D</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> ask 没设 timeout, harness 卡住等用户。
+    </p>
+<p>
+<strong>为什么错:</strong> 用户不在 REPL 旁边, ask 会永远卡住, 跑 1 小时
+      没动静, 看起来像死循环。
+    </p>
+<p>
+<strong>正确做法:</strong> ask 设 60 秒 timeout, 超时按 deny 处理,
+      避免挂死。
+    </p>
+</div>
+</div>
 <h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
 <div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · 第 07 章</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>deny 必写 tool message:</strong>fake permission 对 run_bash 返回
-      deny, fake registry 暴露 spy, 跑完后 spy 没被调用, history 末尾有 tool
-      message 含 "Permission denied"。
-    </p>
-    <p>
-      <strong>ask 在子智能体降级为 deny:</strong>子智能体调用 ask 路径,
-      askUserFn 未注入, 写 tool message "Permission denied (no confirmation)",
-      不抛异常。
-    </p>
-    <p>
-      <strong>denylist 优先于 allowlist:</strong>工具同时在 denylist 和
-      allowlist, decision.action === "deny"。
-    </p>
-    <p>
-      <strong>危险命令检测:</strong>run_bash 参数 "rm -rf /tmp/foo",
-      decision.action === "deny", reason 含 "rm -rf"。
-    </p>
-    <p>
-      <strong>permission 在 execute 之前同步:</strong>fake permission 用
-      Promise.resolve (同步), spy 验证 execute 在 permission.check 返回
-      之后才调用。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">Validation · 第 07 章</span>
 </div>
-
-<h2 id="lookback">回望第 00–06 章: 哪些原则在本章兑现了</h2>
+<div class="card__body">
+<p>
+<strong>plan 模式全 ask:</strong> plan 模式下, run_write 触发
+      terminal.askUser, 用户回答决定 allow / deny。
+    </p>
+<p>
+<strong>黑名单跨模式 deny:</strong> auto 模式下, run_bash("rm -rf /")
+      仍返回 deny, 不调 askUser。
+    </p>
+<p>
+<strong>workspace 外 deny:</strong> run_write("/etc/passwd", ...) 任何模式
+      都 deny, 错误信息含 "path outside workspace"。
+    </p>
+<p>
+<strong>拒绝写 Permission denied tool message:</strong> 用户在 ask 时
+      选 n, history 末尾出现 "Permission denied by user" 的 tool message。
+    </p>
+<p>
+<strong>ask timeout 降级:</strong> 用户 60 秒不回答, harness 按 deny
+      处理, 写 "Permission denied: timeout" tool message。
+    </p>
+</div>
+</div>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
 <ul>
-  <li>
-    <strong>Composition Root 唯一接线:</strong>permissionManager 在
-    <code>index.ts</code> 创建, 注入 agent, 不在 agent.ts 内 new。
-  </li>
-  <li>
-    <strong>工具职责单一:</strong>execute 假定输入已校验, 不写 if 守卫。这条是第
-    02 章埋伏笔, 本章兑现。
-  </li>
-  <li>
-    <strong>tool message 协议沿用:</strong>deny / ask 拒绝都写 role: "tool"
-    消息, 不破坏第 02 章的协议约束。
-  </li>
-  <li>
-    <strong>子智能体隔离 (第 04 章):</strong>子智能体 ask 降级为 deny, 不阻塞主
-    loop。
-  </li>
+<li>
+<strong>关注点分离</strong>: PermissionManager 独立于 ToolRegistry, 工具
+    不感知权限。
+    </li>
+<li>
+<strong>工厂模式</strong>: PermissionManager 在 Composition Root 创建,
+    注入 agent。
+    </li>
+<li>
+<strong>硬规则与软规则分开</strong>: 黑名单 = hard, ask = user choice, 不混淆。
+    </li>
+<li>
+<strong>工具调用协议</strong>: 拒绝时写 tool message, 复用第 02 章的协议,
+    LLM 能正常推理。
+    </li>
 </ul>
-
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
-  <dt>permission 决策记录在哪</dt>
-  <dd>
-    第 08 章 Hook 会在 PreToolUse 钩子里记录 permission 决策, transcript
-    留底用于审计。
-  </dd>
-  <dt>用户确认如何实现</dt>
-  <dd>
-    第 13 章 async run 会让 ask 异步化, 不阻塞主 loop, 后台等用户响应再唤醒。
-  </dd>
-  <dt>危险命令模式如何更新</dt>
-  <dd>
-    第 10 章 cache-friendly 布局会展开, 危险命令模式 (denylist) 是稳定配置, 不进
-    messages。
-  </dd>
-  <dt>permission 跨项目保留</dt>
-  <dd>
-    第 09 章 memory 区分"项目级 permission" (本章) 和"用户级长期偏好"
-    (例如"用户对 rm 永远 deny")。
-  </dd>
+<dt>ask 之外的扩展点</dt>
+<dd>
+    Permission 在 invoke 之前拦截。 后续 Hook (第 08 章) 提供
+    更通用的扩展 — PreToolUse / PostToolUse 钩子, 不只是 ask。
+    </dd>
+<dt>白名单持久化</dt>
+<dd>
+    用户对某些路径/命令的回答可以记住, 下次不重复问。 第 09 章
+    Memory 展开持久化。
+    </dd>
 </dl>
-
-<h2 id="vibe-coding-07">本次如何 vibe code: 第 07 章的三件套</h2>
-
-<h3 id="vibe-feed-07">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。让 LLM 给出
-    <code>PermissionManager</code> / <code>PermissionRequest</code> /
-    <code>Decision</code> / <code>AskUserFn</code> 四个 interface。本轮不写实现,
-    重点钉"同步 / 三 action / deny 必写 tool message" 三条约束。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 <code>index.ts</code> 接线,
-    <code>createPermissionManager()</code> 接受 <code>PermissionConfig</code>,
-    agent.run() 仍然走第 02 章的工具执行路径 (无 permission 检查)。本轮 review
-    重点: permissionManager 与 llm / history 是同级依赖。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。让 LLM 写 createPermissionManager +
-    agent.run 接入。本轮 review 重点: deny / ask 拒绝路径必写 tool message,
-    同步检查, denylist 优先。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。让 LLM 写
-    <code>test/permission.test.ts</code> +
-    <code>test/agent.permission.test.ts</code>。本轮 review 重点: spy 验证
-    execute 在 permission.check 之后才调用, deny 不调 execute。
-  </li>
-</ol>
-
-<h3 id="vibe-review-07">Review: 第 07 章专属 checklist</h3>
-<ol>
-  <li>
-    <strong>permission 同步执行。</strong>不得出现
-    <code>await permission.check</code> 之外的异步延后。验证:
-    <code>grep -n 'permission' src/agent.ts</code> 在 tool 执行路径上,
-    全部是同步调用。
-  </li>
-  <li>
-    <strong>deny 必写 tool message。</strong>不得
-    <code>if (decision.action === "deny") continue</code> (无消息)。验证: 三个
-    action 分支都有 <code>history.add({role: "tool", ...})</code>。
-  </li>
-  <li>
-    <strong>denylist 优先于 allowlist。</strong>验证: Validation 卡片"denylist
-    优先"那条测试通过。
-  </li>
-  <li>
-    <strong>子智能体 ask 降级为 deny。</strong>验证: 子智能体调用 ask
-    路径不阻塞, 写 deny 消息。
-  </li>
-  <li>
-    <strong>permission 不写在工具 execute 内。</strong>验证:
-    <code>grep -n 'process.env\|whitelist' src/tools/run_bash.ts</code> 应当 0
-    行。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-07">调试: 第 07 章典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · deny 时 console.warn 但不写 tool message。</strong>症状:
-    用户看到日志说"被拒绝", 但 LLM 不知道, 反复重试。验证: Validation 卡片"deny
-    必写 tool message" 那条, 必须断言 history 末尾有 tool message, 不只是
-    console.warn。
-  </li>
-  <li>
-    <strong>伪装 B · 危险命令检测漏掉 shell 重定向。</strong>症状:
-    <code>echo "rm -rf /" &gt; script.sh &amp;&amp; bash script.sh</code>
-    通过检测, 因为 <code>rm -rf</code> 不在命令开头。验证: command-safety.ts
-    应当做"全命令字符串扫描", 不只检查开头。
-  </li>
-  <li>
-    <strong>伪装 C · permission 在 tool execute 之后回滚。</strong>症状:
-    看到"异步延后" 写法。验证: spy 验证 execute 在 permission.check 之后才调用,
-    不允许反序。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-07">迭代: 第 07 章 4 个 commit 节点</h3>
-<ol>
-  <li>
-    <code>feat(ch07): 钉 PermissionManager / Decision / AskUserFn 接口</code> ——
-    tsc 通过, 无实现。
-  </li>
-  <li>
-    <code>feat(ch07): createPermissionManager 工厂 + agent.run 接入 stub</code>
-    —— tsc 通过, decision 永远 allow。
-  </li>
-  <li>
-    <code
-      >feat(ch07): 三 action 分支 + deny/ask 写 tool message +
-      子智能体降级</code
-    >
-    —— 跑通 Validation 卡片前 4 条。
-  </li>
-  <li>
-    <code>test(ch07): 同步执行 (spy 验证) + denylist 优先</code> —— 全绿。
-  </li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
-  <div class="card__head">
-    <span class="card__tag">Prompt Card · 第 07 章</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>目标:</strong>实现 Permission 模块, 在工具执行前同步拦截, 通过
-      allowlist / denylist / 危险命令检测三层策略。
-    </p>
-    <p>
-      <strong>场景:</strong>用户输入 "清理临时文件", LLM 调用 run_bash("rm -rf
-      /tmp/foo"), permission 在 run_bash.execute 之前 deny, 写 tool message
-      "Permission denied: rm -rf", LLM 第二轮看到拒绝, 改用更安全的命令。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/permission.ts</code> (新) 暴露
-      <code>createPermissionManager()</code>;
-      <code>src/command-safety.ts</code> (新) 暴露
-      <code>detectDangerousCommand()</code>;
-      <code>src/agent.ts</code> 工具执行分支加 permission check;
-      <code>src/index.ts</code> 接线 permissionManager 和 askUserFn。
-    </p>
-    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
-    <ul>
-      <li>permission 同步执行, 在 tool execute 之前</li>
-      <li>deny 必写 role: "tool" 消息, content 描述拒绝原因</li>
-      <li>ask 路径在子智能体降级为 deny, 不阻塞主 loop</li>
-      <li>denylist 优先于 allowlist</li>
-      <li>permission 不写在工具 execute 内部</li>
-    </ul>
-    <p>
-      <strong
-        >验证 (用 fake permission + spy registry, 逐条落到 vitest):</strong
-      >
-    </p>
-    <ul>
-      <li>
-        deny 时 spy.execute 没被调用, history 末尾有 tool message "Permission
-        denied"
-      </li>
-      <li>
-        子智能体调用 ask 路径, 写 tool message "Permission denied (no
-        confirmation)"
-      </li>
-      <li>工具同时在 allowlist 和 denylist, decision.action === "deny"</li>
-      <li>run_bash 参数 "rm -rf /tmp/foo", decision.action === "deny"</li>
-      <li>spy 验证 execute 在 permission.check 之后才调用 (同步约束)</li>
-    </ul>
-  </div>
+<div class="card__head">
+<span class="card__tag">Prompt Card · 第 07 章</span>
+<button class="card__copy" data-copy-card="" type="button">复制</button>
 </div>
-
+<div class="card__body">
+<p>
+<strong>目标:</strong> 给 harness 加 Permission 系统, 危险操作前问用户,
+      黑名单硬拒绝, workspace 外不允许写, plan/auto/default 三模式。
+    </p>
+<p>
+<strong>场景:</strong> 用户跑 plan 模式, agent 调 run_write 改文件,
+      REPL 弹出 "Allow run_write to README.md? (y/n)", 用户选 n,
+      history 写 "Permission denied by user"。
+    </p>
+<p>
+<strong>模块:</strong> <code>src/permission.ts</code> (新) 暴露
+      <code>createPermissionManager()</code>; <code>src/command-safety.ts</code> (新)
+      硬黑名单; <code>src/agent.ts</code> (改) invoke 之前调
+      <code>permissionManager.check()</code>; <code>src/cli-commands.ts</code> (改)
+      注册 <code>/mode plan|auto|default</code>。
+    </p>
+<p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+<ul>
+<li>PermissionManager 在 ToolRegistry.invoke 之前拦截, 工具不感知权限</li>
+<li>黑名单和 ask 分开, 黑名单永远 deny, 不让用户选择</li>
+<li>workspace 外写操作硬拒绝, 跨模式都拒绝</li>
+<li>拒绝时写 "Permission denied" tool message, 不 throw</li>
+<li>ask 设 60 秒 timeout, 超时按 deny 处理</li>
+<li>plan/auto/default 三模式, 行为边界见决策表</li>
+</ul>
+<p><strong>验证 (用 fake terminal + vitest, 逐条断言):</strong></p>
+<ul>
+<li>plan 模式 run_write 触发 askUser, 用户回答决定 allow / deny</li>
+<li>auto 模式 run_bash("rm -rf /") 仍 deny, 不调 askUser</li>
+<li>run_write("/etc/passwd", ...) 任何模式都 deny, 错误含 "path outside workspace"</li>
+<li>用户在 ask 时选 n, history 末尾出现 "Permission denied by user" tool message</li>
+<li>ask 60 秒不回答, 按 deny 处理, 写 "Permission denied: timeout"</li>
+</ul>
+</div>
+</div>
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    故意把 permission 写成"先 execute 再回滚", 跑测试, 看 "同步执行" 是否抓到。
+<li>
+    故意把权限检查写进 run_write 里, 跑测试, 看"PermissionManager
+    集中权限决策" 是否抓到 (重复代码 + 模式切换写不出)。
   </li>
-  <li>
-    在 deny 分支只 console.warn 不写 tool message, 跑测试, 看"deny 必写 tool
-    message" 是否抓到。
+<li>
+    让 <code>rm -rf /</code> 走 ask 而不是 deny, 跑测试, 看"黑名单跨模式
+    deny" 是否抓到。
   </li>
-  <li>
-    让 denylist 在 allowlist 之后检查, 跑测试, 看"denylist 优先" 是否抓到。
+<li>
+    不设 ask timeout, 跑测试, 验证 ask 卡死时 harness 也卡死 (说明
+    timeout 必要性)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本章给 harness 加了"安全阀门" —— Permission。在工具执行前同步拦截, 通过
-  allowlist / denylist / 危险命令检测三层策略, 防止 LLM 把危险
-  命令直接落到真实世界。deny 必写 tool message 让 LLM 知道拒绝原因, ask
-  路径在子智能体自动降级为 deny 不阻塞主 loop。下一章 (第 08 章) 我们会在
-  permission 周围加 Hook 机制, 把 permission 决策、工具执行 记录在 transcript
-  里, 用于审计和回放。
+  Permission 是给工具的"安全网"。 核心是 3 个设计:
 </p>
-
-<h2 id="next">下一章伏笔</h2>
+<ul>
+<li>
+<strong>3 种模式</strong>: plan 全 ask, default 危险 ask, auto 不 ask。
+    黑名单跨模式都 deny。
+    </li>
+<li>
+<strong>PermissionManager 集中</strong>: 工具不感知权限, 重复代码
+    消失, 测试简单。
+    </li>
+<li>
+<strong>拒绝写 tool message</strong>: 不 throw, LLM 收到 "Permission denied"
+    后自己调整。
+    </li>
 <p>
-  第 07 章给 harness 加了"决策层" —— Permission。下一章 Hook 机制在 decision 和
-  execution 之间插入"事实记录"层: PreToolUse (执行前)、 PostToolUse
-  (执行后)、SessionStart (会话开始) 三个钩子, 让 harness 的关键事件有 transcript
-  兜底, 也为 eval 重放和审计留事实基础。
+  下一章 (第 08 章) 扩展 Permission 的思路 — Hook 系统, 让用户
+  在 loop 周围挂自定义逻辑 (PreToolUse / PostToolUse), 不只是
+  ask / deny。
 </p>
+</content>
