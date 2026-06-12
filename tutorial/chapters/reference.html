@@ -1,420 +1,3786 @@
-<p class="article__eyebrow">Reference · 整套教程的出口</p>
-<h1 class="article__title">术语表、Prompt Pack 与验证手册</h1>
-<p class="article__lede">
-  这一页不是新功能章节, 是把整套教程的术语、Prompt 写法、Validation 卡片
-  收束成查阅入口。你可以用这一页回到任何一章, 也能用 Prompt Pack 模板
-  写自己的重建 prompt。
-</p>
+<article id="article-root">
+  <p class="article__eyebrow">Reference · 设计模式与架构套路</p>
+  <h1 class="article__title">整套项目用到的设计模式与架构套路</h1>
+  <p class="article__lede">
+    读完 16 章主线 + 2 个专题, 你已经知道每个功能"做什么"。 这一页 不再讲新功能,
+    而是带你横向看: 整个项目反复用了哪些
+    <strong>设计模式</strong>
+    和
+    <strong>架构套路</strong>
+    ? 它们
+    <strong>为什么</strong>
+    反复出现? 背后的
+    <strong>原理</strong>
+    是什么? 真实代码长什么样? 读这一页后, 你打开任何
+    <code>src/*.ts</code>
+    都能 秒识别它的"骨架套路", 不再被陌生的类名吓到。
+  </p>
+  <nav aria-label="页内小节" class="article__meta" id="article-inline-toc">
+    <a href="#how-to-use">怎么用这一页</a>
+    <a href="#core-principles">4 条核心原则</a>
+    <a href="#pattern-1">模式 1 · 工厂函数 + 闭包 (Factory + Closure)</a>
+    <a href="#pattern-2"
+      >模式 2 · 窄接口 + Adapter 翻译 (Narrow Interface + Adapter)</a
+    >
+    <a href="#pattern-3">模式 3 · 依赖注入 (Dependency Injection)</a>
+    <a href="#pattern-4">模式 4 · Composition Root (唯一组装点)</a>
+    <a href="#pattern-5">模式 5 · 注册表模式 (Registry Pattern)</a>
+    <a href="#pattern-6">模式 6 · Builder / Pipeline 模式</a>
+    <a href="#pattern-7">模式 7 · State Machine (状态机)</a>
+    <a href="#pattern-8">模式 8 · Strategy (策略模式)</a>
+    <a href="#pattern-9">模式 9 · Observer (观察者模式) - 改造版</a>
+    <a href="#pattern-10">模式 10 · Atomic Write (原子写)</a>
+    <a href="#pattern-11">模式 11 · Reminder 模式 (稳定前缀外的动态状态)</a>
+    <a href="#pattern-12">模式 12 · Cache-friendly Layout (缓存友好布局)</a>
+    <a href="#pattern-13">模式 13 · 错误分类 + 恢复动作 (Error → Action)</a>
+    <a href="#pattern-14">模式 14 · Concurrent Limit (并发限制)</a>
+    <a href="#pattern-15">模式 15 · Identity Check (id 与目录名同步)</a>
+    <a href="#pattern-16">模式 16 · Test Factory (测试工厂)</a>
+    <a href="#pattern-17">模式 17 · Stable Identity (id 不变)</a>
+    <a href="#pattern-18">模式 18 · Transcript-First (transcript 优先)</a>
+    <a href="#pattern-19">模式 19 · Test Doubles (测试替身)</a>
+    <a href="#pattern-20">模式 20 · Prompt Card 模板</a>
+    <a href="#pattern-21">模式 21 · No Catch Throw (业务错误不 throw)</a>
+    <a href="#pattern-22">模式 22 · Idempotent Operations (幂等操作)</a>
+    <a href="#anti-patterns">反模式速查 (在仓库里绝对不出现)</a>
+    <a href="#where-to-go-next">学完这一页之后</a>
+  </nav>
+  <hr class="rule" />
+  <h2 id="how-to-use">怎么用这一页</h2>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>需求</th>
+        <th>看哪一节</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>看到一个不熟悉的类名 / 文件名, 想找它的"模板"</td>
+        <td>22 个模式速查</td>
+      </tr>
+      <tr>
+        <td>想理解"为什么整个项目都是这套写法"</td>
+        <td>4 条核心原则 (次节)</td>
+      </tr>
+      <tr>
+        <td>想读懂某个具体模块</td>
+        <td>跳到对应模式, 找仓库真实文件</td>
+      </tr>
+      <tr>
+        <td>自己写新模块, 想"照着惯例写"</td>
+        <td>从"先写接口" / "再写工厂" / "最后注入" 这套流程走</td>
+      </tr>
+      <tr>
+        <td>想看哪些"反模式"在仓库里绝对不出现</td>
+        <td>末节"反模式速查"</td>
+      </tr>
+    </tbody>
+  </table>
+  <h2 id="core-principles">4 条核心原则</h2>
+  <p>
+    整个项目所有模式都围绕 4 条核心原则展开。 理解这 4 条, 后面的 22
+    个模式只是它们的"具体应用"。 这 4 条不是凭空选的 — 它们各自
+    对应一类反复出现的"系统级"问题, 任何一条违反都会让 harness 在 某个维度上崩。
+  </p>
+  <h3>原则 1 · Composition Root 唯一组装</h3>
+  <p>
+    <strong>解决什么问题</strong>
+    : 业务模块互相 import, 改一个全挂; 难测试, 换部署环境要改 10 处。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 整个项目
+    <strong>只有 1 个文件</strong>
+    import 一切、 new 一切:
+    <code>src/index.ts</code>
+    的
+    <code>main()</code>
+    。 业务模块 之间互相不 import, 只接收注入。 业务模块对"用什么 LLM / 哪个
+    history" 一无所知, 全部由 Composition Root 决定。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 换测试 = 换
+    <code>main()</code>
+    一处; 换部署 = 换
+    <code>main()</code>
+    一处; 业务模块保持纯净, 永远不依赖具体实现。
+    业务模块之间的依赖关系图"塌缩成一个点", 维护复杂度从 O(n²) 降到 O(n)。
+  </p>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/index.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · src/index.ts (Composition Root) (L1)</a
+    >
+  </p>
+  <h3>原则 2 · 工厂模式, 状态在闭包内</h3>
+  <p>
+    <strong>解决什么问题</strong>
+    : 单例导致父子 agent 状态污染; class 的
+    <code>this</code>
+    绑定问题让 callback 出 bug; 测试难隔离。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 几乎所有"有状态" 的对象 (agent / history / todoManager / skillLoader /
+    memoryManager / taskManager) 都不是单例, 也不是 class, 而是
+    <strong>工厂函数返回的闭包对象</strong>
+    。 状态 藏在闭包里, 实例之间天然隔离。 闭包没有
+    <code>this</code>
+    绑定问题 (callback / 解构时不会丢上下文)。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 父子 agent 隔离、并发测试隔离、多 session 隔离"自动" 成立,
+    不用业务模块写一行隔离代码。 仓库 0 个 class, 100% 工厂 + 闭包,
+    模式高度一致。
+  </p>
+  <h3>原则 3 · 稳定前缀优先, 状态走 reminder</h3>
+  <p>
+    <strong>解决什么问题</strong>
+    : LLM provider 的 prompt cache 是按 "前缀匹配" 工作的 (Anthropic 1/10,
+    OpenAI 1/2), 任何"小修改" 都会让整个 cache 失效; system prompt 里塞状态会让
+    cache 命中率 归零, 成本涨 5-10 倍。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 把 prompt layout 严格分成两部分 —
+    <strong>稳定前缀</strong>
+    (system prompt + tools, 写后不改, 进 cache) +
+    <strong>动态 tail</strong>
+    (history + reminder, 每轮变, 不进 cache 但算增量价格)。 状态 (TODO / memory
+    / skill hint) 走 user reminder, 永远不进 system prompt。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 跨 session / 跨用户 / 跨项目一致的行为规则 + 个性化的状态注入,
+    两者互不污染, cache 命中率最大化。
+  </p>
+  <h3>原则 4 · narrow interface + adapter 翻译</h3>
+  <p>
+    <strong>解决什么问题</strong>
+    : 业务代码直接调外部 SDK (OpenAI / Anthropic / 文件系统 / 终端) 时, 业务被
+    provider 特定细节污染; 换 provider = 重写业务; 错误码不一致 (Anthropic 429 /
+    OpenAI 429 / Google RESOURCE_EXHAUSTED)。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 所有外部依赖 (LLM / 终端 / 工具 / 文件系统) 都 走
+    <strong>窄接口</strong>
+    (1-3 个方法), 实现藏在 adapter 里。 Adapter 内部处理 network / retry / cache
+    / provider 错误码翻译, 业务模块 只看内部统一类型 (e.g.
+    <code>LLMErrorKind</code>
+    7 类)。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 业务模块 0 改动换底层; 测试用 fake 替换 真实实现; provider-specific
+    错误码统一翻译成内部错误类型, recovery 模块不依赖具体 provider。
+  </p>
+  <h2 id="pattern-1">模式 1 · 工厂函数 + 闭包 (Factory + Closure)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 整个项目最常用的模式, 出现在几乎所有 manager / store / loader 上。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 单例导致父子 agent 共享状态 (子 agent 调 load_skill 影响父); class 的
+    <code>this</code>
+    绑定问题 (把方法传 setTimeout / 事件回调,
+    <code>this</code>
+    丢失); 测试无法隔离 (一个测试残留状态影响下一个测试)。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 函数式编程 + 闭包 — 工厂函数返回的对象捕获 闭包内的局部变量,
+    这些变量对外不可见, 只能通过返回的方法访问。 每次调
+    <code>createXxx()</code>
+    都得到全新闭包, 状态天然隔离。 闭包没有
+    <code>this</code>
+    , 传 callback 永远不会丢上下文。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版
+export function createTodoManager(): TodoManager {
+  // 状态在闭包内, 不放 module-level
+  const items = new Map&lt;string, Todo&gt;();
+  let activeId: string | null = null;
 
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
+  // 公开方法闭包返回的对象
+  return {
+    create(content: string): Todo { /* ... */ },
+    update(id: string, status: TodoStatus): boolean { /* ... */ },
+    list(): Todo[] { return [...items.values()]; },
+    // ...
+  };
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/todo.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createTodoManager 工厂 + 闭包 (最典型示例) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>工厂函数</strong>
+      <code>createTodoManager</code>
+      返回对象, 不
+      <code>new TodoManager()</code>
+      。
+    </li>
+    <li>
+      <strong>状态在闭包内</strong>
+      <code>items</code>
+      /
+      <code>activeId</code>
+      外部 看不到, 只能通过返回的方法访问。
+    </li>
+    <li>
+      <strong>this 不存在</strong>
+      避免 TypeScript class 常见的
+      <code>this</code>
+      丢失问题 (callback / 解构时丢上下文)。
+    </li>
+  </ol>
+  <h3>仓库里哪些文件用这个模式</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>文件</th>
+        <th>工厂</th>
+        <th>闭包状态</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/history.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/history.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createHistory()</code>
+        </td>
+        <td>messages 数组</td>
+      </tr>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/todo.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/todo.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createTodoManager()</code>
+        </td>
+        <td>items map + activeId</td>
+      </tr>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/skills.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/skills.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createActiveSkillSet()</code>
+          /
+          <code>createSkillLoader()</code>
+        </td>
+        <td>activated map + toolIndex map</td>
+      </tr>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/memory.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createMemoryManager()</code>
+        </td>
+        <td>MemoryStore 实例</td>
+      </tr>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/tasks.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createTaskManager()</code>
+        </td>
+        <td>TaskStore 实例 + activeTaskGroupId</td>
+      </tr>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/async-runs.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createAsyncRunManager()</code>
+        </td>
+        <td>runs map + runningCount</td>
+      </tr>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/schedules.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createScheduleManager()</code>
+        </td>
+        <td>ScheduleStore + 触发状态</td>
+      </tr>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/permission.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/permission.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createPermissionManager()</code>
+        </td>
+        <td>mode + blacklist + whitelist</td>
+      </tr>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/hooks.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/hooks.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createHookRunner()</code>
+        </td>
+        <td>hooks map (按 timing 分组)</td>
+      </tr>
+      <tr>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-llm.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/eval/live/live-llm.ts</code></a
+          >
+        </td>
+        <td>
+          <code>createLiveEvalLLMClient()</code>
+        </td>
+        <td>LLMClient + trace emitter</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>为什么不直接用 class</h3>
+  <p>
+    朴素想法: "用 class 写, 状态放 private 字段, 不是更清晰?" 错。 class 在
+    TypeScript 里有两个问题:
+  </p>
+  <ol>
+    <li>
+      <strong>this 绑定问题</strong>
+      : 把方法当 callback 传 (e.g.
+      <code>setTimeout</code>
+      ),
+      <code>this</code>
+      丢失, 访问
+      <code>this.items</code>
+      变
+      <code>undefined</code>
+      。 闭包没有这个问题 — 闭包捕获的是变量, 不是
+      <code>this</code>
+      。
+    </li>
+    <li>
+      <strong>测试隔离</strong>
+      : 测一个方法要
+      <code>new TodoManager()</code>
+      , 测完销毁。 闭包工厂一行
+      <code>createTodoManager()</code>
+      即可, 自动隔离。
+    </li>
+    <li>
+      <strong>父子隔离自动</strong>
+      : 父子 agent 各自调
+      <code>createTodoManager()</code>
+      , 闭包天然隔离。 class 要手动传实例, 容易写错。
+    </li>
+  </ol>
+  <p>这就是为什么仓库 100% 用工厂 + 闭包, 一个 class 都没有。</p>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 闭包状态被意外共享</dt>
+    <dd>
+      在工厂函数外定义 const, 然后在工厂内捕获 — 这会"按模块共享"而不是
+      "按实例共享"。 状态必须
+      <strong>在工厂函数体内</strong>
+      声明。
+    </dd>
+    <dt>陷阱 · 闭包引用了大对象导致内存泄漏</dt>
+    <dd>
+      闭包捕获的对象无法被 GC。 Async Run / Schedule 完成后必须
+      <code>finishRun()</code>
+      显式清理闭包内的 map, 否则长期跑内存爆炸。
+    </dd>
+  </dl>
+  <h2 id="pattern-2">
+    模式 2 · 窄接口 + Adapter 翻译 (Narrow Interface + Adapter)
+  </h2>
+  <p>
+    <strong>出现频率</strong>
+    : 外部依赖 (LLM / 终端 / 工具 / Provider / LLM Provider Error)
+    全部用这模式。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 业务代码直接调
+    <code>openai.chat.completions.create()</code>
+    时, 业务被 provider 特定字段名污染; Anthropic / OpenAI / Google 三个
+    provider 字段格式完全不同; 换 provider = 重写业务; provider 错误码各不相同
+    (Anthropic 429 / OpenAI 429 / Google RESOURCE_EXHAUSTED) 业务需要逐个识别。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>适配器模式</strong>
+    +
+    <strong>接口隔离原则</strong>
+    。 定义一个跟外部细节
+    <strong>无关</strong>
+    的窄接口 (只含业务真正需要 的 1-3 个方法), 业务模块只 import 这个接口类型,
+    不 import 任何 外部 SDK。 Adapter 实现这个接口, 内部把所有 provider 特定逻辑
+    (字段名 / 错误码 / 重试 / 缓存) 翻译成内部统一类型。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 业务模块 0 改动换 provider; 测试用 fake 替换; provider-specific
+    错误码统一翻译; 重试 / 缓存 / streaming 这些"中间件" 关注点藏 adapter 内部。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版
+// 1. 定义窄接口
+interface LLMClient {
+  chat(args: { messages; tools? }): Promise&lt;LLMResponse&gt;;
+}
 
-<hr class="rule" />
+interface LLMResponse {
+  content: string | null;
+  toolCalls: ChatCompletionMessageToolCall[];
+  finishReason: string | null;
+}
 
-<h2 id="usage">怎么用这一页</h2>
-<p>
-  <strong>查术语</strong>: 第一节"术语锁定表" 列出 19 个核心术语,
-  每个标注首次出现章节和是否允许中文别名。
-</p>
-<p>
-  <strong>写 prompt</strong>: 第二节"6 段 Prompt Card 模板" 给你一份
-  完整的反例对照 (差 → 改 → 好), 你可以照着写。
-</p>
-<p>
-  <strong>做验证</strong>: 第三节"Validation 速查" 列出 16 章的 Validation
-  卡片一句话总结, 方便回头查具体断言。
-</p>
-<p>
-  <strong>走章节</strong>: 第四节"章节 Prompt Pack 总目录" 列出每章 的目标 /
-  模块 / 边界 / 验证一句话。
-</p>
+// 2. Adapter 实现接口, 内部处理 provider 特定逻辑
+export function createOpenAILLMClient(config: ResolvedLLMConfig): LLMClient {
+  const openai = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL });
+  return {
+    async chat({ messages, tools }) {
+      const completion = await openai.chat.completions.create({
+        model: config.model,
+        messages,
+        tools,    // OpenAI 格式转换在 adapter 内部
+      });
+      // OpenAI 特定: choice[0].message.tool_calls
+      const message = completion.choices[0].message;
+      return {
+        content: message.content,
+        toolCalls: message.tool_calls ?? [],
+        finishReason: completion.choices[0].finish_reason,
+      };
+    },
+  };
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/llm.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createOpenAILLMClient (LLMClient 适配器) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>接口只暴露 1 个方法</strong>
+      :
+      <code>chat()</code>
+      , 不暴露
+      <code>temperature</code>
+      /
+      <code>max_tokens</code>
+      等 provider 特有参数。 这些参数由 adapter 内部处理, 业务模块不感知。
+    </li>
+    <li>
+      <strong>Adapter 翻译 provider 特定字段</strong>
+      : OpenAI 的
+      <code>choices[0].message</code>
+      翻译成
+      <code>LLMResponse</code>
+      。 换 Claude 时, Claude adapter 自己处理
+      <code>content[0].text</code>
+      。
+    </li>
+    <li>
+      <strong>业务模块只看接口</strong>
+      :
+      <code>agent.ts</code>
+      import
+      <code>LLMClient</code>
+      类型, 不 import OpenAI。 换 Claude = 换 adapter, 业务代码 0 改动。
+    </li>
+  </ol>
+  <h3>仓库里哪些文件用这个模式</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>外部依赖</th>
+        <th>窄接口</th>
+        <th>Adapter</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>LLM (OpenAI / Anthropic / Google)</td>
+        <td>
+          <code>LLMClient</code>
+          (1 个方法)
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/llm.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/llm.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>REPL 终端</td>
+        <td>
+          <code>Terminal</code>
+          (3 个方法)
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/terminal.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/terminal.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>工具调用</td>
+        <td>
+          <code>ToolResult</code>
+          接口 +
+          <code>ToolRegistry</code>
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/tools/registry.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/tools/registry.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Provider 错误</td>
+        <td>
+          <code>LLMErrorKind</code>
+          7 类枚举
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/llm-adapter.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/llm-adapter.ts</code></a
+          >
+          翻译
+        </td>
+      </tr>
+      <tr>
+        <td>Eval 工具执行</td>
+        <td>
+          <code>ToolExecutor</code>
+          函数类型
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/in-process-driver.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code
+              >src/eval/drivers/learn-claude-code/in-process-driver.ts</code
+            ></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Eval LLM</td>
+        <td>
+          <code>LLMClient</code>
+          (复用主项目的)
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/scripted-llm.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/eval/drivers/learn-claude-code/scripted-llm.ts</code></a
+          >
+          /
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/replay/replay-llm.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>replay/replay-llm.ts</code></a
+          >
+          /
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/live/live-llm.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>live/live-llm.ts</code></a
+          >
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>3 个边界设计</h3>
+  <p>写 adapter 时, 必须遵守 3 条:</p>
+  <ol>
+    <li>
+      <strong>接口只暴露业务关心的</strong>
+      : 业务不需要 "messages 在 Anthropic 哪个字段", 只需要 "LLMResponse.content
+      / toolCalls"。 其他字段不外泄。
+    </li>
+    <li>
+      <strong>错误统一翻译</strong>
+      : Provider 错误码 (Anthropic 429 / OpenAI 429 / Google RESOURCE_EXHAUSTED)
+      全部翻译成
+      <code>LLMErrorKind.rate_limit</code>
+      。 Recovery 模块 (第 11 章) 不看 provider。
+    </li>
+    <li>
+      <strong>Adapter 自己处理 network / retry / cache</strong>
+      : 这些 "中间件" 关注点藏 adapter 内部, 业务模块不感知。
+    </li>
+  </ol>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 接口设计过大</dt>
+    <dd>
+      LLMClient 暴露
+      <code>setTemperature()</code>
+      /
+      <code>setMaxTokens()</code>
+      等 5 个 setter, 业务模块就要关心这 5 个。 正确做法: 接口只有
+      <code>chat()</code>
+      一个方法, 这些 setter 藏在 adapter 内部或 通过 RuntimePolicy 注入。
+    </dd>
+    <dt>陷阱 · 业务模块 import 了 adapter</dt>
+    <dd>
+      <code>import { createOpenAILLMClient } from "./llm.js"</code>
+      — 这破坏了窄接口的隔离。 业务应该 import 类型
+      <code>LLMClient</code>
+      , 让 Composition Root 决定用哪个 adapter 实现。
+    </dd>
+  </dl>
+  <h2 id="pattern-3">模式 3 · 依赖注入 (Dependency Injection)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 几乎所有 manager 的构造函数 / 工厂函数。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 业务代码自己
+    <code>new PermissionManager()</code>
+    /
+    <code>new Logger()</code>
+    时, 业务被具体实现绑死; 改 logger 格式要改 业务代码; 测试时无法替换 logger
+    收集输出 (因为 logger 在业务内部 new 出来的, 外面引用不到)。
+  </p>
+  <p>
+    <strong>原理</strong>
+    :
+    <strong>控制反转</strong>
+    (Inversion of Control) — 业务模块不再控制依赖的创建, 而是
+    <strong>接收</strong>
+    别人创建的 依赖 (通过构造函数 / 工厂参数)。 依赖的"组装" 集中在 Composition
+    Root, 业务模块保持纯净。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 测试可以注入 fake 实现 (e.g. ScriptedLLMClient 替代真实 LLM); 改 logger /
+    permission / tool 不改业务代码; 业务模块 0 配置即可运行 (因为依赖是注入的,
+    不需要 自己读 env / config)。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版
+export function createAgent(deps: {
+  llm: LLMClient;             // 注入 LLM
+  history: History;           // 注入 history
+  tools: ToolRegistry;        // 注入 tool registry
+  permissionManager: PermissionManager;   // 注入 permission
+  todoManager: TodoManager;   // 注入 todo
+  memoryManager?: MemoryManager;   // 可选注入
+  hookRunner: HookRunner;     // 注入 hook
+  recoveryManager: RecoveryManager;   // 注入 recovery
+}): Agent {
+  return {
+    async run(query: string) {
+      // 业务代码不 new 任何 manager, 只用注入的
+      // 测试时可以传 fake
+    },
+  };
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createAgent 依赖注入 (deps 对象接收) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>deps 对象统一接收</strong>
+      : 不是
+      <code>createAgent(llm, history, tools, ...)</code>
+      一长串参数, 而是一个 deps 对象, 阅读时一目了然。
+    </li>
+    <li>
+      <strong>可选依赖用 <code>?</code></strong>
+      : memoryManager 可选, 调
+      <code>deps.memoryManager?.list()</code>
+      兼容缺省。
+    </li>
+    <li>
+      <strong>业务模块不感知注入</strong>
+      : 写 agent 主循环时, 不关心谁注入的, 只关心"调一下 deps.llm.chat()
+      拿响应"。
+    </li>
+  </ol>
+  <h3>哪些是注入, 哪些不是</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>类别</th>
+        <th>注入</th>
+        <th>不注入 (模块自己管理)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>外部依赖</td>
+        <td>LLM / Terminal / 工具集 / Permission / Hook / Recovery</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td>运行时状态</td>
+        <td>
+          History / TodoManager / MemoryManager / TaskManager / AsyncRunManager
+          / ScheduleManager
+        </td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td>内部辅助</td>
+        <td>Logger / CacheDebugger / Compressor / OutputStore</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td>常量 / 静态数据</td>
+        <td>—</td>
+        <td>HARDCODED_BLACKLIST (command-safety.ts)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    决策规则:
+    <strong>"如果测试需要替换它, 它就是注入"</strong>
+    。 命令黑名单 不注入, 因为测试不需要替换; logger 也注入, 因为不同测试需要
+    不同 logger 收集输出。
+  </p>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 默认值放在构造函数内, 不可注入</dt>
+    <dd>
+      <code>new MyService({ logger: createDefaultLogger() })</code>
+      — 测试时 想换 logger, 改不了。 正确: 业务模块
+      <strong>必须接收 null / undefined</strong>
+      , 显式决定默认值, 不私自 new。
+    </dd>
+    <dt>陷阱 · 注入"上帝对象" 一个 deps 包揽 10 个东西</dt>
+    <dd>
+      业务模块的 deps 膨胀到 10+ 个, 难以阅读。 正确: 拆成几个相关 集合 (e.g.
+      <code>{ llm, history, messages }</code>
+      一起,
+      <code>{ logger, metrics }</code>
+      一起)。
+    </dd>
+  </dl>
+  <h2 id="pattern-4">模式 4 · Composition Root (唯一组装点)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 项目只有 1 个 Composition Root:
+    <code>src/index.ts</code>
+    的
+    <code>main()</code>
+    。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 业务模块互相 import, 改一个全挂; 难 部署到不同环境 (CLI / GUI / CI /
+    测试); 测试时无法替换真实 实现 (因为业务自己 new 了)。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>依赖反转</strong>
+    的极端形式 — 整个 项目的"对象图构造" 集中到 1 个函数, 业务模块之间不互相 new
+    对方。 Composition Root 是唯一
+    <strong>知道所有实现细节</strong>
+    的地方。 切换环境 = 切换 Composition Root, 业务模块 0 改动。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 换测试 = 换
+    <code>main()</code>
+    一处; 换部署 = 换
+    <code>main()</code>
+    一处; 业务模块保持纯净, 永远不依赖具体 实现。
+    业务模块之间的依赖关系图"塌缩成一个点", 维护复杂度 从 O(n²) 降到 O(n)。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, 真实 src/index.ts 比这复杂
+export async function main() {
+  // 1. 读配置
+  const config = loadConfig();
 
-<h2 id="terms">术语锁定表</h2>
-<p>
-  下表是 19 个核心术语。第一次出现时用 <code>English</code> (中文释义) 格式,
-  之后只用英文。<strong>术语锁定原则</strong>: 同一概念只用 一种说法,
-  不允许中途换。
-</p>
-<table class="terms">
-  <thead>
-    <tr>
-      <th>术语</th>
-      <th>中文释义</th>
-      <th>首次出现</th>
-      <th>别名</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>harness</code></td>
-      <td>外层运行环境</td>
-      <td>00</td>
-      <td>不允许用"框架" / "包装"</td>
-    </tr>
-    <tr>
-      <td><code>agent loop</code></td>
-      <td>主循环</td>
-      <td>00</td>
-      <td>简称 <code>loop</code></td>
-    </tr>
-    <tr>
-      <td><code>History</code></td>
-      <td>消息列表</td>
-      <td>01</td>
-      <td>不允许用"上下文" / "对话历史"</td>
-    </tr>
-    <tr>
-      <td><code>LLMClient</code></td>
-      <td>大模型调用接口</td>
-      <td>01</td>
-      <td>不允许用"模型" / "AI"</td>
-    </tr>
-    <tr>
-      <td><code>tool call</code></td>
-      <td>工具调用请求</td>
-      <td>02</td>
-      <td>不允许用"工具请求" / "调用工具"</td>
-    </tr>
-    <tr>
-      <td><code>tool result</code></td>
-      <td>工具调用结果</td>
-      <td>02</td>
-      <td>role 必须是 "tool"</td>
-    </tr>
-    <tr>
-      <td><code>tool registry</code></td>
-      <td>工具注册表</td>
-      <td>02</td>
-      <td>不允许用"工具表" / "工具列表"</td>
-    </tr>
-    <tr>
-      <td><code>tool_call_id</code></td>
-      <td>工具调用 id</td>
-      <td>02</td>
-      <td>必须来自 LLM 返回, 不重生成</td>
-    </tr>
-    <tr>
-      <td><code>Composition Root</code></td>
-      <td>组装根 (<code>index.ts</code>)</td>
-      <td>01</td>
-      <td>不允许用"主入口" / "启动文件"</td>
-    </tr>
-    <tr>
-      <td><code>fake LLM</code></td>
-      <td>假模型</td>
-      <td>00</td>
-      <td>不允许用"mock 模型"</td>
-    </tr>
-    <tr>
-      <td><code>reminder</code></td>
-      <td>系统提醒消息</td>
-      <td>03</td>
-      <td>
-        role 是 "user", 标签 <code>&lt;system-reminder source="X"&gt;</code>
-      </td>
-    </tr>
-    <tr>
-      <td><code>stable prefix</code></td>
-      <td>稳定前缀</td>
-      <td>10</td>
-      <td>system prompt + tools 字段</td>
-    </tr>
-    <tr>
-      <td><code>SubAgent</code></td>
-      <td>子智能体</td>
-      <td>04</td>
-      <td>不允许用"子任务" / "分 agent"</td>
-    </tr>
-    <tr>
-      <td><code>Skill</code></td>
-      <td>按需加载工具集</td>
-      <td>05</td>
-      <td>不允许用"插件" / "扩展"</td>
-    </tr>
-    <tr>
-      <td><code>Permission</code></td>
-      <td>权限决策</td>
-      <td>07</td>
-      <td>action 是 "allow" / "ask" / "deny"</td>
-    </tr>
-    <tr>
-      <td><code>Hook</code></td>
-      <td>钩子</td>
-      <td>08</td>
-      <td>exitCode 0/1/2</td>
-    </tr>
-    <tr>
-      <td><code>Recovery</code></td>
-      <td>失败恢复</td>
-      <td>11</td>
-      <td>action 是 retry / compact_and_retry / abort</td>
-    </tr>
-    <tr>
-      <td><code>Async Run</code></td>
-      <td>后台任务</td>
-      <td>13</td>
-      <td>不允许用"异步任务" / "后台进程"</td>
-    </tr>
-    <tr>
-      <td><code>Schedule</code></td>
-      <td>定时任务</td>
-      <td>14</td>
-      <td>cron 表达式, source 标签 "schedule"</td>
-    </tr>
-  </tbody>
-</table>
-<p>
-  <strong>不变量原则</strong>: 任何一章引入新术语, 第一次出现时必须在本表
-  加一行; 别名替换在所有章节内生效。
-</p>
+  // 2. 创建项目级 context (路径派生)
+  const projectContext = createProjectContext({
+    projectRoot: process.cwd(),
+    agentHome: process.env.AGENT_HOME ?? "~/.swoopcode",
+  });
 
-<h2 id="prompt-template">6 段 Prompt Card 模板</h2>
-<p>
-  这是第 00 章确立的模板, 这里只列反例对照。完整示例见第 01 章 Prompt Card。
-</p>
-<div class="card card--prompt">
-  <div class="card__head">
-    <span class="card__tag">反例对照 · 差 → 改 → 好</span>
-  </div>
-  <div class="card__body">
-    <p><strong>差的卡片 (5 段, LLM 会偷懒):</strong></p>
-    <pre class="code-block"><code>目标: 实现 agent loop
-模块: history.ts, llm.ts, agent.ts, index.ts
-验证: 能跑通
-边界: 注意架构
-场景: 用户输入 query, agent 调用 LLM 返回文本</code></pre>
-    <p>
-      <strong>问题:</strong>"能跑通" 不是断言, "注意架构" 不可验证, 没说
-      messages 怎么拼。
-    </p>
-    <p><strong>改 (5 段, 有信息量但 LLM 仍会猜):</strong></p>
-    <pre class="code-block"><code>目标: 实现最小 agent loop, 多轮对话保留上下文
-模块: createHistory, createLlm, createAgent, createRepl, index.ts
-验证: 连续两次 run 后第二次 LLM 收到 messages 包含第一轮
-边界: agent.ts 不读环境变量, 不直接 new LLM client
-场景: 用户先说"我喜欢简洁", 再问"我喜欢什么风格"</code></pre>
-    <p><strong>改进:</strong>有 messages 顺序断言, 有"绝对不能" 的边界。</p>
-    <p><strong>好 (6 段, LLM 没空间偷懒):</strong></p>
-    <pre
-      class="code-block"
-    ><code>目标: 实现最小 agent loop, 多轮上下文由 History 提供
-场景: 用户依次输入 "我喜欢简洁" 与 "我喜欢什么风格",
-      agent 第二次回复应包含"简洁"
-模块:
-  - src/history.ts: createHistory(), 内部 messages: Message[]
-  - src/llm.ts: createLlm(config), 暴露 chat(messages)
-  - src/agent.ts: createAgent(deps), 暴露 run(query)
-  - src/repl.ts: createRepl(deps), 暴露 start()
-  - src/index.ts: 创建 history/llm/terminal, 传给 agent 和 repl
-接线: index.ts 内只做 new + 传参, 不出现 if 分支
-边界 (LLM 必须遵守):
-  - agent.ts 内不出现 process.env
-  - agent.ts 内不出现 new LLMClient
-  - history.getMessages() 返回浅拷贝
-  - 空 query 不写入 history
-验证:
-  - fake LLM 返回 "收到" 时 agent.run("x") === "收到"
-  - 连续两次 run, fake LLM 第二次收到的 messages.length === 3
-  - 第二次收到的 messages[0].role === "user"
-  - run("") 不增加 history 长度</code></pre>
-    <p>
-      <strong>关键差异</strong>: "边界" 是可枚举 checklist, "验证" 每条 都能落到
-      vitest 一行断言, "接线" 写明实例是不是同一份。
-    </p>
-  </div>
-</div>
+  // 3. 创建 logger
+  const logger = createLogger();
 
-<h2 id="vibe-coding-template">vibe coding 4 轮拆卡</h2>
-<p>6 段卡片是总图, 喂给 LLM 要分 4 轮:</p>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>: 只贴 "目标 + 场景 + 模块", 让 LLM 给出
-    interface 草案 (不写实现, 只钉形状)。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>: 贴 "模块 + 接线", 让 LLM 给出
-    <code>index.ts</code> 接线, 工厂是 stub。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>: 贴 "边界 checklist", 让 LLM 按 checklist
-    写每个工厂实现。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>: 贴 "验证断言清单", 让 LLM 写测试, 优先 fake
-    LLM + messages 顺序断言。
-  </li>
-</ol>
-<p>4 轮独立可验证, 任一轮不通过单独回退。</p>
+  // 4. 创建共享实例
+  const llm = createLLMClient(config.llm, config.runtimePolicy);
+  const history = createHistory();
+  const toolRegistry = createToolRegistry();
+  const todoManager = createTodoManager();
+  const permissionManager = createPermissionManager({ mode: "default", terminal });
+  const hookRunner = createHookRunner();
+  // ... 还有 memory / task / async / schedule 等
 
-<h2 id="validation-cheatsheet">Validation 速查</h2>
-<p>16 章 Validation 卡片一句话总结。完整的 Validation 卡片在每章末。</p>
-<table class="terms">
-  <thead>
-    <tr>
-      <th>章节</th>
-      <th>核心断言</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>00 · 元方法</td>
-      <td>vibe coding 4 轮拆卡 + review checklist + 防自欺 4 盏红灯</td>
-    </tr>
-    <tr>
-      <td>01 · 最小 loop</td>
-      <td>fake LLM 收到 messages 顺序 + history 浅拷贝 + 空 query 不写入</td>
-    </tr>
-    <tr>
-      <td>02 · 工具调用</td>
-      <td>tool_call_id 配对 + 错误仍写 tool message + 未知工具不崩</td>
-    </tr>
-    <tr>
-      <td>03 · TODO</td>
-      <td>状态机拒绝跳跃 + in_progress 唯一 + reminder 走 user 消息</td>
-    </tr>
-    <tr>
-      <td>04 · SubAgent</td>
-      <td>父子 history/todo 隔离 + 防递归 + maxRounds 触发截断</td>
-    </tr>
-    <tr>
-      <td>05 · Skill</td>
-      <td>activeSkills 闭包化 + 工具去重 + 父子 skill 隔离</td>
-    </tr>
-    <tr>
-      <td>06 · Compress</td>
-      <td>压缩不写回 history + tool_call_id 保留 + summary block 替换</td>
-    </tr>
-    <tr>
-      <td>07 · Permission</td>
-      <td>deny 必写 tool message + 子智能体 ask 降级 + denylist 优先</td>
-    </tr>
-    <tr>
-      <td>08 · Hook</td>
-      <td>
-        PreToolUse block 写 tool message + Hook 抛错降级 + 注入消息延迟追加
-      </td>
-    </tr>
-    <tr>
-      <td>09 · Memory</td>
-      <td>memory 不进 history + scope 隔离 + key 命名规范</td>
-    </tr>
-    <tr>
-      <td>10 · Cache</td>
-      <td>动态状态走 reminder + snapshot 字符串比较 + tools 拼装稳定</td>
-    </tr>
-    <tr>
-      <td>11 · Recovery</td>
-      <td>rate_limit 退避重试 + truncation 累积 + retry 上限放弃</td>
-    </tr>
-    <tr>
-      <td>12 · Task</td>
-      <td>renderActive 过滤 completed + 状态机校验 + id 由 harness 生成</td>
-    </tr>
-    <tr>
-      <td>13 · Async Run</td>
-      <td>不阻塞主 loop + 通知 drain + 冲突检测 + P1 压缩复用</td>
-    </tr>
-    <tr>
-      <td>14 · Schedule</td>
-      <td>tick 派发到 async run + 通知单独 source + timezone 解析</td>
-    </tr>
-    <tr>
-      <td>15 · Hardening</td>
-      <td>所有 IO 走 atomic write + dry-run 不真删 + 时间统一 number</td>
-    </tr>
-  </tbody>
-</table>
+  // 5. 注册内置 hook (audit log / prettier / memory injection 等)
+  hookRunner.register(auditLogHook);
+  hookRunner.register(memoryInjectionHook(memoryManager));
 
-<h2 id="chapter-pack">章节 Prompt Pack 总目录</h2>
-<p>每章一句话总结, 方便写"重建这个项目" 的总 prompt 时查阅。</p>
-<dl class="defs">
-  <dt>00 · 元方法</dt>
-  <dd>用 LLM 写 LLM agent 的元方法: 4 轮拆卡 + review + 防自欺。</dd>
-  <dt>01 · 最小 loop</dt>
-  <dd>History + LLMClient + Agent + REPL + Composition Root 五件套。</dd>
-  <dt>02 · 工具调用</dt>
-  <dd>tool registry + tool_call 协议 + agent 主循环加 tool 分支。</dd>
-  <dt>03 · TODO</dt>
-  <dd>TODO 状态机 + reminder 注入 + 不污染 system prompt。</dd>
-  <dt>04 · SubAgent</dt>
-  <dd>父子 history/todo 隔离 + 防递归 + maxRounds。</dd>
-  <dt>05 · Skill</dt>
-  <dd>activeSkills 闭包化 + 按需激活 + 工具去重。</dd>
-  <dt>06 · Compress</dt>
-  <dd>三层压缩管道 (Normalize / Block / Compress) + 不写回 history。</dd>
-  <dt>07 · Permission</dt>
-  <dd>同步拦截 + deny 必写 tool message + 子智能体 ask 降级。</dd>
-  <dt>08 · Hook</dt>
-  <dd>三个事件 (SessionStart / PreToolUse / PostToolUse) + exitCode 0/1/2。</dd>
-  <dt>09 · Memory</dt>
-  <dd>user / project 双 scope + key 命名规范 + SessionStart 注入。</dd>
-  <dt>10 · Cache</dt>
-  <dd>稳定前缀 / 动态状态 / 自然增量 三段布局。</dd>
-  <dt>11 · Recovery</dt>
-  <dd>6 种失败分类 + 不同策略 + retry 上限 + 不跨 run 共享。</dd>
-  <dt>12 · Task</dt>
-  <dd>结构化字段 + 状态机严格 + renderActive 过滤 + id 由 harness 生成。</dd>
-  <dt>13 · Async Run</dt>
-  <dd>后台派发 + drain 通知 + 冲突检测 + 复用 P1 压缩。</dd>
-  <dt>14 · Schedule</dt>
-  <dd>cron 调度 + 复用 async run + 单独 source 标签 + timezone 解析。</dd>
-  <dt>15 · Hardening</dt>
-  <dd>原子写 + 日志轮转 + output 引用计数 + dry-run + 时间统一。</dd>
-</dl>
+  // 6. 创建 agent (注入所有依赖)
+  const agent = createAgent({
+    llm, history, tools: toolRegistry,
+    todoManager, permissionManager, hookRunner, recoveryManager, ...
+  });
 
-<h2 id="tension-map">张力地图: 章节之间的矛盾点</h2>
-<p>
-  harness 设计不是"哪一章节对的", 而是"在哪些约束下做哪种选择"。下面
-  是章节之间反复出现的张力, 回头查这里。
-</p>
-<dl class="defs">
-  <dt>压缩 vs cache (06 vs 10)</dt>
-  <dd>
-    压缩让 messages 短, 但破坏 system prompt 字符串的 cache 前缀稳定性。P2
-    总结的 LLM 调用本身吃 cache 配额, 需要 stable context 隔离。
-  </dd>
-  <dt>并行 vs 串行工具 (02 vs 13)</dt>
-  <dd>
-    同一个工具并行跑 (例如两个 run_bash) 容易写同一文件, async run +
-    冲突检测是折中方案。
-  </dd>
-  <dt>memory vs task (09 vs 12)</dt>
-  <dd>
-    memory 是"用户级偏好" (跨项目), task 是"项目级 plan"
-    (单项目)。用户换项目后项目级 fact 隐藏, user 级保留。
-  </dd>
-  <dt>reminder 频率 (03 vs 13 vs 14)</dt>
-  <dd>
-    TODO reminder / async run notification / schedule notification 都走 reminder
-    标签, 各自 source 区分。频率高时 reminder 累积, 需要各自内部去重。
-  </dd>
-  <dt>权限共享 vs 隔离 (07 vs 04)</dt>
-  <dd>
-    父子 agent 共享 permission 策略 (子不能绕过父), 但 history / todo
-    隔离。共享与隔离的边界是 harness 设计核心。
-  </dd>
-  <dt>eval 实时性 vs 重放 (eval vs 11)</dt>
-  <dd>
-    eval 跑真实 LLM 能反映现状, 但每次跑结果可能不同; 重放 deterministic LLM
-    stub 稳定但可能与真实行为漂移。两者结合用 (deterministic 主 + live 副)。
-  </dd>
-</dl>
+  // 7. 启动 REPL
+  const terminal = createReadlineTerminal();
+  await startRepl(agent, terminal);
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/index.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · main() Composition Root (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>唯一 import 一切</strong>
+      : 业务模块 (agent / history / llm) 之间 互不 import, 只在
+      <code>index.ts</code>
+      一处 import。
+    </li>
+    <li>
+      <strong>唯一 new 一切</strong>
+      : 业务模块用工厂函数, 工厂不 new,
+      <code>index.ts</code>
+      调工厂。 业务模块不直接构造依赖。
+    </li>
+    <li>
+      <strong>测试时换 <code>main()</code></strong>
+      : eval test 写一个
+      <code>testMain()</code>
+      替换: 注入 fake LLM / fake terminal, 不动业务代码。
+    </li>
+  </ol>
+  <h3>为什么只能有 1 个</h3>
+  <p>
+    朴素想法: "能不能有 2 个 Composition Root, 一个给 CLI, 一个给 GUI?" 错。
+    多个 Composition Root 意味着"业务模块 import 关系散落多处", 违反原则 1。
+    正确做法:
+  </p>
+  <pre class="code-block"><code>// src/cli-main.ts (Composition Root for CLI)
+import { createAgent, createReadlineTerminal, ... } from "./agent.js";
+export async function main() { /* ... */ }
 
-<h2 id="next-step">下一步</h2>
-<p>现在你已经走完整套教程。建议的下一步:</p>
-<ol>
-  <li>
-    挑一章 (建议从 02 章开始, 不依赖 00/01 的元方法), 用本章 6 段模板自己写一份
-    Prompt Card。
-  </li>
-  <li>
-    用第 01 章的 fake LLM Cookbook 写测试, 验证你写的卡片能让 LLM 实现通过
-    Validation。
-  </li>
-  <li>挑一章做 vibe coding 4 轮拆卡练习, 每轮跑通 Validation 才进下一轮。</li>
-  <li>
-    读 eval 专题章, 学习如何把"卡片的实现" 自动化回归 (eval 反馈 prompt 优化)。
-  </li>
-  <li>
-    读 model-policy 专题章, 学习不同大模型的差异 (cache / tool call / 错误码)。
-  </li>
-</ol>
+// src/gui-main.ts (Composition Root for GUI)
+import { createAgent, createElectronTerminal, ... } from "./agent.js";
+export async function main() { /* ... */ }
+
+// 业务模块 ./agent.js 不变, 只是 Terminal 注入不同</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/index.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · main() Composition Root (多个 main.ts 模板) (L1)</a
+    >
+  </p>
+  <p>多个 main.ts, 但每个 main.ts 都是 Composition Root, 业务模块 0 改动。</p>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>
+      陷阱 · 在业务模块里调
+      <code>loadConfig()</code>
+    </dt>
+    <dd>
+      <code>loadConfig()</code>
+      是"如何配置" 的实现, 应该只在 Composition Root 调。
+      业务模块不应该知道"配置从哪里来", 它只接收配置好的 对象。
+    </dd>
+    <dt>陷阱 · Composition Root 变成"上帝函数" 几千行</dt>
+    <dd>
+      main() 膨胀到 1000+ 行, 难维护。 正确: 把"创建一组相关对象" 抽成辅助函数
+      (e.g.
+      <code>createRuntime(config)</code>
+      ), main() 只负责"调一组辅助函数 + 启动 REPL"。
+    </dd>
+  </dl>
+  <h2 id="pattern-5">模式 5 · 注册表模式 (Registry Pattern)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : ToolRegistry / SkillLoader / HookRunner / MemoryStore / TaskStore /
+    ScheduleStore / OutputStore。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 工具/技能/hook 数量动态增长 (从 5 个 涨到 30+); 调用方要"按名字查找" +
+    "按类别枚举"; 翻译 (工具 def → LLM ChatCompletionTool) 应该跟调用解耦。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>注册表模式</strong>
+    — 把"按名字 查找对象" 抽成一个数据结构 (通常是
+    <code>Map&lt;string, T&gt;</code>
+    ), 外界通过
+    <code>register(name, obj)</code>
+    和
+    <code>get(name)</code>
+    交互。 注册和查询分离, 翻译 (LLM 格式转换) 藏 registry 内部。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 调用方不
+    <code>import</code>
+    具体工具类; 动态加载 (从配置文件扫) 不需要改业务代码; 翻译 (tool def → LLM
+    格式) 在 registry 集中, 不会散在业务模块各处; 未知名字统一返回 error, 不抛
+    throw。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版
+interface ToolRegistry {
+  register(name: string, def: ToolDefinition, executor: ToolExecutor): void;
+  get(name: string): ToolDefinition | undefined;
+  list(): ToolDefinition[];
+  getToolDefinitions(): ChatCompletionTool[];   // 转成 LLM 格式
+  invoke(name: string, args: unknown): Promise&lt;ToolResult&gt;;
+}
+
+export function createToolRegistry(): ToolRegistry {
+  const tools = new Map&lt;string, { def: ToolDefinition; executor: ToolExecutor }&gt;();
+
+  return {
+    register(name, def, executor) {
+      tools.set(name, { def, executor });
+    },
+    get(name) { return tools.get(name)?.def; },
+    list() { return [...tools.values()].map(t =&gt; t.def); },
+    getToolDefinitions() {
+      return [...tools.values()].map(t =&gt; ({
+        type: "function",
+        function: {
+          name: t.def.name,
+          description: t.def.description,
+          parameters: t.def.parameters,
+        },
+      }));
+    },
+    async invoke(name, args) {
+      const entry = tools.get(name);
+      if (!entry) return { content: `Tool not found: ${name}`, error: true };
+      return entry.executor(args, { /* tool context */ });
+    },
+  };
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/tools/registry.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createToolRegistry 注册表 (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>注册 / 查询 / 调用 分离</strong>
+      : 注册时存 def + executor, 查询时返回 def, 调用时 invoke executor。
+      三件事各管各的。
+    </li>
+    <li>
+      <strong>getToolDefinitions() 翻译</strong>
+      : 内部存 ToolDefinition, 对外返回 LLM 期望的 ChatCompletionTool 格式。
+      Adapter 翻译 在 registry 内部, 业务模块不感知。
+    </li>
+    <li>
+      <strong>未知工具返回 error</strong>
+      : 调不存在的工具不抛 throw, 返回
+      <code>{ content: "Tool not found", error: true }</code>
+      。 LLM 收到后能继续推理。
+    </li>
+  </ol>
+  <h3>3 个变种</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>变种</th>
+        <th>用途</th>
+        <th>示例文件</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>静态 registry</td>
+        <td>工具一次性注册, 之后不变</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/tools/registry.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/tools/registry.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>动态 loader</td>
+        <td>从配置目录扫描加载 (skill / memory / task)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/skills.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/skills.ts</code></a
+          >
+          /
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/memory.ts</code></a
+          >
+          /
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/tasks.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>分组 runner</td>
+        <td>按 timing 分组 (hook runner)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/hooks.ts#L1"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/hooks.ts</code></a
+          >
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · registry 自身有顺序依赖</dt>
+    <dd>
+      注册顺序决定调用顺序, 业务依赖了"特定顺序"。 正确: registry 只管 存储,
+      顺序由调用方决定, 或者按"插入顺序" 显式记录。
+    </dd>
+    <dt>陷阱 · registry 翻译函数返回不一致格式</dt>
+    <dd>
+      <code>getToolDefinitions()</code>
+      第一次返回
+      <code>{type: "function"}</code>
+      , 第二次返回
+      <code>{type: "tool"}</code>
+      — 业务崩溃。 正确: 翻译 函数应该是
+      <strong>纯函数</strong>
+      , 同样输入永远同样输出。
+    </dd>
+  </dl>
+  <h2 id="pattern-6">模式 6 · Builder / Pipeline 模式</h2>
+  <p>
+    <strong>出现频率</strong>
+    : agent.prepareMessages() 的消息处理管道 / Compressor 的 P0/P1/P2 /
+    各种"输入 → 多步处理 → 输出" 的场景。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 消息处理 / 压缩 / 恢复是多步操作, 每步 顺序不能换, 散在 if/else 里难调试;
+    单步测试难 (要准备完整数据才能 测中间一步)。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>管道模式</strong>
+    (Unix pipe 思想) — 把多步操作建模成"每步是纯函数, 输入 = 上一步输出,
+    顺序固定"。 每步
+    <strong>不可变</strong>
+    (不修改原数组, 返回新数组), 可以单独 测, 可以单独换实现。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 步骤可单测 (想测 P0 衰减? 直接调
+    <code>compressor.decay(blocks)</code>
+    , 不用先准备完整 messages); 步骤顺序错位立刻能看出 (调换顺序会出 bug,
+    测试会挂); 步骤是 纯函数, 无副作用, 调试容易。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre
+    class="code-block"
+  ><code>// 教学简化版, agent 主循环的 prepareMessages 管道
+function prepareMessages(input: {
+  history: History;
+  currentLoopIndex: number;
+  todoManager: TodoManager;
+  memoryManager: MemoryManager;
+  hooks: HookRunner;
+}): ChatCompletionMessageParam[] {
+  let blocks = getEntries(input.history);             // 1. 拿 entries
+  blocks = annotate(blocks, input.currentLoopIndex);   // 2. 标 metadata
+  blocks = normalize(blocks);                          // 3. 合并相邻同角色
+  blocks = group(blocks);                              // 4. 分组成 text/tool_use/summary
+  blocks = input.compressor.decay(blocks);             // 5. P0 衰减
+  blocks = input.compressor.compact(blocks);           // 6. P2 总结
+  blocks = input.hooks.run("LLMCall", blocks);         // 7. hook 注入
+  return flatten(blocks);                              // 8. 还原成 messages
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · prepareMessages Pipeline (8 步处理) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>每步是纯函数</strong>
+      : 输入 blocks, 输出 blocks, 不修改原数组。 顺序错了换行即可, 不会乱。
+    </li>
+    <li>
+      <strong>步骤固定, 不重排</strong>
+      :
+      <code
+        >getEntries → annotate → normalize → group → decay → compact → hooks →
+        flatten</code
+      >
+      。 任何一步乱序, 要么 metadata 丢, 要么压缩破坏消息块。
+    </li>
+    <li>
+      <strong>可单步测试</strong>
+      : 想测 P0 衰减? 直接调
+      <code>compressor.decay(blocks)</code>
+      , 不用先准备完整 messages。
+    </li>
+  </ol>
+  <h3>仓库里哪些地方用这个模式</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>管道</th>
+        <th>步骤</th>
+        <th>位置</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>agent.prepareMessages()</td>
+        <td>8 步 (上面列的)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L253"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/agent.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>tool 消息处理</td>
+        <td>load_skill 特殊处理 → 普通 invoke → 写 tool message</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L408"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/agent.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Compressor 三层</td>
+        <td>P0 衰减 → P1 即时 → P2 全量</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/compressor.ts#L150"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/compressor.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Recovery 决策</td>
+        <td>分类错误 → 选动作 → 状态机校验</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L198"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/recovery.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Hook 链</td>
+        <td>顺序执行, modified 累积, denied 短路</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/hooks.ts#L163"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/hooks.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Eval runner</td>
+        <td>
+          validate → create workspace → driver → steps → assert → judge → trace
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/runner.ts#L53"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/eval/core/runner.ts</code></a
+          >
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 步骤间有共享可变状态</dt>
+    <dd>
+      步骤 2 修改了步骤 1 准备的数据 (没返回新数组, 原地修改), 步骤 3
+      看到的是被改过的数据, 调试时以为是步骤 3 的 bug。 正确: 每步
+      <strong>必须返回新数据</strong>
+      , 不可变。
+    </dd>
+    <dt>陷阱 · 步骤之间用 callback 通信</dt>
+    <dd>
+      步骤 2 通过 closure 捕获步骤 1 的内部状态。 步骤顺序调换时, callback
+      引用旧状态, 难调试。 正确: 步骤之间只通过
+      <code>return</code>
+      通信, 不共享状态。
+    </dd>
+  </dl>
+  <h2 id="pattern-7">模式 7 · State Machine (状态机)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : Task 状态 (6 个) / Async Run 状态 (6 个) / Schedule trigger 状态 /
+    Recovery 状态。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 任务/Run 有 5+ 个状态, 状态间转换规则 复杂 (e.g. 失败能重试,
+    完成不能再回退); 不显式枚举, 业务代码会 写出"任意状态切换" 的混乱代码;
+    审计时不知道"任务到底处在 什么状态"。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>有限状态机</strong>
+    (FSM) — 用
+    <code>state enum</code>
+    +
+    <code>transition matrix</code>
+    显式枚举所有合法 状态和合法转换。 任何状态切换必须经过"状态机校验函数",
+    不允许 业务代码直接 set status。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 状态转换错误立刻被状态机捕获 (e.g. in_progress → pending 抛错);
+    状态机校验集中, 业务模块不能绕过; 审计能信任"任务当前 status" 是合法的。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, Task 状态机
+type TaskStatus = "pending" | "in_progress" | "completed" | "failed" | "cancelled" | "deleted";
+
+const ALLOWED_TRANSITIONS: Record&lt;TaskStatus, TaskStatus[]&gt; = {
+  pending:     ["in_progress", "cancelled"],
+  in_progress: ["completed", "failed", "cancelled"],
+  completed:   [],     // 终态
+  failed:      ["pending"],  // 失败可以重试
+  cancelled:   [],     // 终态
+  deleted:     [],     // 终态
+};
+
+function updateTaskStatus(task: Task, newStatus: TaskStatus): void {
+  const allowed = ALLOWED_TRANSITIONS[task.status];
+  if (!allowed.includes(newStatus)) {
+    throw new Error(`Cannot transition from ${task.status} to ${newStatus}`);
+  }
+  // 额外校验: pending → in_progress 必须先满足依赖
+  if (newStatus === "in_progress" &amp;&amp; !dependenciesCompleted(task)) {
+    throw new Error(`Task ${task.id} is blocked by ${task.blockedBy.join(", ")}`);
+  }
+  task.status = newStatus;
+  task.updatedAt = Date.now();
+  if (newStatus === "completed") task.completedAt = Date.now();
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createTaskManager 状态机 (6 状态 + 转换矩阵) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>转换矩阵显式枚举</strong>
+      : 哪个状态可以转哪个状态, 一张表查 一清二楚。 不允许任意状态切换
+      (那等于没状态机)。
+    </li>
+    <li>
+      <strong>业务校验放在 transition 函数</strong>
+      : 依赖检查 / 权限检查 / 时间窗检查, 都放在
+      <code>updateStatus()</code>
+      内部, 不让业务模块 自己检查后乱调 setStatus。
+    </li>
+    <li>
+      <strong>终态不可转出</strong>
+      : completed / cancelled / deleted 是终态, 不允许转出。 避免"撤销归档" /
+      "恢复已删除" 这类破坏审计的操作。
+    </li>
+  </ol>
+  <h3>仓库里哪些地方用这个模式</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>状态</th>
+        <th>状态数</th>
+        <th>关键转换</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Task</td>
+        <td>6 (pending/in_progress/completed/failed/cancelled/deleted)</td>
+        <td>pending → in_progress (依赖检查) / failed → pending (重试)</td>
+      </tr>
+      <tr>
+        <td>Async Run</td>
+        <td>6 (running/completed/failed/timeout/cancelled/abandoned)</td>
+        <td>running → 任何终态 (finishRun 唯一收敛)</td>
+      </tr>
+      <tr>
+        <td>Schedule</td>
+        <td>3 (active/cancelled/completed)</td>
+        <td>active → cancelled (软取消) / 全部完成 → completed (归档)</td>
+      </tr>
+      <tr>
+        <td>Recovery</td>
+        <td>4 (backoff/compact/continue/fail)</td>
+        <td>由错误类别决定, 上限保护</td>
+      </tr>
+      <tr>
+        <td>Task Group</td>
+        <td>2 (active/archived)</td>
+        <td>所有 task 完成后 → archived</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 业务代码直接修改 status 字段</dt>
+    <dd>
+      <code>task.status = "completed"</code>
+      — 绕过了状态机校验, 依赖图 不会被检查, 审计会信任错误状态。 正确: 业务
+      <strong>必须</strong>
+      调
+      <code>updateTaskStatus(task, "completed")</code>
+      。
+    </dd>
+    <dt>陷阱 · 转换矩阵里有"任意" 通配</dt>
+    <dd>
+      "completed → any" 表示"任何状态都能转 completed" — 这等于 没限制。 正确:
+      终态应该 empty array, 不允许转出。
+    </dd>
+  </dl>
+  <h2 id="pattern-8">模式 8 · Strategy (策略模式)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : RuntimePolicy / FoundationModelProfile / Permission 3 模式 / 3 种 trigger
+    / 3 种 compression mode。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 同一功能有多种实现 (3 种 permission mode, 3 种 schedule trigger, 3 种
+    compression mode); 业务代码用 if/else 链判断"用户选了哪个 mode" 时, 加新
+    mode 改 10 处; 模式选择规则不集中, 难审计。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>策略模式</strong>
+    — 把"模式选择" 抽成
+    <strong>静态查表</strong>
+    (mode × 操作 → 决策), 业务代码 只调
+    <code>checkPermission(mode, op)</code>
+    拿结果, 不写 if/else。 新增 mode = 加一行, 不改 check 函数。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 业务代码 if/else 链消失; 新 mode 改动 局部化 (只改表); 模式规则集中,
+    审计和测试都简单; 黑名单独立 于 mode, 跨策略硬规则不污染 mode 决策。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, Permission 3 模式
+type PermissionMode = "plan" | "auto" | "default";
+
+const PERMISSION_DECISION_TABLE: Record&lt;PermissionMode, Record&lt;string, "allow" | "ask" | "deny"&gt;&gt; = {
+  plan: {
+    "run_read": "allow",
+    "run_write": "ask",     // 全部 ask
+    "run_bash": "ask",
+    "rm -rf /": "deny",     // 黑名单永远 deny
+  },
+  auto: {
+    "run_read": "allow",
+    "run_write": "allow",    // auto 不 ask
+    "run_bash": "allow",
+    "rm -rf /": "deny",     // 黑名单仍然 deny
+  },
+  default: {
+    "run_read": "allow",
+    "run_write": "ask",     // 危险 ask
+    "run_bash": "allow",     // 安全 allow
+    "rm -rf /": "deny",
+  },
+};
+
+function checkPermission(mode: PermissionMode, toolName: string, args: any): "allow" | "ask" | "deny" {
+  // 先查黑名单
+  if (isBlacklisted(toolName, args)) return "deny";
+  // 再查模式表
+  return PERMISSION_DECISION_TABLE[mode][toolName] ?? "ask";
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/permission.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · PermissionManager 策略模式 (3 模式) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>策略表 = 静态映射</strong>
+      : 模式 × 操作 → 决策, 查表即可。 不写 if/else 链。
+    </li>
+    <li>
+      <strong>黑名单独立于策略</strong>
+      :
+      <code>rm -rf /</code>
+      在 plan / auto / default 全部 deny, 不管用户选什么模式。 跨策略硬规则。
+    </li>
+    <li>
+      <strong>新增模式</strong>
+      : 加
+      <code>"ci"</code>
+      模式, 只需在表里加一行, 不改 check 函数。
+    </li>
+  </ol>
+  <h3>仓库里哪些地方用这个模式</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>策略维度</th>
+        <th>策略数</th>
+        <th>位置</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Permission 模式</td>
+        <td>3 (plan/auto/default)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/permission.ts#L28"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/permission.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>LLM Provider Profile</td>
+        <td>5+ (openai/kimi/minimax/qwen/...)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/llm-providers.ts#L47"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/llm-providers.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Foundation Model Profile</td>
+        <td>5+ (deepseek-v4/kimi-k2.6/minimax-m3/...)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/foundation-models.ts#L29"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/foundation-models.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Schedule trigger</td>
+        <td>3 (at/after/cron)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L605"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/schedules.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Compression mode</td>
+        <td>3 (aggressive/balanced/long_context)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/compressor.ts#L33"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/compressor.ts</code></a
+          >
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 策略表里"部分允许"</dt>
+    <dd>
+      "allow_if_args_path_in_workspace" — 把条件逻辑塞进策略表, 表变成"迷你
+      DSL", 难维护。 正确: 条件逻辑留在 check 函数 (e.g.
+      <code>if (isBlacklisted(...)) return "deny"</code>
+      ), 表只 管静态映射。
+    </dd>
+    <dt>陷阱 · 默认值"allow"</dt>
+    <dd>
+      找不到对应 mode × op 的值时, 默认 "ask" 还是 "allow" 还是 "deny"? 默认
+      allow 危险 (新工具被自动允许), 默认 deny 太严 (新工具被永久拒)。 仓库默认
+      "ask", 强制新工具询问。
+    </dd>
+  </dl>
+  <h2 id="pattern-9">模式 9 · Observer (观察者模式) - 改造版</h2>
+  <p>
+    <strong>出现频率</strong>
+    : TranscriptStore 事件流 / CacheDebugger hash 追踪 / Eval trace。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 调试时需要"回放整个 session"; 审计 需要"LLM 实际看到什么"; eval 需要"case
+    跑时发生了什么"。 没事件流, 这些都做不到 — 只能看 LLM 最终回复, 信息全丢。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>观察者模式</strong>
+    的简化版 — 系统 关键操作时 (用户消息 / 助手消息 / 工具调用 / 错误恢复)
+    append 一条事件到
+    <strong>事件流</strong>
+    。 事件流是
+    <strong>append-only</strong>
+    的 (不能改/删), 每个事件有
+    <strong>单调递增序号</strong>
+    , 跟 history sequence 对齐, 调试时按序号回放。 简化版没"订阅者", 只有
+    "存下来, 后续读"。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 调试时按事件序号回放, 整个 session 一 清二楚; transcript 跟 LLM 看到的
+    messages 分离, transcript 保留所有内部 metadata (不被 P0/P1/P2 压缩);
+    审计能信任事件 流 (append-only, 不可篡改)。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, TranscriptStore
+interface TranscriptEvent {
+  kind: "user_message" | "assistant_message" | "tool_result" | "system_reminder" | "recovery_event" | "history_replaced" | "hook_message";
+  sequence: number;     // append-only 序号
+  timestamp: number;
+  // ...
+}
+
+export function createTranscriptStore(): TranscriptStore {
+  const events: TranscriptEvent[] = [];
+  let nextSequence = 1;
+
+  return {
+    append(event) {
+      events.push({ ...event, sequence: nextSequence++ });
+    },
+    list(): TranscriptEvent[] { return [...events]; },
+    // ...
+  };
+}
+
+// agent 主循环里
+transcript.append({ kind: "user_message", content: query, ... });
+// ...
+transcript.append({ kind: "assistant_message", content: response.content, ... });
+// ...
+transcript.append({ kind: "tool_result", toolName: call.name, result: result.content, ... });</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/transcript.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createTranscriptStore Observer 改造版 (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>append-only</strong>
+      : transcript 只能追加, 不能修改 / 删除 历史事件。 保证审计完整性。
+    </li>
+    <li>
+      <strong>sequence 单调递增</strong>
+      : 给每个事件序号, 反查 / 排序 / 跟 history sequence 对齐都靠它。
+    </li>
+    <li>
+      <strong>观察者 vs Publisher 边界</strong>
+      : TranscriptStore 是发布者, 没人订阅 — 数据存下来, 后续 trace 导出 / debug
+      读取。 这是"观察者模式的简化版", 没订阅者, 只有存盘。
+    </li>
+  </ol>
+  <h3>仓库里哪些地方用这个模式</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>事件流</th>
+        <th>事件类型数</th>
+        <th>位置</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Transcript</td>
+        <td>
+          7 (user_message / assistant_message / tool_result / system_reminder /
+          recovery_event / history_replaced / hook_message)
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/transcript.ts#L83"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/transcript.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Eval trace</td>
+        <td>
+          10+ (agent_output / tool_call / llm_call / permission_prompt / log /
+          ...)
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/trace.ts#L62"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/eval/core/trace.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Schedule occurrence</td>
+        <td>
+          9 (due / triggered / running / completed / failed / timeout / missed /
+          skipped / orphaned)
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L605"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/schedules.ts</code></a
+          >
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 把 transcript 当成 history 用</dt>
+    <dd>
+      业务代码读 transcript 当 history, 拿到的是
+      <strong>审计数据</strong>
+      (含内部 metadata) 不是
+      <strong>LLM 看到的数据</strong>
+      。 正确: transcript 永远只用于调试/审计, 不进 LLM messages。
+    </dd>
+    <dt>陷阱 · transcript 无限增长不轮转</dt>
+    <dd>
+      跑 1 年 transcript 1GB+, ENOSPC。 正确: transcript 走日志 轮转 (第 15 章),
+      大小阈值 50MB, 历史保留 5 个。
+    </dd>
+  </dl>
+  <h2 id="pattern-10">模式 10 · Atomic Write (原子写)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 1 个核心工具
+    <code>atomicWriteJsonSync()</code>
+    , 被所有持久化模块复用。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 进程突然被杀 (Ctrl+C / OOM / 断电) 时, 如果直接
+    <code>fs.writeFileSync()</code>
+    写到一半就留半截 JSON, 下次启动 JSON.parse 抛 SyntaxError, 整个 Task /
+    Schedule / Memory 系统不可用。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : POSIX 文件系统保证
+    <code>rename()</code>
+    是
+    <strong>原子的</strong>
+    — 要么旧文件保留, 要么新文件替换, 不会 有"两个都损坏" 的中间状态。
+    利用这个性质: 先写临时文件 (
+    <code>tmpPath</code>
+    ), 写完
+    <code>fsync</code>
+    强制刷盘, 然后
+    <code>rename(tmpPath, finalPath)</code>
+    原子替换。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 断电 / 进程被杀不会留半截 JSON; 所有 持久化模块用同一函数,
+    不会"两处实现漂移"; 写完直接返回 (同步), 不需要异步复杂度。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版
+import * as fs from "fs";
+import * as path from "path";
+
+export function atomicWriteJsonSync(filePath: string, data: unknown): void {
+  // 1. 写临时文件 (含 pid + timestamp 避免并发写冲突)
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  const json = JSON.stringify(data, null, 2);
+
+  const fd = fs.openSync(tmpPath, "w");
+  try {
+    fs.writeSync(fd, json);
+    fs.fsyncSync(fd);   // 强制刷盘, 不留 OS 缓存
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  // 2. 原子 rename 替换 (POSIX rename 是原子的)
+  fs.renameSync(tmpPath, filePath);
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/atomic-write.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · atomicWriteJsonSync 原子写工具 (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>tmp + rename</strong>
+      : 写到 tmp, rename 替换。 rename 在 POSIX 系统是原子的,
+      要么全成功要么全失败, 不会有"两个都损坏"。
+    </li>
+    <li>
+      <strong>fsync 强制刷盘</strong>
+      : 不调的话数据在 OS 缓存, 断电丢。 fsync 告诉 OS "现在就写到磁盘"。
+    </li>
+    <li>
+      <strong>tmp 路径含 pid + timestamp</strong>
+      : 避免并发写覆盖 (多个进程同时写, 临时文件名不冲突)。
+    </li>
+  </ol>
+  <h3>所有持久化模块都用这个工具</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>模块</th>
+        <th>用原子写</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>TaskStore</td>
+        <td>
+          <code>group.json</code>
+          /
+          <code>index.json</code>
+        </td>
+      </tr>
+      <tr>
+        <td>ScheduleStore</td>
+        <td>
+          <code>schedule.json</code>
+          /
+          <code>occurrence-&lt;id&gt;.json</code>
+        </td>
+      </tr>
+      <tr>
+        <td>MemoryStore</td>
+        <td>每个 memory 一个 JSON</td>
+      </tr>
+      <tr>
+        <td>OutputStore</td>
+        <td>每个 output 一个文本 / JSON</td>
+      </tr>
+      <tr>
+        <td>Logger</td>
+        <td>不适用 (append-only, 不需要原子)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    所有持久化模块都 import
+    <code>src/atomic-write.ts</code>
+    的同一函数, 不自己实现, 避免两处实现漂移。
+  </p>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 忘记 fsync</dt>
+    <dd>
+      只写 tmp + rename, 不调 fsync — 数据在 OS 缓存, 断电就丢,
+      原子写等于不原子。 正确: 每次写完必须
+      <code>fsyncSync</code>
+      。
+    </dd>
+    <dt>陷阱 · 多个进程写同一文件</dt>
+    <dd>
+      进程 A 写 tmp.foo.pidA, 进程 B 写 tmp.foo.pidB, rename 时 互相覆盖。 正确:
+      tmp 路径
+      <strong>必须含 pid + timestamp</strong>
+      , 避免冲突。
+    </dd>
+  </dl>
+  <h2 id="pattern-11">模式 11 · Reminder 模式 (稳定前缀外的动态状态)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : TODO reminder / Memory reminder / Skill hint / Async Run notification /
+    Task Group progress。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 状态 (TODO / memory / skill) 需要 LLM 看到, 但拼到 system prompt 会破坏
+    prompt cache (每轮都变, 缓存 失效); 走 messages 又会被 LLM
+    误以为是用户真实输入。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 利用 LLM 对
+    <code>&lt;system-reminder&gt;</code>
+    标签的
+    <strong>结构化识别能力</strong>
+    — LLM 知道这是"系统注入 的状态", 不是用户输入。 把状态包在 reminder 里, 走
+    user message 末尾, 既不进 stable prefix (不破坏 cache), 又能被 LLM 正确识别
+    (不会被当成 user 输入)。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 状态动态变化不破坏 cache (走 messages 增量 价格); LLM 不会混淆 reminder
+    和用户输入 (统一标签); 空 reminder 不注入, 不污染 (空字符串直接跳过)。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, 5 种 reminder 都遵循这个格式
+function buildReminder(kind: "todo" | "memory" | "skill" | "async-run" | "task", data: any): string {
+  if (data.empty) return "";   // 空就不注入, 不污染
+  return `&lt;system-reminder source="${kind}"&gt;
+${data.content}
+&lt;/system-reminder&gt;`;
+}
+
+// 在 agent.prepareMessages() 末尾注入
+const reminders = [
+  buildReminder("todo", todoManager.list()),
+  buildReminder("memory", { entries: memoryManager.listPinned(), empty: !memoryManager.listPinned().length }),
+  buildReminder("skill", { content: `可用 skill: ${activeSkills.names().join(", ")}`, empty: !activeSkills.names().length }),
+  buildReminder("async-run", { content: drainNotifications(), empty: !drainNotifications().length }),
+  buildReminder("task", { content: formatTaskGroup(activeTaskGroup), empty: !activeTaskGroup }),
+].filter(r =&gt; r !== "");
+
+// 注入为最后一条 user message (不进 system prompt!)
+messages.push({ role: "user", content: reminders.join("\n\n") });</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · buildReminder 提醒注入 (5 种 source) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>走 user message, 不走 system prompt</strong>
+      : 状态是动态的, 不进 stable prefix, 保持 prompt cache 命中。
+    </li>
+    <li>
+      <strong>统一格式 &lt;system-reminder source="..."&gt;</strong>
+      : LLM 知道这是 reminder 不是 user 真实输入, 不会误以为是用户。
+    </li>
+    <li>
+      <strong>空就跳过</strong>
+      : 没数据就不注入, 不污染 history。
+    </li>
+  </ol>
+  <h3>仓库里所有 reminder</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>Reminder</th>
+        <th>source</th>
+        <th>触发时机</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>TODO</td>
+        <td>
+          <code>source="todo"</code>
+        </td>
+        <td>每轮 chat() 前</td>
+      </tr>
+      <tr>
+        <td>Memory</td>
+        <td>
+          <code>source="memory"</code>
+        </td>
+        <td>SessionStart hook</td>
+      </tr>
+      <tr>
+        <td>Skill hint</td>
+        <td>
+          <code>source="skills"</code>
+        </td>
+        <td>LLMCall hook (skill 集合变化)</td>
+      </tr>
+      <tr>
+        <td>Async Run notification</td>
+        <td>
+          <code>source="async-run"</code>
+        </td>
+        <td>finishRun() 时推</td>
+      </tr>
+      <tr>
+        <td>Task Group progress</td>
+        <td>
+          <code>source="task"</code>
+        </td>
+        <td>每轮 chat() 前 (有 active group)</td>
+      </tr>
+      <tr>
+        <td>Permission denial</td>
+        <td>(作为 tool message 写, 不是 reminder)</td>
+        <td>Permission 拒绝时</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · reminder 没 source 字段</dt>
+    <dd>
+      LLM 看到 5 个 reminder 不知道哪个是哪个的来源, 调试时无法 定位。 正确:
+      每个 reminder 必须有
+      <code>source="..."</code>
+      标识 (e.g.
+      <code>source="todo"</code>
+      /
+      <code>source="memory"</code>
+      )。
+    </dd>
+    <dt>陷阱 · reminder 走 system prompt</dt>
+    <dd>
+      把
+      <code>buildReminder()</code>
+      结果拼到 system prompt 字符串 — 每轮 system prompt 变, cache 失效。 正确:
+      reminder 永远 走 messages 末尾。
+    </dd>
+  </dl>
+  <h2 id="pattern-12">模式 12 · Cache-friendly Layout (缓存友好布局)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 整个项目最重要的隐式架构。 每个写 system prompt / tools / messages
+    的地方都隐式遵守。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : LLM provider (Anthropic 1/10, OpenAI 1/2) 的 prompt cache 按"前缀匹配"
+    工作, 任何"小修改" 让整个 cache 失效; system prompt 里塞状态 = cache
+    命中率归零, 成本涨 5-10 倍; 用户想"便宜" 跑 harness, cache 是必选项。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 把 prompt layout 严格分成
+    <strong>稳定前缀</strong>
+    (system prompt + tools, 写后不改) +
+    <strong>动态 tail</strong>
+    (history + reminder, 每轮变)。 稳定前缀进 cache 享受折扣, 动态 tail 不进
+    cache 但只算增量价格。 用
+    <code>cache-debug</code>
+    模块 算本地 stable hash, 验证"我们没破坏稳定前缀"。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : cache 命中率最大化, 成本降 5-10 倍; 业务模块不需要关心 cache,
+    只要遵守"system prompt + tools 稳定" 这条规则; 调试时
+    <code>cache-debug</code>
+    报"stableChanged=true" 立刻知道哪次操作破坏了 cache。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, 一次 chat() 的完整 layout
+
+// === 稳定前缀 (进 cache) ===
+const systemPrompt = baseSystemPrompt;   // 写后不改
+const tools = getToolDefinitions();         // skill 集合稳定时不变
+
+// === 动态 tail (不进 cache, 但算增量) ===
+const messages = [
+  // history 中的早期消息 (缓存命中)
+  ...history.getMessages().slice(0, -3),
+  // reminder 注入 (在末尾)
+  ...reminders.map(r =&gt; ({ role: "user", content: r })),
+  // 最近几轮 (新)
+  ...history.getMessages().slice(-3),
+  // 当前 user query
+  { role: "user", content: currentQuery },
+];
+
+// === 调 LLM ===
+const response = await llm.chat({ messages, tools });
+
+// === CacheDebugger 验证稳定前缀 ===
+const debug = cacheDebugger.record({ systemPrompt, tools });
+// debug.stableChanged === false 说明没破坏 cache</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/cache-debug.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createCacheDebugger 缓存友好布局 (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>稳定前缀真的稳定</strong>
+      : system prompt + tools 写后不改, 同 run() 内不变。 验证用 cacheDebugger。
+    </li>
+    <li>
+      <strong>动态 tail 算增量</strong>
+      : history + reminder + query, 每轮都变, 不进 cache 但只算增量价格。
+    </li>
+    <li>
+      <strong>CacheDebugger 本地稳定 ≠ Provider cache 命中</strong>
+      : 本地 hash 只能证明"我们没破坏前缀", 真实命中看 usage 字段
+      <code>cache_read_input_tokens</code>
+      。
+    </li>
+  </ol>
+  <h3>所有"为 cache 埋伏笔" 的设计</h3>
+  <p>
+    这是整个项目最微妙的隐式架构 — 它不是某个文件里的"模式", 而是 每个写 system
+    prompt / tools / messages 的地方都隐式遵守的规则。
+  </p>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>设计</th>
+        <th>章节</th>
+        <th>为什么</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>TODO 状态走 reminder, 不拼 system prompt</td>
+        <td>第 03 章</td>
+        <td>system prompt 写后不改, 不让动态状态污染</td>
+      </tr>
+      <tr>
+        <td>
+          Tool descriptions 走 LLM.chat() 的 tools 字段, 不拼 system prompt
+        </td>
+        <td>第 05 章</td>
+        <td>skill 集合稳定时 tools 字段稳定</td>
+      </tr>
+      <tr>
+        <td>内部 _xxx 字段在 flatten 时清除</td>
+        <td>第 06 章</td>
+        <td>不污染 dynamic tail 的 cache key</td>
+      </tr>
+      <tr>
+        <td>Hook 注入走 user reminder, 不进 system prompt</td>
+        <td>第 08 章</td>
+        <td>reminder 是动态的, 不进 stable prefix</td>
+      </tr>
+      <tr>
+        <td>Memory 走 SessionStart hook 注入 reminder, 不进 system prompt</td>
+        <td>第 09 章</td>
+        <td>memory 是个人的, system prompt 是跨用户一致的</td>
+      </tr>
+      <tr>
+        <td>Task Group progress 走 reminder, 不进 system prompt</td>
+        <td>第 12 章</td>
+        <td>activeTaskGroupId 是 session-local, 不污染跨 session 前缀</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 误以为本地 hash = Provider cache 命中</dt>
+    <dd>
+      <code>cacheDebugger.stableChanged === false</code>
+      只证明"我们没 破坏稳定前缀", 不证明 Provider 真命中 cache。 Provider cache
+      是黑盒, 真实命中看
+      <code>cache_read_input_tokens</code>
+      。 不要 把本地 hash 稳定当成"省钱了", 看 usage 字段才算。
+    </dd>
+    <dt>陷阱 · 工具集合在 run() 内变化</dt>
+    <dd>
+      同一个 run() 内多次调 load_skill, tools 数组变化 — 每次 chat() 都重新算
+      cache key, 命中率 0。 正确: load_skill 异步处理, 加载后下一轮才看到新
+      tools, 同一个 run() 的 tools 数组稳定。
+    </dd>
+  </dl>
+  <h2 id="pattern-13">模式 13 · 错误分类 + 恢复动作 (Error → Action)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : Recovery (7 类错误 → 4 个动作) / Permission (黑名单 deny / ask / allow) /
+    ToolResult 错误 (business error vs throw)。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 错误种类多 (network / rate_limit / credential / context_length /
+    output_interrupted / unknown), 全部 retry 浪费 (credential 重试 100
+    次也通不过), 部分 retry 也不行 (context_length 重试还是超限);
+    不同错误要不同处理; 业务代码"看到错误就 retry" 简单但低效, 看到错误就 throw
+    让 loop 崩也很糟。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>错误分类</strong>
+    思想 — 按错误的
+    <strong>性质</strong>
+    (不是按消息文本) 分类, 每类对应一个
+    <strong>恢复 动作</strong>
+    。 Adapter 翻译 provider 特定错误码 → 内部统一
+    <code>LLMErrorKind</code>
+    , 恢复逻辑只看内部类型。 配合
+    <strong>状态 上限</strong>
+    防止无限循环。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 业务代码"catch → 分类 → 选动作" 路径 清晰; retry 不再"一刀切";
+    上限保护防止永远卡住; provider 错误码不污染业务。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, Recovery 7 类错误 → 4 个动作
+type LLMErrorKind = "network" | "rate_limit" | "credential" | "quota" | "context_length" | "output_interrupted" | "unknown";
+
+type RecoveryAction =
+  | { kind: "backoff"; delayMs: number }
+  | { kind: "compact" }
+  | { kind: "continue" }
+  | { kind: "fail"; reason: string };
+
+const ERROR_TO_ACTION: Record&lt;LLMErrorKind, () =&gt; RecoveryAction&gt; = {
+  network: () =&gt; ({ kind: "backoff", delayMs: 1000 * 2 ** attemptCount.backoff }),
+  rate_limit: () =&gt; ({ kind: "backoff", delayMs: 1000 * 2 ** attemptCount.rate }),
+  context_length: () =&gt; ({ kind: "compact" }),
+  output_interrupted: () =&gt; ({ kind: "continue" }),
+  credential: () =&gt; ({ kind: "fail", reason: "API key 错误" }),
+  quota: () =&gt; ({ kind: "fail", reason: "配额用尽" }),
+  unknown: () =&gt; ({ kind: "fail", reason: "未知错误" }),
+};
+
+// Adapter 把 provider 错误翻译成 LLMErrorKind
+function translateAnthropicError(err: any): { kind: LLMErrorKind; message: string } {
+  if (err.status === 429) return { kind: "rate_limit", message: err.message };
+  if (err.status === 401) return { kind: "credential", message: err.message };
+  if (err.status === 400 &amp;&amp; err.message.includes("context_length")) {
+    return { kind: "context_length", message: err.message };
+  }
+  return { kind: "unknown", message: err.message };
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createRecoveryManager 错误分类 + 4 动作 (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>错误按性质分类</strong>
+      : 不是按消息 ("429 错误"), 是按 "rate_limit" / "credential" /
+      "context_length"。 跨 provider 一致。
+    </li>
+    <li>
+      <strong>Adapter 翻译 provider 错误码</strong>
+      : 业务模块只看 LLMErrorKind, 不看 Anthropic 429 / OpenAI 429 / Google
+      RESOURCE_EXHAUSTED。
+    </li>
+    <li>
+      <strong>动作有上限</strong>
+      : backoff 5 次 / compact 1 次 / continue 2 次, 达到上限 fail,
+      防止无限循环。
+    </li>
+  </ol>
+  <h3>所有"错误 → 动作" 的应用</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>错误源</th>
+        <th>分类</th>
+        <th>动作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>LLM 调用</td>
+        <td>7 类 (LLMErrorKind)</td>
+        <td>4 动作 (backoff/compact/continue/fail)</td>
+      </tr>
+      <tr>
+        <td>工具执行</td>
+        <td>业务错误 (error: true) vs throw (harness 错误)</td>
+        <td>前者写 tool message, 后者 throw 上抛</td>
+      </tr>
+      <tr>
+        <td>权限</td>
+        <td>allow / ask / deny</td>
+        <td>直接执行 / 问用户 / 写 denied tool message</td>
+      </tr>
+      <tr>
+        <td>Eval judge 输出</td>
+        <td>解析成功 / 解析失败</td>
+        <td>正常 judge / judge_failed fallback</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 所有错误都 retry 3 次</dt>
+    <dd>
+      credential 错误重试 100 次也通不过, 浪费时间且给 provider 加重负担。 正确:
+      只对可恢复错误 (network / rate_limit / context_length) 重试, 不可恢复
+      (credential / quota) 直接 fail。
+    </dd>
+    <dt>陷阱 · 按消息文本分类</dt>
+    <dd>
+      "if (err.message.includes('429'))" — OpenAI 错误消息可能 升级改变,
+      字面匹配会挂。 正确: 按 err.status / err.code 结构化字段分类, 不看消息。
+    </dd>
+  </dl>
+  <h2 id="pattern-14">模式 14 · Concurrent Limit (并发限制)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : Async Run (max 3) / LLM retry (max 5) / Schedule overlap (allow/skip) /
+    Task 依赖图 (BFS 限深度)。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 资源是有限的 (本地 CPU / 内存 / 文件 句柄 / provider 配额), 无限并发 =
+    资源耗尽 = harness 整体挂; 启动第 N+1 个 run 应当
+    <strong>立刻</strong>
+    拒绝, 让调用方 (LLM) 看到错误后自己决定 (等 / 取消 / 换工具), 而不是默默
+    排队把系统拖垮。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>信号量</strong>
+    的简化版 — 在 manager 内部维护一个计数器, 启动时检查 + 递增, 完成后递减。
+    配对操作确保不会泄漏计数。 上限是经验值 (本地资源默认 3, CI 可 调到 5)。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 资源受保护 (不会耗尽); 调用方立刻知道 拒绝原因 (而不是默默排队);
+    配对操作保证计数不泄漏 (启动 + 完成后一对, 缺一就错)。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, Async Run 并发限制
+export function createAsyncRunManager({ maxConcurrent = 3 }) {
+  let runningCount = 0;
+
+  return {
+    start(args) {
+      if (runningCount &gt;= maxConcurrent) {
+        return {
+          error: true,
+          content: `async run 并发数已达上限 (${maxConcurrent}), 请等待现有 run 完成。`,
+        };
+      }
+      runningCount++;
+      // 实际启动逻辑
+    },
+    finishRun(runId) {
+      // 收敛 (唯一的 finishRun 路径)
+      runningCount--;
+    },
+  };
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createAsyncRunManager 并发限制 (max 3) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>运行前检查 + 启动后递增 + 完成后递减</strong>
+      : 三个动作配对, 缺一就泄漏计数。
+    </li>
+    <li>
+      <strong>超限拒绝, 不排队</strong>
+      : 不做"等前面的跑完再启" 的复杂 逻辑, 直接拒绝, 让 LLM 看到错误后自己决定
+      (等 / 取消 / 换工具)。
+    </li>
+    <li>
+      <strong>限制数字是经验值</strong>
+      : 3 是本地资源默认值, CI 可调到 5。 无限并发 = 资源耗尽, 必坏。
+    </li>
+  </ol>
+  <h3>仓库里所有并发限制</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>限制</th>
+        <th>上限</th>
+        <th>位置</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Async Run 并发</td>
+        <td>3</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L299"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/async-runs.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>LLM retry</td>
+        <td>5</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L75"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/recovery.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>P2 compact</td>
+        <td>1</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L198"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/recovery.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Continue 续写</td>
+        <td>2</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L198"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/recovery.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Subagent maxRounds</td>
+        <td>10 (默认)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/tools/subagent.ts#L110"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/tools/subagent.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Tool message 长度</td>
+        <td>2000 字符 (P1 触发阈值)</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/compressor.ts#L123"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/compressor.ts</code></a
+          >
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 启动成功但 finishRun 失败, 计数泄漏</dt>
+    <dd>
+      启动时抛 throw, 计数没递增 — 没事。 启动后跑过程抛 throw, 计数已经 ++ —
+      必须有 try/finally 保证 finishRun 被调。 否则 跑几次后并发数永远到上限,
+      整个系统卡死。
+    </dd>
+    <dt>陷阱 · 限制值根据"代码假设" 而不是"实测"</dt>
+    <dd>
+      "max 10 应该够" — 写代码时拍脑袋, 实际跑 20 个 agent 全卡。 正确: 跑 100
+      个真实任务, 统计 95 分位并发数, 取这个数。
+    </dd>
+  </dl>
+  <h2 id="pattern-15">模式 15 · Identity Check (id 与目录名同步)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : TaskStore / ScheduleStore / MemoryStore / OutputStore 都有"目录名 = 数据
+    id" 的身份校验。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 用户可能手动改目录名 (重命名 / 移动) 或 改 JSON 文件内的 id 字段;
+    改完后目录名和 id 字段不一致, 读取 时按目录名查到但 id 是另一个, 数据错乱;
+    不校验, 后续操作 (按 id 删除 / 更新) 找不到对象, 静默失败。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>防御性编程</strong>
+    的"双重保险" — 目录名和内容 id 字段必须一致, 不一致就是数据被外部破坏过。
+    读取 时校验, 不匹配就 skip + warn, 不自动修复 (自动修可能误改用户
+    真实意图)。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 检测到外部破坏时优雅降级 (skip + warn), 不让一个坏 group 影响其他 group;
+    用户看到 warn 知道"我的数据 被改了"; 不自动修, 避免"猜错用户意图" 的灾难。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, TaskStore 的 identity check
+function readGroup(tasksDir: string, groupId: string): TaskGroup | null {
+  const groupFile = path.join(tasksDir, "groups", groupId, "group.json");
+  if (!fs.existsSync(groupFile)) return null;
+  const group = JSON.parse(fs.readFileSync(groupFile, "utf8"));
+  // 关键: 目录名 == group.id, 防止手动改名导致漂移
+  if (group.id !== groupId) {
+    console.warn(`Directory id mismatch: expected ${groupId}, got ${group.id}, skipping`);
+    return null;
+  }
+  return group;
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · TaskStore 身份校验 (目录名 == group.id) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>目录名 = 数据 id</strong>
+      : 双重保险, 防止改 id 不改目录名 (或反之) 导致"找到了文件但内容错乱"。
+    </li>
+    <li>
+      <strong>不匹配就跳过</strong>
+      : 不抛错中断, 跳过这个 group, 继续读其他 group。 一个坏 group 不影响其他。
+    </li>
+    <li>
+      <strong>warn 但不修</strong>
+      : 写日志, 让用户知道"目录被改过", 但不自动 修复 (自动修可能误改用户数据)。
+    </li>
+  </ol>
+  <h3>所有"目录 = id" 的位置</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>Store</th>
+        <th>目录结构</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>TaskStore</td>
+        <td>
+          <code>tasks/groups/&lt;group_id&gt;/group.json</code>
+        </td>
+      </tr>
+      <tr>
+        <td>ScheduleStore</td>
+        <td>
+          <code>schedules/&lt;schedule_id&gt;/schedule.json</code>
+        </td>
+      </tr>
+      <tr>
+        <td>MemoryStore</td>
+        <td>
+          <code>memory/&lt;memory_id&gt;.json</code>
+        </td>
+      </tr>
+      <tr>
+        <td>OutputStore</td>
+        <td>
+          <code>.task_outputs/&lt;output_id&gt;.txt</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 自动修复不匹配</dt>
+    <dd>
+      检测到不匹配就 "fix it" — 改目录名匹配 id, 或改 id 匹配目录名。
+      这猜错了用户意图, 误改用户数据。 正确: warn + skip, 让用户 自己处理。
+    </dd>
+    <dt>陷阱 · 校验过严</dt>
+    <dd>
+      校验 "id 必须是小写字母数字" — 拒绝了合法的 id (e.g. 短 hash 含大小写)。
+      正确: 只校验"目录名 == id 字段", 不校验 id 格式。
+    </dd>
+  </dl>
+  <h2 id="pattern-16">模式 16 · Test Factory (测试工厂)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 仓库里所有 test 文件都复用同一套 fake factory, 例如 FakeLLMClient、
+    ScriptedLLMClient、ScriptedTerminal、Fake ToolRegistry。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 测试不能依赖真实 LLM — CI 通常无法调用 OpenAI API; 测试需要精确控制 LLM
+    返回, 才能断言 messages 顺序等业务行为, 而不是"赌 LLM 这次刚好给正确答案";
+    直接 mock 真实 SDK 又太重, 例如 openai SDK 有 10+ 个方法, mock
+    起来容易漏掉关键调用。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 沿用 Test Double 的
+    <strong>Stub</strong>
+    +
+    <strong>Spy</strong>
+    思路 — fake 实现与生产代码相同的业务接口 (LLMClient / Terminal /
+    ToolRegistry), 但内部行为完全可控: Stub 按预设 response 队列返回, Spy
+    捕获每次调用时的 messages 和 tools。 生产代码看到的是正常接口,
+    测试代码拿到的是完全可控的行为记录。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 业务代码零改动即可注入 fake 进行测试; 断言可以精确到"LLM 看到了怎样的
+    messages 顺序"; 不依赖网络和 API key; 运行毫秒级, 不用等待真实 LLM 响应。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版
+export function createFakeLLMClient(responses: ScriptedLLMResponse[]): LLMClient {
+  let i = 0;
+  const calls: { messages: any[]; tools?: any[] }[] = [];
+  return {
+    async chat({ messages, tools }) {
+      calls.push({ messages, tools });
+      if (i &gt;= responses.length) {
+        throw new Error(`No more fake responses, total calls: ${calls.length}`);
+      }
+      const response = responses[i++];
+      return {
+        content: response.content ?? null,
+        toolCalls: response.toolCalls ?? [],
+        finishReason: response.finishReason ?? "stop",
+      };
+    },
+    // 暴露给测试用
+    allCalls() { return calls; },
+    lastCall() { return calls[calls.length - 1]; },
+  };
+}
+
+export function createScriptedTerminal(plan?: EvalTerminalPlan): Terminal {
+  return {
+    async question(prompt: string) {
+      return plan?.questions?.shift() ?? "";
+    },
+    async askUser(prompt: string) {
+      return plan?.permissionAnswers?.shift() ?? plan?.defaultPermissionAnswer ?? true;
+    },
+    println(text: string) {},
+    close() {},
+  };
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/scripted-llm.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createScriptedLLMClient 测试工厂 (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>实现 LLMClient / Terminal 接口</strong>
+      : fake 实现"刚好满足 接口", 但行为完全可控。
+    </li>
+    <li>
+      <strong>捕获每次 chat() 的 messages 和 tools</strong>
+      : 测试断言 "这次 chat() 收到的 messages 含什么", 不用 mock 整个 SDK。
+    </li>
+    <li>
+      <strong>response 队列</strong>
+      : LLM 返回从队列里取, 跑完抛错。 强迫 case 作者显式枚举每次 LLM 返回,
+      不会"漏掉" 一次响应。
+    </li>
+  </ol>
+  <h3>仓库里所有 fake factory</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>Fake</th>
+        <th>位置</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>FakeLLMClient / ScriptedLLMClient</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/scripted-llm.ts#L32"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/eval/drivers/learn-claude-code/scripted-llm.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>ScriptedTerminal</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/scripted-terminal.ts#L26"
+            rel="noreferrer"
+            target="_blank"
+            ><code
+              >src/eval/drivers/learn-claude-code/scripted-terminal.ts</code
+            ></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Fake ToolRegistry</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/tools/registry.ts#L107"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/tools/registry.ts</code></a
+          >
+          的 fake mode
+        </td>
+      </tr>
+      <tr>
+        <td>ReplayLLMClient</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/replay/replay-llm.ts#L60"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/eval/replay/replay-llm.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>LiveEvalLLMClient</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-llm.ts#L30"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/eval/live/live-llm.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Fake Hook / Fake Permission</td>
+        <td>测试文件内 inline 写</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · fake 行为偏离真实太多</dt>
+    <dd>
+      FakeLLMClient 直接返回 hardcoded "Hello", 不经过"消耗队列" 逻辑 —
+      业务代码一旦改成异步 / 重试, fake 还是返回 hardcoded, 测试还是过, 真实 LLM
+      早已崩。 正确: fake 实现"几乎像真实", 至少要支持 response 队列 + capture
+      calls。
+    </dd>
+    <dt>陷阱 · 测试只覆盖 happy path</dt>
+    <dd>
+      只测"工具返回成功" 的路径, 不测"工具抛 throw" / "工具返回 错误结果"。
+      真实环境错误路径才是 bug 高发区。 正确: 每个 fake 至少支持"成功 + 错误"
+      两种模式。
+    </dd>
+  </dl>
+  <h2 id="pattern-17">模式 17 · Stable Identity (id 不变)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 仓库所有"长生命周期" 数据 (Task / Memory / Schedule / Async Run / Skill)
+    都有 stable id。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 跨 run / 跨 session 引用"之前创建的 那个 task" 时, 如果 id 随内容变化,
+    引用就断了; 长生命周期数据 需要"id 永远不变" 才能被外部持续引用 (e.g.
+    "task_abc12345 blockedBy task_def67890" 永远要有效); UUID 难读 / 易打错, LLM
+    在 tool_call 里引用也容易错。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>内容寻址</strong>
+    (Content Addressing) 的简化版 — id = hash(原始创建内容), 内容改了 id 不变,
+    改名 / 改 status / 改 owner 都不变。 用短 hash (8 字符) 代替 UUID, LLM
+    易读易引用。 加前缀分类 (
+    <code>task_</code>
+    /
+    <code>tg_</code>
+    ), 一眼看出类别。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 跨 run 引用永远有效; LLM 在 tool_call 里易读易打; 分类前缀防止混淆;
+    不需要集中 ID 生成器 (内容 哈希本身就是 id)。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版
+function hashId(content: string): string {
+  // 短 hash, 用内容前 8 字符, LLM 引用易读
+  return createHash("sha1").update(content).digest("hex").slice(0, 8);
+}
+
+// 各种 id 命名约定
+const ID_PREFIXES = {
+  task: "task_",
+  taskGroup: "tg_",
+  schedule: "sch_",
+  occurrence: "occ_",
+  asyncRun: "ar_",
+  memory: "mem_",
+  output: "out_",
+};
+
+// id 一旦创建, 不可变
+// 内容改了, id 不变 (hash 来自原始创建内容)
+// 改名 / 改 status / 改 owner, id 都保持
+const taskId = "task_" + hashId("改 config.ts 的 retryLimit");
+// 之后 task.title 改了, task.id 还是 task_abc12345</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createTaskManager 稳定 id (短 hash + 前缀) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>id 不可变</strong>
+      : 创建后改任何字段 (title / status / owner), id 都不变。 让外部引用 (e.g.
+      "task_abc12345 blockedBy task_def67890") 永远有效。
+    </li>
+    <li>
+      <strong>短 hash</strong>
+      : 8 字符, 不用 UUID。 LLM 在 tool_call 里引用 id, 短 hash 易读, UUID
+      易打错。
+    </li>
+    <li>
+      <strong>前缀分类</strong>
+      :
+      <code>task_</code>
+      /
+      <code>tg_</code>
+      /
+      <code>sch_</code>
+      , 一眼看出 id 属于哪类。 防止混淆 (e.g. 用 task id 调 run_schedule_cancel
+      报错不直观)。
+    </li>
+  </ol>
+  <h3>所有 id 命名前缀</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>类别</th>
+        <th>前缀</th>
+        <th>位置</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Task</td>
+        <td>
+          <code>task_</code>
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L111"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/tasks.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Task Group</td>
+        <td>
+          <code>tg_</code>
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/tasks.ts#L111"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/tasks.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Schedule</td>
+        <td>
+          <code>sch_</code>
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L605"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/schedules.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Occurrence</td>
+        <td>
+          <code>occ_</code>
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/schedules.ts#L605"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/schedules.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Async Run</td>
+        <td>
+          <code>ar_</code>
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L299"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/async-runs.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Memory</td>
+        <td>
+          <code>mem_</code>
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/memory.ts#L331"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/memory.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Output</td>
+        <td>
+          <code>out_</code>
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/output-store.ts#L110"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/output-store.ts</code></a
+          >
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · id 用了 UUID / 计数器</dt>
+    <dd>
+      UUID 太长, LLM 易打错; 计数器需要集中生成器, 跨进程会冲突; hash
+      内容最简单也最稳定。 正确: 短 hash + 前缀。
+    </dd>
+    <dt>陷阱 · id 来自随机数, 不可重读</dt>
+    <dd>
+      "task_abc12345" 是从 id 字段读到的, 但创建时用的是随机数 —
+      同样的内容重新创建得到不同 id, 跨进程引用就断了。 正确: id 必须
+      <strong>确定性</strong>
+      从内容派生, 同样内容永远同样 id。
+    </dd>
+  </dl>
+  <h2 id="pattern-18">模式 18 · Transcript-First (transcript 优先)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 调试 / eval / audit 都靠 transcript。 几乎所有关键操作都 append transcript
+    event。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 调试时需要"回放整个 session"; 审计 需要"LLM 实际看到什么 + 实际做了什么";
+    history 被 P0/P1/P2 压缩后会丢信息, transcript 必须保留全部;
+    "我上一轮到底为什么 调了这个工具" 这种问题, 不靠 transcript 答不上。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>审计日志</strong>
+    (Audit Log) 思想 — 所有关键操作 (用户消息 / 助手消息 / 工具调用 / 错误恢复)
+    都
+    <strong>append</strong>
+    一条到
+    <strong>事件流</strong>
+    , 不修改 / 不删除。 事件流跟 history 分离, history 是 LLM 看到的, transcript
+    是 调试/审计看到的。 transcript 保留所有内部 metadata, 不被压缩 影响。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 调试时按事件序号回放, 整个 session 一清二楚; transcript 不被 P0/P1/P2
+    压缩, 长期保留完整记录; 审计能信任 (append-only, 不可篡改); 跟 LLM 看到的
+    messages 分离, 不会 污染 LLM 视角。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版
+class Agent {
+  async run(query: string) {
+    this.transcript.append({ kind: "user_message", content: query });
+    for (;;) {
+      const response = await this.llm.chat({ ... });
+      this.transcript.append({ kind: "assistant_message", content: response.content, tool_calls: response.toolCalls });
+      if (response.toolCalls.length === 0) break;
+      for (const call of response.toolCalls) {
+        const result = await this.tools.invoke(...);
+        this.transcript.append({ kind: "tool_result", toolName: call.name, result: result.content });
+      }
+    }
+    return response.content;
+  }
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/transcript.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createTranscriptStore transcript-first 模式 (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>所有关键操作都写 transcript</strong>
+      : 用户消息 / assistant 消息 / 工具调用 / 工具结果 / recovery_event / hook
+      注入 / history_replaced, 全部 append。 调试时回放 transcript, 整个 session
+      一清二楚。
+    </li>
+    <li>
+      <strong>transcript 不影响 prompt</strong>
+      : transcript 是
+      <strong>审计流</strong>
+      , 不是
+      <strong>消息流</strong>
+      。 LLM 看到的 messages 走 history, transcript 只给调试 / 评测用。
+    </li>
+    <li>
+      <strong>append-only</strong>
+      : 跟 LLM 看到的 history 不同, transcript 不会被 P0/P1/P2 压缩。
+      "我上一轮到底为什么调了这个工具" — 即使 history 被压缩, transcript
+      仍有完整记录。
+    </li>
+  </ol>
+  <h3>transcript 包含但 messages 不包含的字段</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>字段</th>
+        <th>transcript</th>
+        <th>messages</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>内部 metadata (_loopIndex, _turnIndex, _messageSequence)</td>
+        <td>保留</td>
+        <td>清除 (flatten 时)</td>
+      </tr>
+      <tr>
+        <td>工具原始 args (含 JSON 字符串原文)</td>
+        <td>保留</td>
+        <td>可见 (但 LLM 不一定关心)</td>
+      </tr>
+      <tr>
+        <td>工具 metadata (耗时、字节数)</td>
+        <td>保留</td>
+        <td>不发送</td>
+      </tr>
+      <tr>
+        <td>Recovery event (backoff / compact / fail)</td>
+        <td>保留</td>
+        <td>不发送</td>
+      </tr>
+      <tr>
+        <td>Permission 决策 (allow / ask / deny)</td>
+        <td>保留</td>
+        <td>不发送 (deny 写 tool message)</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · transcript 存到 history 里</dt>
+    <dd>
+      业务代码读 transcript 当 messages 用 — LLM 看到的是
+      <strong>审计数据</strong>
+      (含内部 metadata), 不是它应该看到的。 正确: transcript
+      永远只用于调试/审计, 不进 LLM messages。
+    </dd>
+    <dt>陷阱 · transcript 忘了 append</dt>
+    <dd>
+      某个关键操作没 append 到 transcript, 调试时找不到。 正确: 关键操作
+      (用户消息 / 助手消息 / 工具调用 / 错误恢复) 必须 强制 append, 不留遗漏。
+    </dd>
+  </dl>
+  <h2 id="pattern-19">模式 19 · Test Doubles (测试替身)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : Eval Runner 的核心抽象 — 不依赖真实 组件就能跑 case。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : Eval 要测"harness 的行为", 不应该 绑死在"具体是哪个 harness 实现"
+    (in-process / CLI / Team 都要能测); 测 runner 本身时, 不需要真 agent (fake
+    driver 即可); 测 driver 时, 不需要真 LLM (ScriptedLLMClient 即可); 测 CLI
+    driver 时, 不需要真终端 (ScriptedTerminal 即可)。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>测试替身</strong>
+    (Test Double) 思想 — 在系统边界处定义
+    <strong>中立接口</strong>
+    , 实现可以是真实组件 也可以是测试替身。 Eval Runner 只看 driver 接口, 不看
+    driver 实现, 因此可以"换 driver 跑同一 case", 验证不同 driver 行为 一致。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 同一 case 多种 driver 跑, 验证 driver 实现一致性; 测 runner 逻辑不需要真
+    agent, fake driver 即可; 测 driver 不需要真 LLM / 终端, ScriptedLLMClient /
+    ScriptedTerminal 即可; 跑得快, 不依赖网络。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre
+    class="code-block"
+  ><code>// 教学简化版, Eval Runner 的 4 种 driver 都是 test double
+type CodingAgentDriver = {
+  startCase(ctx): Promise&lt;void&gt;;
+  send(input): Promise&lt;AgentTurnResult&gt;;
+  readEvents?(): Promise&lt;AgentRuntimeEvent[]&gt;;
+  close(): Promise&lt;void&gt;;
+};
+
+// 真实实现: in-process driver
+const inProcessDriver = createInProcessDriver({ llm: fakeLLM, history, tools });
+
+// CLI 黑盒 driver (真正的子进程)
+const cliDriver = createCliDriver({ command: "node", args: ["agent.js"] });
+
+// Team driver (顺序 supervisor 拓扑)
+const teamDriver = createTeamDriver({ members: [...] });
+
+// 测试用: 完全 fake driver
+const fakeDriver = {
+  async startCase() {},
+  async send({ query }) { return { finalOutput: `Echo: ${query}` }; },
+  async readEvents() { return []; },
+  async close() {},
+};</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/driver.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · CodingAgentDriver 测试替身 (4 种 driver) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>Driver 接口中立</strong>
+      : 4 个方法, 不依赖具体实现。 Runner 调
+      <code>driver.send()</code>
+      , 不关心是 in-process / CLI / Team。
+    </li>
+    <li>
+      <strong>同一 case 多种 driver</strong>
+      : 同一 EvalCase, 切换 driver 就能在 in-process / CLI / Team 跑。 验证
+      driver 实现是否一致。
+    </li>
+    <li>
+      <strong>fake driver 测 Runner 本身</strong>
+      : 测 runner 逻辑 (workspace / assert / trace) 不需要真 agent, 用 fake
+      driver 即可。
+    </li>
+  </ol>
+  <h3>所有 driver 类型</h3>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>Driver</th>
+        <th>驱动什么</th>
+        <th>位置</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>in-process</td>
+        <td>
+          当前
+          <code>createAgent()</code>
+        </td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/in-process-driver.ts#L67"
+            rel="noreferrer"
+            target="_blank"
+            ><code
+              >src/eval/drivers/learn-claude-code/in-process-driver.ts</code
+            ></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>CLI</td>
+        <td>外部子进程</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/cli/cli-driver.ts#L44"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/eval/drivers/cli/cli-driver.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>Team</td>
+        <td>顺序 supervisor 拓扑</td>
+        <td>
+          <a
+            href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/team-driver.ts#L70"
+            rel="noreferrer"
+            target="_blank"
+            ><code>src/eval/drivers/learn-claude-code/team-driver.ts</code></a
+          >
+        </td>
+      </tr>
+      <tr>
+        <td>fake (test)</td>
+        <td>什么都不驱, 纯 stub</td>
+        <td>测试文件内 inline 写</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · fake driver 行为过简</dt>
+    <dd>
+      fake driver 直接返回 hardcoded "Done", 测 runner 流程时通过, 但真实 driver
+      行为复杂 (例如异步 + 重试 + 错误恢复), fake 没 体现, 真实 driver 跑崩时
+      case 测不到。 正确: fake driver 至少支持 success / error / timeout 3
+      种模式。
+    </dd>
+    <dt>陷阱 · 跑 case 时不切换 driver 验证一致性</dt>
+    <dd>
+      同一 EvalCase 只在 in-process driver 跑过, 没说在 CLI driver
+      跑过行为一致。 正确: 关键 case 至少在 2 种 driver 跑过, 验证 driver
+      实现一致性。
+    </dd>
+  </dl>
+  <h2 id="pattern-20">模式 20 · Prompt Card 模板</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 每章末尾 1 个, 整个教程 18+ 个。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 学生 vibe 新功能时, 写"帮我写 X" 出来的 实现跑偏; 写"代码要清晰" 这种空话
+    LLM 不知道什么意思; vibe 出 来的代码没有可验证的边界, 不知道对不对。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : Prompt Card 是
+    <strong>结构化的需求模板</strong>
+    — 把"模糊需求" 转成"6 段结构化描述", 强制每段填具体内容, 每段 可验证。
+    段顺序不能换 (目标 → 场景 → 模块 → 边界 → 验证 → Prompt), 缺一段就翻车。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 6 段顺序约束强制学生想清楚再 vibe, 不 跳步; 每段可验证 (边界段必须能转成
+    <code>expect()</code>
+    ); vibe 出来的实现直接对照 6 段 review, 缺什么补什么。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, 6 段 Prompt Card
+{
+  目标:        "用户问什么, 我们让 LLM 写什么"
+  场景:        "具体用户故事, 一段对话能讲清"
+  模块:        "新增/修改哪些文件, 每个文件单一职责"
+  边界:        "LLM 必须遵守的 checklist (5-7 条)"
+  验证:        "怎么跑 fake LLM 确认实现没坏"
+  Prompt:      "可以直接复制粘贴给 LLM 的整段 prompt"
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/tutorial/chapters/00-preface.html#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · 6 段 Prompt Card 模板 (定义在本页 00 章) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>6 段顺序不能换</strong>
+      : 目标 → 场景 → 模块 → 边界 → 验证 → Prompt。 任何一段缺失, LLM
+      写出来就跑偏。
+    </li>
+    <li>
+      <strong>每段必须可验证</strong>
+      : 边界段不能写空话 ("代码要清晰"), 必须写可断言的约束 ("用 Map 去重, 不用
+      Array.includes")。
+    </li>
+    <li>
+      <strong>Prompt 段是整段可复用</strong>
+      : 把前 5 段拼一起, 加上必要的代码 示例, 就是直接喂给 LLM 的 prompt。
+    </li>
+  </ol>
+  <p>
+    详细模板见第 00 章"6 段 Prompt Card 模板" 和 Reference 中"如何写好 一个 eval
+    case" 章节。
+  </p>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 边界段写空话</dt>
+    <dd>
+      "代码要清晰" / "跑得通" / "边界要严" — LLM 写出来"看起来对"
+      但实际跑不过测试。 正确: 每条边界必须能转成一条
+      <code>expect()</code>
+      。
+    </dd>
+    <dt>陷阱 · 验证段依赖真实 LLM</dt>
+    <dd>
+      "跑 npm run test, 看是不是绿的" — 真实 LLM 行为不可预测, 测试 flaky。
+      正确: 用 fake LLM + scripted response 验证, 每次跑 1000 次结果一样。
+    </dd>
+  </dl>
+  <h2 id="pattern-21">模式 21 · No Catch Throw (业务错误不 throw)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 工具执行 / 权限拒绝 / 子 agent 失败 / judge 输出 解析失败, 全部用
+    <code>error: true</code>
+    或专属 status 返回, 不 throw。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : throw 让整个 loop 崩, messages 序列断裂 (assistant 调了 N 个工具, 但 N 个
+    tool message 都没写, LLM 看到 错位); LLM 看不到任何错误信息, 不能继续推理;
+    用户看到"500 错误" 一头雾水, 不知道"为什么失败、怎么修"。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 业务错误是"预期的失败", 不是"代码 bug"。 业务 错误应该作为"正常返回"
+    出现在 LLM 视野里 (通过 tool message), 让 LLM 继续推理 ("啊, 文件不存在,
+    我换路径"); 只有真正的 harness bug (配置错误 / 内存溢出 / 内部 invariant
+    违反) 才用 throw 上抛 让 recovery 处理。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 业务错误让 LLM 看到, 继续推理; loop 不崩, messages 序列完整;
+    用户看到清晰的错误信息; recovery 只处理 真正的 harness 错误,
+    不被业务错误打扰。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, 4 种 "失败" 的处理
+
+// 1. 工具业务错误
+async function runRead(args) {
+  try {
+    const content = await fs.readFile(args.path, "utf8");
+    return { content };
+  } catch (e) {
+    return { content: `Error: ${e.message}`, error: true };  // 不 throw
+  }
+}
+
+// 2. 权限拒绝
+if (!permissionManager.check(...).allow) {
+  history.add({ role: "tool", tool_call_id: call.id,
+    content: "Permission denied by user." });  // 不 throw
+  continue;   // 跳过 invoke
+}
+
+// 3. 子 agent 失败
+async function runSubagent(args) {
+  try {
+    return { content: await childAgent.run(args.task) };
+  } catch (e) {
+    return { content: `子任务失败: ${e.message}`, error: true };  // 不 throw
+  }
+}
+
+// 4. judge 输出解析失败
+function parseJudgeOutput(raw: string): EvalJudgeResult {
+  try { return JSON.parse(raw); } catch {}
+  // 4 层降级都失败, 返回 judge_failed fallback
+  return { enabled: true, passed: false, score: 0,
+    summary: "judge_failed", problems: [...], ... };
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/permission.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · PermissionManager 业务错误不 throw (deny 写 tool message)
+      (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>业务错误用 error: true 表达</strong>
+      : LLM 收到后能继续推理 ("啊, 文件不存在, 我换路径")。 不 throw 让 loop
+      崩。
+    </li>
+    <li>
+      <strong>throw 只用于真正的 harness 错误</strong>
+      : 配置错误 / 内存 溢出 / 内部 invariant 违反, 这种 throw 是合理的。
+      业务错误绝不能 throw。
+    </li>
+    <li>
+      <strong>fallback 不让系统挂</strong>
+      : judge 解析失败 fallback, async run 超时 fallback, 权限拒绝 fallback,
+      所有失败都有 "降级路径" 而不是"死路"。
+    </li>
+  </ol>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 把所有 throw 都 catch 住</dt>
+    <dd>
+      try/catch 包一切 throw 当 fallback — 把"代码 bug" 和"业务 错误" 混为一谈,
+      harness 错误也被吞掉, 排查难。 正确: 业务 错误显式返回 error: true,
+      harness 错误让它 throw 上抛。
+    </dd>
+    <dt>陷阱 · fallback 信息太简</dt>
+    <dd>
+      fallback 只返回 "Error" — LLM 看到"Error" 不知道下一步 怎么办。 正确:
+      返回具体错误 + 建议下一步 (e.g. "Permission denied by user.
+      请重新决定或换其他方案。")。
+    </dd>
+  </dl>
+  <h2 id="pattern-22">模式 22 · Idempotent Operations (幂等操作)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : load_skill 多次激活 / Async Run 重试 / Schedule 重新触发 / Memory create
+    (允许重复 id, 覆盖更新)。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 网络抖动导致 LLM 重试时, 同一个 load_skill 被调 2 次, 应该不重复激活;
+    用户误操作"按 2 次 同一按钮" 应该不创建 2 个 run; Schedule tick 重新触发时,
+    不应 该创建重复 occurrence; Memory 用相同 id 创建时, 应该是"更新"
+    而非"创建"。
+  </p>
+  <p>
+    <strong>原理</strong>
+    : 经典
+    <strong>幂等性</strong>
+    (Idempotency) — 操作 重复 N 次的效果 = 操作 1 次的效果。 用"按 id 去重"
+    实现: 重复 id 时静默接受 (返回已有对象) 而非报错, 或者用 Set 存储已激活 名字
+    (重复激活时啥都不做)。
+  </p>
+  <p>
+    <strong>带来的好处</strong>
+    : 重试 / 误操作不会产生副作用; transcript 里出现 2 次同操作, 但 effect 只有
+    1 次 (审计友好); 业务代码 不用"if 第一次" 这种状态判断, 始终假设"幂等执行"。
+  </p>
+  <h3>模式长什么样</h3>
+  <pre class="code-block"><code>// 教学简化版, 4 个幂等操作
+
+// 1. load_skill 多次激活 — Map 去重
+function activate(name: string) {
+  if (toolIndex.has(name)) return [];  // 重复激活, 啥都不做
+  // ... 真正激活逻辑
+}
+
+// 2. Async Run 重新触发相同 runId — 拒绝重复
+function start(runId: string, args) {
+  if (runs.has(runId)) return { error: true, content: "runId 重复" };
+  runs.set(runId, { ... });
+}
+
+// 3. Schedule 重新触发 — 检查 occurrence 是否已存在
+function tick() {
+  for (const schedule of activeSchedules) {
+    const occ = findOccurrenceFor(schedule.id, thisTime);
+    if (occ) continue;   // 已触发, 跳过
+    trigger(schedule);
+  }
+}
+
+// 4. Memory create 重复 id — 覆盖更新
+function create(content, tags) {
+  const id = hashId(content);
+  if (memoryStore.has(id)) {
+    memoryStore.update(id, { content, tags, updatedAt: Date.now() });  // 覆盖
+    return { id, content: "updated" };
+  }
+  // ... 新建
+}</code></pre>
+  <p class="source-link">
+    <a
+      href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L1"
+      rel="noreferrer"
+      target="_blank"
+      >GitHub · createAsyncRunManager 幂等操作 (重复 runId 拒绝) (L1)</a
+    >
+  </p>
+  <p>关键点:</p>
+  <ol>
+    <li>
+      <strong>重复操作不产生副作用</strong>
+      : 调两次 load_skill("react") 和调一次, 效果一样。 不写 error, 不写
+      warning, 安静地幂等。
+    </li>
+    <li>
+      <strong>幂等 ≠ 拒绝</strong>
+      : 不要 "重复 id 报错", 应该 "重复 id 静默 接受"。 报错会让 LLM 困惑,
+      静默接受让它下次继续。
+    </li>
+    <li>
+      <strong>幂等是 audit-friendly</strong>
+      : transcript 里出现 2 次 load_skill("react"), 但实际只激活 1 次。
+      审计时不会误判"调了 2 次" — 看 effect 而非 call。
+    </li>
+  </ol>
+  <h3>常见陷阱</h3>
+  <dl class="defs">
+    <dt>陷阱 · 把幂等做成"重复报错"</dt>
+    <dd>
+      "runId 已存在" 当 error 返回 — 实际是同一个 run, 不该报错。 正确: 重复
+      runId 时静默返回已有对象, 或者拒绝但用
+      <code>error: true</code>
+      而不是 throw。
+    </dd>
+    <dt>陷阱 · 幂等判断写在业务层</dt>
+    <dd>
+      业务层每次调之前都 "if (already exists)" — 重复逻辑散落各 处。 正确:
+      幂等判断写在 manager/store 内部, 业务层无脑调 即可。
+    </dd>
+  </dl>
+  <h2 id="anti-patterns">反模式速查 (在仓库里绝对不出现)</h2>
+  <p>看到这些写法, 立刻知道"是错的"。 仓库 100% 避免。</p>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>反模式</th>
+        <th>为什么错</th>
+        <th>正确做法</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <code>let history = []</code>
+          module-level
+        </td>
+        <td>父子 agent 共享, 跨上下文污染</td>
+        <td>
+          <code>createHistory()</code>
+          闭包内
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <code>agent.ts</code>
+          直接
+          <code>import OpenAI</code>
+        </td>
+        <td>测试难, 换模型重写</td>
+        <td>
+          只 import
+          <code>LLMClient</code>
+          接口
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <code>if (provider === "anthropic") { ... }</code>
+          写在业务代码
+        </td>
+        <td>业务代码被方言污染</td>
+        <td>Adapter 层翻译, 业务看 LLMClient</td>
+      </tr>
+      <tr>
+        <td>
+          <code>systemPrompt + state</code>
+          拼字符串
+        </td>
+        <td>破坏 prompt cache, 成本涨 5-10 倍</td>
+        <td>state 走 reminder, system prompt 只放规则</td>
+      </tr>
+      <tr>
+        <td>
+          <code>_loopIndex</code>
+          等内部字段发给 LLM
+        </td>
+        <td>污染 messages, 干扰 LLM</td>
+        <td>flatten 时显式枚举, 内部字段清除</td>
+      </tr>
+      <tr>
+        <td>
+          <code>fs.writeFileSync(path, json)</code>
+          直接写持久化文件
+        </td>
+        <td>断电留半截, JSON 损坏</td>
+        <td>
+          <code>atomicWriteJsonSync()</code>
+          写
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <code>throw new Error("Permission denied")</code>
+          权限拒绝时
+        </td>
+        <td>整个 loop 崩, messages 断裂</td>
+        <td>写 "Permission denied" tool message, LLM 自己决定</td>
+      </tr>
+      <tr>
+        <td>
+          <code>if (isTest) { /* mock 逻辑 */ }</code>
+          写在 agent.ts
+        </td>
+        <td>业务代码绑死测试, 难维护</td>
+        <td>依赖注入 fake, agent.ts 不变</td>
+      </tr>
+      <tr>
+        <td>
+          用
+          <code>Date</code>
+          对象 / ISO 字符串存时间
+        </td>
+        <td>JSON 序列化类型错乱, 比较 bug</td>
+        <td>
+          统一用
+          <code>number</code>
+          (ms), 边界处显式转换
+        </td>
+      </tr>
+      <tr>
+        <td>
+          LLM 调用
+          <code>throw</code>
+          错误状态
+        </td>
+        <td>messages 序列断裂, LLM 困惑</td>
+        <td>错误写 tool message, 让 LLM 继续推理</td>
+      </tr>
+      <tr>
+        <td>
+          <code>let activeSkills = []</code>
+          module-level
+        </td>
+        <td>父子 agent 共享, skill 状态污染</td>
+        <td>
+          <code>createActiveSkillSet()</code>
+          闭包内
+        </td>
+      </tr>
+      <tr>
+        <td>
+          子 agent 也调
+          <code>run_subagent</code>
+          (递归)
+        </td>
+        <td>费用指数上升, 调试噩梦</td>
+        <td>
+          过滤工具时强制移除
+          <code>run_subagent</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h2 id="where-to-go-next">学完这一页之后</h2>
+  <p>恭喜, 你已经掌握整套项目的设计模式词典。 接下来:</p>
+  <ol>
+    <li>
+      <strong>读代码</strong>
+      : 打开
+      <code>src/agent.ts</code>
+      /
+      <code>src/todo.ts</code>
+      /
+      <code>src/memory.ts</code>
+      , 用 22 个模式识别它们的骨架。 同一个项目, 同一套模式反复出现 —
+      你已经能"读懂任何文件了"。
+    </li>
+    <li>
+      <strong>自己写新模块</strong>
+      : 用 Composition Root 唯一组装 + 工厂 + 闭包 + 依赖注入 + 提醒模式 +
+      缓存友好布局这 5 条, 写一个 100 行的 manager, 跟仓库其他模块无缝衔接。
+    </li>
+    <li>
+      <strong>vibe 出新功能</strong>
+      : 用 6 段 Prompt Card 模板, 给大模型写 "我要在 harness 加 Web UI",
+      让它按这套模式生成代码。
+    </li>
+  </ol>
+  <p>
+    教学项目的最高产出不是"理解", 是"自己 vibe 出新功能"。 这 22 个模式是你 vibe
+    时的"骨架词汇表"。
+  </p>
+  <nav aria-label="章节翻页" class="article-pager">
+    <a class="article-pager__item" href="http://127.0.0.1:5173/?chapter=eval"
+      ><span class="article-pager__label">上一章</span>
+      <span class="article-pager__title"
+        >B · 如何测试一个不确定的 Agent</span
+      ></a
+    >
+    <span class="article-pager__item article-pager__item--disabled"
+      ><span class="article-pager__label">下一章</span>
+      <span class="article-pager__title">已经是最后一章</span></span
+    >
+  </nav>
+</article>

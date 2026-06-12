@@ -134,8 +134,8 @@ export const chapters = {
   },
   "model-policy": {
     number: "A",
-    title: "不同大模型不是只换模型名",
-    navTitle: "不同大模型不是只换模型名",
+    title: "换个模型, 不只换 baseURL",
+    navTitle: "换个模型, 不只换 baseURL",
     group: "topic",
     file: "./chapters/model-policy.html",
     ready: true,
@@ -151,7 +151,7 @@ export const chapters = {
   reference: {
     number: "—",
     title: "Reference",
-    navTitle: "术语表、Prompt Pack 与验证手册",
+    navTitle: "设计模式",
     group: "reference",
     file: "./chapters/reference.html",
     ready: true,

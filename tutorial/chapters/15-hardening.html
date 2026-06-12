@@ -1,552 +1,737 @@
-<p class="article__eyebrow">第 15 章 · 长期运行的卫生系统</p>
-<h1 class="article__title">Runtime Hardening: 长期运行不会把系统跑坏</h1>
+<p class="article__eyebrow">第 15 章 · 跑生产时的运行时安全</p>
+<h1 class="article__title">Hardening: 日志轮转 / 多 LLM / 多 session / Normalize 协议差异</h1>
 <p class="article__lede">
-  前面十四章让 harness 拥有完整能力, 但 schedule / async run / memory / task /
-  output store 这些持久化数据在长期运行下会无限增长, 日志、 transcript、output
-  handle 也会累积。某天启动变慢、磁盘占满、某个 JSON 因为中断写坏。这一章给
-  harness 加 Runtime Hardening, 覆盖所有 读写边界: 原子写、日志轮转、output
-  handle 引用计数、清理 dry-run、 时间语义统一, 让 harness
-  在真实使用中慢慢腐烂时不至于崩溃。
+  前 14 章让 harness 在 happy path 上跑得通, 但生产里还要解决
+  8 件"杂事": 日志文件 <strong>撑爆磁盘</strong> (log-rotation) /
+  <strong>3 个 LLM 后端</strong> (OpenAI / Anthropic / 自部署
+  vLLM) <strong>协议差异</strong> (normalize) / 配置<strong>优先级</strong>
+  (CLI > env > config.ts) / 多 session <strong>并发隔离</strong>
+  / prompt <strong>策略层</strong> (system-prompt 拼装) / context
+  <strong>排序</strong> (context-ranking) / 终端<strong>兼容</strong>
+  (terminal.ts TTY 检测)。 这一章不深入单个模块, 而是把这些
+  "安全网" 列清楚, 讲清"为什么需要" + "靠哪条不变量保证" +
+  "出问题怎么定位"。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-14">在第 14 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="real-failure">真实失败故事: harness 跑 3 个月, 磁盘撑爆 100GB</h2>
 <p>
-  这一章不新增业务模块, 而是基于已有的 schedule (第 14 章) / async run (第 13
-  章) / memory (第 09 章) / task (第 12 章) / output store (第 06 章 P1) /
-  transcript (第 08 章) 重新组织所有持久化 IO, 加上 原子写、日志轮转、output
-  handle 引用计数、清理 dry-run、时间语义 统一五个卫生系统。 对应到代码,
-  改动集中在 5 个文件: <code>src/atomic-write.ts</code> (新)、
-  <code>src/log-rotation.ts</code> (新)、<code>src/output-store.ts</code>
-  (改加引用计数)、<code>src/cleanup.ts</code> (新)、<code>src/timeline.ts</code>
-  (改时间语义统一)。
+  写代码之前, 先看一个真实痛点。 用户的 team 上线 harness 跑
+  生产, 3 个月后发现 /var/log/harness.log 撑爆 100GB, 系统
+  报警 "disk usage 95%"。 同时 team 想接 Anthropic Claude (原本
+  只支持 OpenAI), 改完 LLM 客户端发现 100 个测试里 30 个 fail
+  (thinking_content 字段位置不一样)。
 </p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/atomic-write.ts"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/atomic-write.ts: 原子写工具 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/log-rotation.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/log-rotation.ts: 日志轮转 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/output-store.ts"
-    target="_blank"
-    rel="noreferrer"
-    >3. src/output-store.ts: 引用计数 + 过期清理 (改)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/cleanup.ts"
-    target="_blank"
-    rel="noreferrer"
-    >4. src/cleanup.ts: 干跑清理 (新)</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/timeline.ts"
-    target="_blank"
-    rel="noreferrer"
-    >5. src/timeline.ts: 时间语义统一 (改)</a
-  >
+<ol>
+<li>
+<strong>症状 1: 日志撑爆</strong>: 跑 3 个月没轮转, 单个 .log
+    文件 100GB, 磁盘满, 系统挂。
+  </li>
+<li>
+<strong>症状 2: 换 LLM fail</strong>: OpenAI 用
+    <code>response.choices[0].message.content</code>, Anthropic
+    用 <code>response.content[0].text</code>, 代码到处写
+    <code>message.content</code> 拿到 undefined。
+  </li>
+<li>
+<strong>症状 3: 配置混乱</strong>: CLI 传 <code>--mode plan</code>,
+    env 传 <code>HARNESS_MODE=auto</code>, 哪个生效? 团队
+    不知道, 出现"我配的怎么不生效"。
+  </li>
+<li>
+<strong>症状 4: 多 session 互相干扰</strong>: user A 和 user B
+    同时跑 harness, 共享 history 数组, A 看到 B 的对话。
+  </li>
+<li>
+<strong>真问题</strong>: 缺<strong>运行时安全网</strong> —
+  日志轮转 / LLM 协议 normalize / 配置优先级 / session 隔离 /
+  prompt 策略 / context 排序 / 终端兼容, 7 个独立但都必需的
+  模块, 缺一个就出事。
+  </li>
+</ol>
+<p>
+  朴素想法 1: "日志不重要, 不用管?" 错。 日志是<strong>唯一</strong>
+  出问题时的排查依据, 撑爆 = 排查依据全丢 = 第二次事故无法
+  复盘。
+</p>
+<p>
+  朴素想法 2: "只支持 OpenAI, 不接其他?" 商业上不行。 team 想
+  换 Anthropic / 自部署 vLLM 节省成本, 不接 = 锁死单 provider。
+  需要<strong>协议 normalize 层</strong>, 内部用统一格式, 外部
+  adapter 转 provider 协议。
+</p>
+<p>
+  正确做法: 8 个<strong>独立</strong>模块各自解决一个问题 —
+  <code>log-rotation.ts</code> / <code>normalize.ts</code> /
+  <code>config.ts</code> / <code>session.ts</code> / <code>system-prompt.ts</code> /
+  <code>context-ranking.ts</code> / <code>terminal.ts</code> /
+  <code>cli-commands.ts</code> / <code>llm-providers.ts</code>。
+  这一章把它们<strong>串起来</strong>看, 讲清"为什么需要" +
+  "靠哪条不变量保证"。
+</p>
+<h2 id="hardening-areas">8 个安全网的边界</h2>
+<p>
+  <strong>用途</strong>: 8 个模块各自独立, 但有<strong>层间依赖</strong>:
+  config 在最底层 (其他都依赖它的配置), session 在中间层 (多
+  进程共享资源), cli-commands 在顶层 (暴露 LLM / user 接口)。
+  理解依赖关系才知道"改一个会不会影响其他"。
+</p>
+<p>
+  <strong>真实场景</strong>: team 想加 "harness 支持 /thinking
+  思考预算" 配置, 要改 (1) config.ts 加 thinking_budget 字段;
+  (2) system-prompt.ts 把预算拼到 prompt; (3) cli-commands.ts
+  加 /thinking CLI 命令; (4) llm-providers.ts 转给具体 provider
+  (Anthropic 接受 thinking 字段, OpenAI 不接受)。 4 个文件联动
+  改, 漏一个就出 bug。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>模块独立 + 协议对齐</strong> —
+  Reference 章节 "模式 1 · 工厂 + 闭包" + "模式 3 · 窄接口 + Adapter"
+  的延伸。 8 个模块都用工厂 + 闭包, 接口清晰, 改一个不污染其他。
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 1 · 8 个安全网的依赖层次</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__layer--stable"></div>
+      <div class="flow-stack__label">顶层 · CLI / Tools</div>
+      <div class="flow-stack__body">cli-commands.ts 暴露 /mode /memory /schedule /task /model-policy 等 CLI 命令; tools/* 暴露 LLM 可调工具。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">策略层 · system-prompt / context-ranking</div>
+      <div class="flow-stack__body">system-prompt.ts 拼装 system message (含 memory / skill / tool 规则); context-ranking.ts 排序 history 中哪些 message 优先。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">执行层 · normalize / llm-providers / foundation-models</div>
+      <div class="flow-stack__body">normalize.ts 把消息归一成 OpenAI ChatCompletionMessageParam; llm-providers.ts 暴露 3 个 provider (openai / anthropic / vllm); foundation-models.ts 列出 5 个常见 model 适配。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">会话层 · session / transcript</div>
+      <div class="flow-stack__body">session.ts 派生独立 history / 隔离多 user; transcript.ts 持久化对话到文件。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">基础层 · config / logger / log-rotation / terminal</div>
+      <div class="flow-stack__body">config.ts 加载配置 (CLI > env > default); logger.ts 输出日志; log-rotation.ts 按 size 轮转; terminal.ts 检测 TTY / 颜色支持。</div>
+    </div>
+  </div>
 </div>
+<p>
+  <strong>实现细节</strong>: 8 个模块跨 5 层, 顶层依赖底层, 底层
+  不依赖顶层。 改 config 加字段, 只影响基础层 + 触发其他层 reactive
+  读; 改 cli-commands 加命令, 只影响顶层。 层间清晰, 维护成本
+  线性。
+</p>
+<h2 id="log-rotation">log-rotation: 按 size 轮转 + 保留 N 个</h2>
+<p>
+  <strong>用途</strong>: 跑生产 harness, 日志文件<strong>必须</strong>
+  按 size 轮转, 避免单文件撑爆磁盘。 <code>log-rotation.ts</code>
+  提供 <code>rotateLogFileIfNeeded(filePath, options)</code> —
+  写日志前检查 size, 超过 maxBytes 触发轮转。
+</p>
+<p>
+  <strong>真实场景</strong>: harness 跑 3 个月, 单个 .log 文件
+  100GB。 正确做法: maxBytes = 50MB, 写日志前检查 size, 超了
+  rename <code>harness.log</code> → <code>harness.log.1</code>
+  (覆盖最旧的), 新 <code>harness.log</code> 继续写。 保留 5 个
+  backup, 总占用 ≤ 50 × 6 = 300MB, 远小于磁盘容量。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>size-based + 简单 rename</strong> —
+  不引入 <code>logrotate</code> 系统工具, harness 自己处理,
+  跨平台一致。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/log-rotation.ts#L29"><code>src/log-rotation.ts</code> 第 29 行的 <code>rotateLogFileIfNeeded</code></a>:
+</p>
+<pre><code class="language-typescript">export function rotateLogFileIfNeeded(
+  filePath: string,
+  options: LogRotationOptions,
+): { rotated: boolean; removedFiles: string[] };</code></pre>
+<p>
+  <strong>实现细节</strong>: 关键不变量 — (a) 写日志<strong>前</strong>
+  检查 size, 不是写完后; (b) rename 走原子 (rename syscall 是
+  原子的); (c) 保留 N 个 backup, 多的删; (d) 轮转失败 warn 日志,
+  不 throw, 不影响 harness 继续写日志。 这是 Reference 章节
+  "模式 10 · Atomic Write 原子写" 的应用。
+</p>
+<h2 id="normalize">normalize: 3 个 provider 协议归一</h2>
+<p>
+  <strong>用途</strong>: OpenAI / Anthropic / 自部署 vLLM 的协议
+  格式不同, agent 主循环不应该直接面对 3 套格式。 应该<strong>内部</strong>
+  用 OpenAI ChatCompletionMessageParam 统一格式, <strong>外部</strong>
+  调 provider adapter 转协议。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/normalize.ts#L26"><code>src/normalize.ts</code> 第 26 行的 <code>normalizeMessages</code></a>:
+</p>
+<pre><code class="language-typescript">export function normalizeMessages(
+  messages: unknown[],
+): ChatCompletionMessageParam[];</code></pre>
+<p>
+  <strong>真实场景</strong>: user 切换 Anthropic Claude, Anthropic
+  用 <code>{role: "assistant", content: [{type: "text", text: "..."}]}</code>
+  (content 是数组), OpenAI 用 <code>{role: "assistant", content: "..."}</code>
+  (content 是字符串)。 agent 主循环假设 OpenAI 格式, 直接
+  <code>message.content</code> 拿字符串, 拿到数组报错。 normalize
+  层把 Anthropic 的 content 数组归一成 OpenAI 的字符串, agent
+  主循环无感知。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>统一内部格式, adapter 翻译</strong> —
+  Reference 章节 "模式 3 · 窄接口 + Adapter" 的标准应用。 选
+  OpenAI 格式作为"内部标准" 因为最常见, Anthropic / vLLM 写
+  adapter 把自家协议转成 OpenAI 格式。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/llm-providers.ts"><code>src/llm-providers.ts</code></a>
+  — 3 个 provider, 每个一个 adapter 文件, 内部都返回 OpenAI 格式
+  响应。
+</p>
+<p>
+  <strong>实现细节</strong>: 5 个常见差异要 normalize — (a) content
+  字符串 vs 数组; (b) tool_call 在 message 里 vs 在 content 块
+  里; (c) reasoning_content 字段 (Anthropic) vs reasoning
+  (OpenAI o1); (d) function_call 旧字段 vs tool_calls 新字段;
+  (e) 错误格式 (OpenAI APIError vs AnthropicError)。 normalize
+  层统一处理, agent 主循环只认"OpenAI 格式"。
+</p>
+<h2 id="config-priority">config 优先级: CLI > env > default</h2>
+<p>
+  <strong>用途</strong>: harness 配置从 3 个来源加载:
+  (1) <code>loadConfig()</code> 读 default + config.ts;
+  (2) 环境变量 <code>HARNESS_*</code> 覆盖 default;
+  (3) CLI 参数 <code>--mode / --debug</code> 覆盖 env。
+  优先级明确, 不含糊。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/config.ts#L89"><code>src/config.ts</code> 第 89 行的 <code>loadConfig</code></a>:
+</p>
+<pre><code class="language-typescript">export function loadConfig(): Config;</code></pre>
+<p>
+  <strong>真实场景</strong>: team 跑 CI, 想"覆盖 mode=auto +
+  timeout=60s"。 CI 脚本:
+  <code>HARNESS_MODE=auto harness --timeout 60000</code>。
+  CLI 优先级最高, mode=auto + timeout=60000 都生效; 不传
+  timeout 用 env 或 default。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>显式优先级 + 不打平</strong> —
+  Reference 章节 "模式 5 · Composition Root 组合根" 的应用。
+  loadConfig() 内部按 (CLI > env > default) 顺序 merge, 不
+  一次性 flatten (保留"哪个来源覆盖" 信息, 调试时能看到)。
+  3 条原则:
+</p>
+<ol>
+<li>
+<strong>CLI 最高</strong>: <code>--mode plan</code> 永远覆盖
+    env 和 default。
+  </li>
+<li>
+<strong>env 次之</strong>: <code>HARNESS_MODE=auto</code> 覆盖
+    default, 但被 CLI 覆盖。
+  </li>
+<li>
+<strong>default 兜底</strong>: 没 CLI 也没 env, 用 config.ts
+    默认值 (mode=default, timeout=30s)。
+  </li>
+</ol>
+<p>
+  <strong>实现细节</strong>: loadConfig 返回的 Config 含
+  <code>source: { mode: "cli" | "env" | "default" }</code>
+  字段, 调试时输出 "mode=plan (source: cli)", 让用户知道
+  配置从哪来, 不再 "我配的怎么不生效"。
+</p>
+<h2 id="session-isolation">多 session 隔离: 独立 history + 独立工具</h2>
+<p>
+  <strong>用途</strong>: 多 user / 多项目同时用 harness, 互不
+  干扰: 独立 history / 独立 tool registry / 独立 session id。
+  这是 Reference 章节 "模式 1 · 工厂 + 闭包" 的标准应用 —
+  每次 createSession() 返回新对象, 闭包内 state 互不污染。
+</p>
+<p>
+  <strong>真实场景</strong>: 30 个 user 同时跑 harness, user A
+  写到 history 的对话不会跑到 user B 的 history, user A 调的
+  subagent 不会和 user B 的 subagent 共享 LLM client。 靠
+  <code>createSession({userId, projectRoot})</code> 每次返回
+  独立实例。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>工厂 + 闭包</strong> —
+  SessionManager.createSession() 返回的 Session 含独立 history
+  (createHistory) + 独立 tool registry (createToolRegistry) +
+  独立 llm client (按需创建)。 关键不变量:
+  <strong>状态在闭包内, 外部不能误改</strong>。
+</p>
+<p>
+  <strong>实现细节</strong>: 隔离的边界 — (a) history 数组
+  互不共享; (b) tool registry 的状态 (call counts / last args)
+  互不共享; (c) 持久化文件按 sessionId 分目录 (transcript
+  写到 <code>.sessions/&lt;sessionId&gt;/transcript.jsonl</code>);
+  (d) LLM API key 按 session 注入 (多 key 轮换避免 rate limit)。
+  Reference 章节 "模式 17 · Test Doubles" 的应用 — 测试时
+  fake session 互不污染。
+</p>
+<h2 id="system-prompt">system-prompt: 拼装策略层</h2>
+<p>
+  <strong>用途</strong>: system prompt 不是"一段写死的字符串",
+  是<strong>策略拼装</strong> — base 规则 + memory 段 + skill 段
+  + tool 规则 + 当前 context, 按层拼, 缺哪段就跳过。 教学版
+  关键是 "system prompt 是 stable prefix, 拼完 1 次, 100 轮
+  对话复用" (第 10 章)。
+</p>
+<p>
+  <strong>真实场景</strong>: 启动时拼 system prompt =
+  <code>baseRules + memorySection + skillSection + toolRules + contextSummary</code>。
+  5 段按顺序, 每段独立可测。 测试用 fake memory / fake skill
+  注入, 验证拼装结果。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>分层拼装, 缺段跳过</strong> —
+  Reference 章节 "模式 6 · Pipeline 管道" + "模式 11 ·
+  Cache-friendly 缓存友好" 的应用。 每段单独函数, 单独测试,
+  拼装函数只负责 concat。 缺 memory 段时 <code>memorySection || ""</code>,
+  不 throw。
+</p>
+<p>
+  <strong>实现细节</strong>: system prompt 的体积控制 — 每段
+  限制 maxTokens (memory 段 200 token, skill 段 500 token, tool
+  规则 1000 token, 总量 ≤ 4k token), 超过截断 + 提示 "memory
+  段过长, 考虑清理"。 这是防止 system prompt 撑爆 cache prefix
+  命中率 (第 10 章)。
+</p>
+<h2 id="context-ranking">context-ranking: history 中哪些 message 优先</h2>
+<p>
+  <strong>用途</strong>: history 100 轮对话, 4000 token, LLM 看不
+  全? 不是 — LLM 看到全部, 但<strong>截断</strong>时哪些 message
+  优先保留? context-ranking 提供<strong>排序策略</strong>: 系统
+  消息 / 用户最近输入 / 工具错误 / 长输出摘要等优先级不同。
+</p>
+<p>
+  <strong>真实场景</strong>: 100 轮对话 history 4000 token 超
+  模型窗口 8k, 需要截断到 6k。 context-ranking 排序: (1) system
+  message 永不丢; (2) 最近 5 轮 user/assistant/tool 完整保留;
+  (3) 早期长 tool 输出保留摘要; (4) 早期 user/assistant 折叠
+  成 "1-line summary"。 截断后 LLM 看到"全部 context, 但老的内容
+  压缩了"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>分级保留 + 摘要折叠</strong> —
+  Reference 章节 "模式 6 · Pipeline 管道" + "模式 13 ·
+  Error→Action 错误转动作" 的应用。 截断不是"丢老的内容", 是
+  "老的内容保留摘要, 新的内容保留全文"。 摘要靠 LLM 生成 (内部
+  Async Run), 教学版可以简化为"丢最早的 10% 内容"。
+</p>
+<p>
+  <strong>实现细节</strong>: 排序权重 (a) system = 100; (b) 工具
+  错误 = 90 (LLM 需要看到错误调整); (c) 最近 5 轮 = 80; (d)
+  远期 user 消息 = 40; (e) 远期工具输出 = 20 (优先压缩)。 截断
+  时按权重从高到低保留, 直到达到 maxTokens。
+</p>
+<h2 id="terminal">terminal: TTY / 颜色 / 宽度的环境检测</h2>
+<p>
+  <strong>用途</strong>: harness 在 TTY 终端 / IDE 内嵌 / pipe 重
+  定向 3 种环境下行为不同: TTY 用 ANSI 颜色 + 交互式 prompt,
+  pipe 关闭颜色 + 用纯文本, IDE 看 isatty + 父进程名启发式
+  判断。 <code>terminal.ts</code> 暴露 Terminal 接口, 检测环境
+  + 调对应输出策略。
+</p>
+<p>
+  <strong>真实场景</strong>: user 在 vscode 集成终端跑 harness,
+  harness 输出带 ANSI 颜色, vscode 渲染颜色; user pipe 给
+  <code>less</code>, harness 检测到 not tty 关闭颜色, less 看到
+  纯文本 (不会乱码)。 同一份代码, 不同环境自动适配。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>环境检测 + 降级输出</strong> —
+  Reference 章节 "模式 13 · Error→Action 错误转动作" 的应用。
+  颜色开启 / 关闭是<strong>副作用</strong>, 应该从主流程里抽出,
+  集中到 terminal 接口。
+</p>
+<p>
+  <strong>实现细节</strong>: 检测点 4 个 — (a) <code>process.stdout.isTTY</code>;
+  (b) <code>process.env.NO_COLOR</code>; (c) <code>process.env.TERM</code>
+  含 "dumb" 关闭颜色; (d) <code>process.stdout.columns</code>
+  拿终端宽度 (布局自适应)。 任一不满足 → 关闭颜色 / 用固定
+  宽度 80 / 禁用交互 prompt。
+</p>
+<h2 id="cli-commands">cli-commands: 9 个 /xxx 命令注册</h2>
+<p>
+  <strong>用途</strong>: 用户在 REPL 输 <code>/mode plan</code> /
+  <code>/memory list</code> / <code>/schedule list</code> /
+  <code>/task create</code> / <code>/model-policy show</code> 等
+  命令, cli-commands.ts 集中注册 + 解析 + 执行。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/cli-commands.ts#L65"><code>src/cli-commands.ts</code> 第 65 行的 <code>createCliCommandRegistry</code></a>:
+</p>
+<pre><code class="language-typescript">export function createCliCommandRegistry(): CliCommandRegistry;</code></pre>
+<p>
+  <strong>真实场景</strong>: user 输 <code>/task create "Fix bug
+  #123"</code>, registry 解析 create 子命令 + "Fix bug #123" 参数,
+  调 <code>taskManager.createGroup(...)</code> 创建 task group,
+  输出 "Created task group task_xxx: Fix bug #123"。 9 个命令
+  (mode / memory / skill / schedule / task / model-policy /
+  thinking / stable-context 等) 各管一摊, 互不干扰。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>注册表 + 工厂</strong> —
+  Reference 章节 "模式 1 · 工厂 + 闭包" + "模式 5 · Composition
+  Root" 的应用。 每个 /xxx 命令是独立工厂, 注册到全局 registry,
+  REPL 调 <code>registry.execute("/task", "create", args)</code>
+  分发。
+</p>
+<p>
+  <strong>实现细节</strong>: 9 个命令 <strong>不能互相依赖</strong>
+  — /task 不该 import /memory, /schedule 不该 import /mode。 命令
+  之间的协作通过 Composition Root 注入 (deps), 不用 import 链。
+  这保证加新命令不影响旧命令。
+</p>
+<h2 id="llm-providers">llm-providers: 3 个 provider 适配</h2>
+<p>
+  <strong>用途</strong>: harness 支持 3 个 LLM provider: OpenAI /
+  Anthropic / 自部署 vLLM (OpenAI-compatible)。 <code>llm-providers.ts</code>
+  暴露 <code>createOpenAIProvider / createAnthropicProvider /
+  createVLLMProvider</code> 3 个工厂, 都返回统一 LLMClient
+  接口 (chat + stream)。 agent 主循环不直接调 OpenAI SDK, 调
+  LLMClient 接口。
+</p>
+<p>
+  <strong>真实场景</strong>: user 想 "省成本, 用自部署 vLLM 跑
+  7B 模型", 改 <code>LLM_PROVIDER=vllm</code> + <code>VLLM_BASE_URL=http://...</code>,
+  harness 自动用 vLLM provider, agent 主循环 0 改动 (因为都
+  走 LLMClient 接口)。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>Adapter 模式 + 统一接口</strong> —
+  Reference 章节 "模式 3 · 窄接口 + Adapter" 的标准应用。 3 个
+  provider 各写 adapter, 把自家协议转成 OpenAI ChatCompletion
+  格式 (内部统一标准), agent 主循环只认"OpenAI 格式"。
+</p>
+<p>
+  <strong>实现细节</strong>: 3 个 provider 的差异 (a) OpenAI 直接
+  用 <code>openai</code> SDK; (b) Anthropic 用 <code>@anthropic-ai/sdk</code>
+  + 写 adapter 把 Anthropic 响应转 OpenAI 格式; (c) vLLM 用
+  OpenAI-compatible HTTP API (和 OpenAI 一样, 只换 baseURL)。
+  Anthropic adapter 是最复杂的 (content 数组 + thinking 字段
+  + tool_use 块都要转), 教学版只覆盖 80% case。
+</p>
+<h2 id="foundation-models">foundation-models: 5 个常见 model 适配</h2>
+<p>
+  <strong>用途</strong>: 不同 LLM model 有不同的<strong>能力差异</strong>
+  (上下文窗口 / 支持 function calling / 支持 vision / 思考预算) —
+  GPT-4o 128k + tool + vision; Claude Sonnet 200k + tool +
+  thinking; Qwen2.5-7B 32k + tool (no vision)。 harness 应该
+  知道"我用的是哪个 model, 它的能力边界在哪", 避免越界调用。
+</p>
+<p>
+  <strong>真实场景</strong>: user 设 <code>LLM_MODEL=qwen2.5-7b</code>,
+  harness 查 foundation-models.ts 找到 "Qwen2.5-7B: 32k context,
+  tool support: yes, vision: no, thinking: no", LLM 试图调带
+  图片的 tool 时, harness 提示 "当前 model 不支持 vision, 请用
+  text 描述"。 防止 LLM "以为能调实际不能调"。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>能力清单 + 边界提示</strong> —
+  Reference 章节 "模式 5 · Composition Root 组合根" 的应用。
+  每个 model 一个清单, 启动时根据 LLM_MODEL 选清单, agent
+  调工具前 check 能力。
+</p>
+<p>
+  <strong>实现细节</strong>: 5 个常见 model + 1 个 fallback "unknown"
+  (任意名字走 unknown, 提示"未知 model, 用默认能力, 可能不准")。
+  教学版不维护完整 model 列表 (5 个够用), 工业版接
+  <code>litellm</code> 等开源 registry。
+</p>
+<h2 id="loop-integration">主循环集成: 8 个模块在 Composition Root 拼装</h2>
+<p>
+  <strong>用途</strong>: 8 个模块在 <code>src/index.ts</code> 的
+  Composition Root 拼装, 注入 agent。 拼装顺序很重要 —
+  config → logger → terminal → session → llm-providers → system-prompt
+  → context-ranking → cli-commands。 后者依赖前者的实例。
+</p>
+<p>
+  <strong>真实场景</strong>: Composition Root main() 流程:
+  (1) loadConfig() 读配置; (2) createLogger() 输出启动日志;
+  (3) detectTerminal() 决定颜色 / 交互; (4) createLLMClient()
+  按 provider 选 adapter; (5) createSession() 派生 session;
+  (6) createSystemPrompt(config) 拼装 system message; (7)
+  createContextRanking() 排序 history; (8) createCliCommandRegistry()
+  注册 9 个 /xxx 命令; (9) startREPL() 启动交互。
+</p>
+<p>
+  <strong>设计思想</strong>: <strong>显式依赖链</strong> —
+  Reference 章节 "模式 5 · Composition Root 组合根" 的标准
+  应用。 main() 函数一气呵成, 没人藏 import, 改模块就改 main。
+</p>
+<p>
+  <strong>实现细节</strong>: 8 个模块的实例<strong>共享一次</strong>,
+  不重复创建 (logger 重复创建 → 日志写到 2 个文件; terminal
+  重复创建 → 颜色检测 2 次可能不一致; session 重复创建 → 隔离
+  失效)。 AGENTS.md "共享实例必须字面共享" 规则。
+</p>
+<h2 id="fake-test">fake test: 用 fake env 验证 4 个不变量</h2>
+<p>
+  <strong>用途</strong>: 8 个模块的测试用<strong>fake env</strong> +
+  <strong>tmp dir</strong> + <strong>in-memory LLM client</strong> —
+  不真连 LLM, 不写真实日志文件, 不依赖真实 TTY。 测的是"模块
+  行为", 不是"外部依赖"。
+</p>
+<p>
+  <strong>真实场景</strong>: 用户写测试覆盖 4 条不变量:
+  (a) log-rotation: 写 100MB 日志, 触发 2 次轮转, 总文件数 = 6
+  (1 个 current + 5 个 backup); (b) normalize: Anthropic 格式
+  消息 normalize 后变 OpenAI 格式; (c) config 优先级: CLI + env
+  + default 三层, CLI 最高; (d) session 隔离: 2 个 session history
+  互不影响。
+</p>
+<pre><code class="language-typescript">test("log-rotation: 50MB 上限 + 5 个 backup", () =&gt; {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "log-test-"));
+  const filePath = path.join(dir, "test.log");
+  // 写 50MB
+  fs.writeFileSync(filePath, "x".repeat(50 * 1024 * 1024));
+  // 触发轮转
+  const result = rotateLogFileIfNeeded(filePath, { maxBytes: 10 * 1024 * 1024, maxBackups: 5 });
+  expect(result.rotated).toBe(true);
+  // 验证文件数
+  const files = fs.readdirSync(dir);
+  expect(files.length).toBeLessThanOrEqual(6);   // 1 current + 5 backup
+});
 
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    harness 跑了一个月, 用户突然发现启动变慢、磁盘占满、schedule 触发时间错位
-    (以为本地时区实际 UTC)。现象是"卫生系统缺失, 长期运行下慢慢腐烂"。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"先不管, 等文件太多再 rm -rf"。这有两个问题:
-    一是不知道哪些数据可删 (memory / task 是用户长期事实, 删了 用户损失),
-    二是粗暴删除破坏原子性, 写到一半的文件会留垃圾。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口:
-    <code
-      >interface AtomicWrite { write(path, content) }, interface Cleanup {
-      dryRun(), run() }</code
-    >。 不变量五条: (1) 所有持久化 IO 走 atomic write, 不直接 fs.writeFile, (2)
-    日志按大小或时间轮转, 不无限增长, (3) output store 引用计数, 没人引用的
-    output_id 可清理, (4) 清理先 dry-run 给用户看, 用户 确认后才真删, (5) 时间用
-    epoch ms (number) 不用 Date 字符串。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    fake atomic write 中断 (模拟断电), 跑完后原文件仍然存在, tmp 文件可能被留
-    (不破坏), 重新启动 harness 后能正常解析; fake cleanup dry-run 返回 5
-    个待删文件, run() 之前文件仍在, run() 之后文件不在。
-  </dd>
-</dl>
+test("normalize: Anthropic content 数组 → OpenAI content 字符串", () =&gt; {
+  const input = [{ role: "assistant", content: [{ type: "text", text: "hello" }] }];
+  const output = normalizeMessages(input);
+  expect(output[0]!.content).toBe("hello");
+});
 
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
+test("config 优先级: CLI > env > default", () =&gt; {
+  process.env.HARNESS_MODE = "auto";
+  const config = loadConfig({ cli: { mode: "plan" } });
+  expect(config.mode).toBe("plan");
+  expect(config.source.mode).toBe("cli");
+});
 
-<div class="note">
-  <p class="note__title">观察 1 · 直接 fs.writeFile, 断电留半截</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// 错误: 直接写, 断电会留半截
-import fs from "node:fs/promises";
-async function saveMemory(path: string, content: string) {
-  await fs.writeFile(path, content);
-}</code></pre>
-  <p><strong>问:</strong>为什么不直接 writeFile?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 原子性: 写到一半断电, 文件 是半截
-    JSON, 下次启动解析失败, 用户的偏好丢失; 不可恢复: 解析失败后没有 backup,
-    用户只能从头开始; 可观测: 写失败时 fs.writeFile
-    抛错但不告诉用户"为什么失败", 调试困难。
-  </p>
+test("session 隔离: 2 个 session history 独立", () =&gt; {
+  const s1 = createSession({ id: "1" });
+  const s2 = createSession({ id: "2" });
+  s1.history.push({ role: "user", content: "A" });
+  expect(s2.history).toHaveLength(0);   // 不污染
+});</code></pre>
+<p>
+  <strong>实现细节</strong>: 4 个测试覆盖 4 个模块的核心不变量。
+  log-rotation 用真实 fs, 测完清理; normalize 用 in-memory 数组;
+  config 用 process.env 模拟 env; session 用工厂隔离测试。 不需要
+  mock 整个进程, 教学友好。
+</p>
+<h2 id="common-confusion">常见误解: hardening 不是新功能</h2>
+<p>
+  <strong>误解 1: "hardening 是新功能?"</strong> 错。 hardening
+  是<strong>已有功能的安全网</strong>, 不增加业务能力, 只让已有
+  能力<strong>在生产里不出事</strong>。 没有它, harness 在开发
+  机能跑, 在生产跑挂。
+</p>
+<p>
+  <strong>误解 2: "只支持一个 LLM 就行, 不需要 normalize?"</strong>
+  错。 商业上不行 — 用户想换 provider 节省成本, 没 normalize
+  层就要改 agent 主循环 (几千行代码), 不可能。
+</p>
+<p>
+  <strong>误解 3: "config 默认值够用, 不需要 CLI / env?"</strong>
+  错。 CI 跑测试时 mode=auto, 日常 mode=default, 团队规范要
+  mode=plan 培训新成员。 3 种来源必须都能覆盖。
+</p>
+<p>
+  <strong>误解 4: "日志不重要, 撑爆就撑爆?"</strong> 错。 出问题
+  时日志是<strong>唯一</strong>复盘依据。 没日志 = 第二次事故
+  仍然无解。 轮转是必须的, 不是 nice-to-have。
+</p>
+<h2 id="trap">反例梯度: 4 个常见错误</h2>
+<div class="cards-grid">
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 1 · 日志不轮转</span></div>
+    <div class="card__body">
+      <p>harness 跑 3 个月, harness.log 撑到 100GB, 磁盘满,
+        系统挂。 排查事故时发现 /var/log 已写满, 之前的日志被
+        系统 rotate 覆盖, 关键错误日志丢。 错。 正确: 50MB
+        轮转 + 5 个 backup, 总占用 ≤ 300MB, 关键日志保留 7 天。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 2 · 直接调 OpenAI SDK</span></div>
+    <div class="card__body">
+      <p>agent.ts 直接 <code>import OpenAI from "openai"; const
+        client = new OpenAI(...);</code>, 假设 OpenAI 协议。
+        换 Anthropic 时改 agent.ts 几千行。 错。 正确: 用
+        LLMClient 抽象接口 + 3 个 provider adapter, agent.ts
+        只调 <code>llmClient.chat(messages, tools)</code>, 换
+        provider 只改 config。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 3 · config 不分优先级</span></div>
+    <div class="card__body">
+      <p>config 一把抓, default 值 + env + CLI 全混在一起,
+        <code>Object.assign(defaults, envVars, cliArgs)</code>。
+        用户设 CLI 期望覆盖, 实际 env 覆盖了 CLI (Object.assign
+        后写的赢)。 错。 正确: 显式优先级 (CLI &gt; env &gt; default),
+        内部按顺序 merge, 不打平, 保留 source 字段调试。</p>
+    </div>
+  </div>
+  <div class="card card--bad">
+    <div class="card__head"><span class="card__tag">反例 4 · 多 session 共享 history</span></div>
+    <div class="card__body">
+      <p>把 <code>let history: Message[] = []</code> 放模块顶层,
+        多个 session 共享同一个数组。 user A 写的对话 user B
+        看到, 数据泄露 + 互相干扰。 错。 正确:
+        <code>createSession({id})</code> 每次返回独立实例, history
+        在闭包内, 互不污染。</p>
+    </div>
+  </div>
 </div>
-
-<div class="note">
-  <p class="note__title">观察 2 · cleanup 实际跑, 不 dry-run</p>
-  <pre class="code-block"><code>// 教学简化版
-// 错误: 不先 dry-run 给用户看
-async function cleanup() {
-  const oldFiles = await glob(".claude/cache/*.tmp");
-  for (const f of oldFiles) await fs.unlink(f);
-}</code></pre>
-  <p><strong>问:</strong>为什么不直接删?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— 误删: 用户可能有临时调研 文件在 tmp
-    里, 删了用户丢失; 不可逆: 删了之后用户说"等等, 那个文件我有用的", 没了;
-    不可信: 用户不敢用清理功能, 担心 删错, harness 的卫生功能形同虚设。
-  </p>
-</div>
-
-<h2 id="atomic-write">原子写: write tmp + fsync + rename</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export async function atomicWriteFile(path: string, content: string | Buffer): Promise&lt;void&gt; {
-  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
-  const fh = await fs.open(tmpPath, "w");
-  try {
-    await fh.writeFile(content);
-    await fh.sync();  // fsync 强制刷盘
-  } finally {
-    await fh.close();
-  }
-  await fs.rename(tmpPath, path);  // rename 在同一文件系统下是原子的
-}</code></pre>
-<p>
-  关键: <code>rename</code> 在同一文件系统下是原子操作。要么 tmp 文件 rename
-  成功, 替换原文件; 要么 rename 失败, 原文件不变。半截写入 不会暴露给后续读取。
-</p>
-
-<h2 id="log-rotation">日志轮转: 按大小 + 按时间</h2>
-<p>
-  harness 日志 (LLM 通信 / hook 决策 / schedule 触发) 持续增长。本章
-  引入日志轮转, 按 <code>maxFileSize</code> (默认 10MB) 或 <code>maxAge</code>
-  (默认 7 天) 切割。轮转策略:
-</p>
-<dl class="defs">
-  <dt>按大小</dt>
-  <dd>
-    日志文件超过 maxFileSize 时, 关闭当前文件, 重命名为
-    <code>app.log.1</code>、<code>app.log.2</code> 等, 启动新的
-    <code>app.log</code>。保留最近 N 个文件, 更老的删除。
-  </dd>
-  <dt>按时间</dt>
-  <dd>每天 0 点自动轮转, 跨天的日志按天归档。保留最近 7 天, 更老的 删除。</dd>
-  <dt>组合</dt>
-  <dd>同时满足时按更严格的策略。本章默认两个都启用, 任一触发即轮转。</dd>
-</dl>
-
-<h2 id="output-handle">output store 引用计数</h2>
-<p>
-  第 06 章 P1 压缩把大工具输出存到
-  <code>~/.cache/run-outputs/&lt;output_id&gt;</code>, history
-  里只剩占位符。问题是: 如果 LLM 之后再没引用这个 output_id, 文件就成孤儿了,
-  永远占磁盘。本章加引用计数:
-</p>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export interface OutputHandle {
-  id: string;
-  path: string;
-  size: number;
-  refCount: number;        // 当前被多少 messages 引用
-  createdAt: number;
-  expiresAt: number;        // 引用计数 0 之后, 24h 后可清理
-}</code></pre>
-<p>
-  每次写入 output 时 refCount = 1 (对应的 tool message 引用一次); 之后 compress
-  / replay 删除或合并该 tool message 时, refCount -= 1; refCount 归 0 后, 24
-  小时后可清理。cleanup 走 dry-run 列出待清理 文件, 用户确认后才真删。
-</p>
-
-<h2 id="cleanup">清理: dry-run + run</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export interface CleanupReport {
-  outputOrphans: { id: string; size: number; path: string }[];
-  oldLogs: { path: string; size: number; ageDays: number }[];
-  rotatedBackups: { path: string; size: number }[];
-  totalSize: number;
-}
-
-export interface Cleanup {
-  // 列出待清理内容, 不真删
-  dryRun(): Promise&lt;CleanupReport&gt;;
-  // 用户确认后真删
-  run(report: CleanupReport): Promise&lt;{ deleted: number; freedBytes: number }&gt;;
-}</code></pre>
-<p>
-  dry-run 返回的报告分三类: 孤儿 output (引用计数 0 且超过 24h)、 老日志 (超过
-  maxAge)、轮转备份 (超过保留份数)。用户看完报告, 决定哪些删、哪些保留。
-</p>
-
-<h2 id="timeline">时间语义: 全部用 epoch ms</h2>
-<p>
-  不同模块用不同时间格式 (Date 字符串 / 秒级 timestamp / 毫秒 timestamp)
-  会导致排序错乱、跨时区混乱。本章统一时间语义:
-</p>
+<h2 id="validate">Validation: 4 条不变量检验</h2>
+<ol>
+<li>
+<strong>日志轮转不丢内容</strong>: 写 50MB 日志, 触发轮转, 验证
+    总内容字节数 = 轮转前字节数 (rename 是原子的, 不丢)。
+  </li>
+<li>
+<strong>normalize 对称</strong>: 任意 provider 格式 normalize 成
+    OpenAI 格式, 字段全部对应 (content 字符串 / tool_call 结构 /
+    role 枚举), agent 主循环无差别处理。
+  </li>
+<li>
+<strong>config 优先级确定</strong>: CLI + env + default 三层各
+    设不同值, 验证: 最终值 = CLI 值, source.mode = "cli"。
+  </li>
+<li>
+<strong>session 隔离</strong>: 2 个 session 写各自的 history, 验证
+    互不影响 (s1.history.length === 1, s2.history.length === 0)。
+  </li>
+</ol>
+<h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
 <ul>
-  <li>持久化存储 (memory / task / schedule): 全部用 epoch ms (number)。</li>
-  <li>日志输出: epoch ms 数字 + 格式化为 ISO 8601 字符串 (UTC)。</li>
-  <li>UI 显示: 转用户时区 + 友好格式 ("3 小时前")。</li>
-</ul>
-<p>
-  内部不允许 Date 字符串。string &lt;-&gt; number 转换只发生在 IO 边界 (读 JSON
-  文件时 string -&gt; number, 写 UI 时 number -&gt; 字符串)。
-</p>
-
-<h2 id="trap">反例梯度</h2>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>持久化用 fs.writeFile, 不走 atomic write。</p>
-    <p><strong>为什么错:</strong>断电留半截 JSON, 解析失败, 用户偏好丢失。</p>
-    <p>
-      <strong>正确做法:</strong>所有持久化 IO 走 atomicWriteFile(), write tmp +
-      fsync + rename。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>cleanup 直接删, 不先 dry-run。</p>
-    <p>
-      <strong>为什么错:</strong>误删用户文件, 用户不敢用清理功能,
-      卫生系统形同虚设。
-    </p>
-    <p><strong>正确做法:</strong>dryRun() 返回报告, 用户确认后 run() 真删。</p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>output store 不引用计数, 孤儿文件永久占盘。</p>
-    <p>
-      <strong>为什么错:</strong>用户跑一个月,
-      <code>~/.cache/run-outputs/</code> 撑爆磁盘。
-    </p>
-    <p>
-      <strong>正确做法:</strong>写入时 refCount = 1, compress / replay 删引用时
-      -1, 归 0 24h 后可清理。
-    </p>
-  </div>
-</div>
-
-<div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>时间用 Date 字符串 ("2024-01-01T00:00:00Z")
-      存盘。
-    </p>
-    <p>
-      <strong>为什么错:</strong>跨时区比较容易出错, 字符串排序不等于时间排序。
-    </p>
-    <p>
-      <strong>正确做法:</strong>内部全部用 epoch ms, IO 边界转 ISO 字符串,
-      内部不允许 Date 字符串。
-    </p>
-  </div>
-</div>
-
-<h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
-<div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · 第 15 章</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>原子写不破坏原文件:</strong>fake atomicWriteFile 中断 (rename
-      之前抛错), 跑完后原文件仍然存在且内容完整, tmp 文件可能被 留 (不破坏, 可由
-      cleanup 后续清理)。
-    </p>
-    <p>
-      <strong>日志按大小轮转:</strong>fake 写 25MB 日志, 默认 maxFileSize =
-      10MB, 跑完后 <code>app.log</code> 大小 ≤ 10MB, 至少 2 个
-      <code>app.log.N</code> 备份文件存在。
-    </p>
-    <p>
-      <strong>output store 引用计数:</strong>fake 写 3 个 output, refCount
-      分别为 3 / 1 / 0, 跑完 cleanup dryRun, 报告 outputOrphans 含 refCount=0 那
-      1 个, 不含其他。
-    </p>
-    <p>
-      <strong>cleanup dry-run 不真删:</strong>fake dryRun 返回报告含 5 个文件,
-      run() 之前文件仍在, run(report) 之后文件不在, 报告 标记 deleted 字段 = 5。
-    </p>
-    <p>
-      <strong>时间语义统一为 epoch ms:</strong>memory.set / memory.get updatedAt
-      字段都是 number (不是 string), comparison 用 &lt; / &gt;, 不是
-      localeCompare。
-    </p>
-  </div>
-</div>
-
-<h2 id="lookback">回望第 00–14 章: 哪些原则在本章兑现了</h2>
-<ul>
-  <li>
-    <strong>原子性原则:</strong>所有持久化 IO 走 atomic write, 跨进程安全,
-    断电安全。
+<li>
+<strong>Adapter 模式</strong>: 3 个 LLM provider 各写 adapter,
+    内部统一 OpenAI 格式, agent 主循环无差别。
   </li>
-  <li>
-    <strong>不可逆操作必须 dry-run:</strong>cleanup / rotation
-    等会删除数据的操作, 必须先报告, 用户确认后再做。
+<li>
+<strong>显式优先级</strong>: config CLI &gt; env &gt; default,
+    保留 source 字段调试。
   </li>
-  <li>
-    <strong>内部类型稳定:</strong>时间用 epoch ms (number), 字符串只在 IO
-    边界出现, 内部不允许 Date 字符串。
+<li>
+<strong>工厂 + 闭包隔离</strong>: session / logger / terminal
+    每次创建独立实例, 闭包内 state 互不污染。
   </li>
-  <li>
-    <strong>事实与视图分离:</strong>output store 是事实, refCount 是视图,
-    清理是另一个视图, 三者职责清晰分离。
+<li>
+<strong>分层拼装</strong>: system-prompt / context-ranking 按
+    层拼, 缺段跳过, 单独函数单独测试。
+  </li>
+<li>
+<strong>安全默认值</strong>: log-rotation 50MB + 5 backup,
+    terminal 默认 80 宽, config 默认 mode=default。
   </li>
 </ul>
-
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
-  <dt>transcript 长期保留</dt>
-  <dd>
-    transcript 数据会随时间累积, 也需要类似的清理策略 (本章不展开, 留给专题章)。
+<dt>完整 model registry</dt>
+<dd>
+    教学版 5 个 model + unknown fallback, 工业版接 litellm 等
+    开源 registry, 100+ model 覆盖。 留 P2 阶段。
   </dd>
-  <dt>cleanup 跨进程协调</dt>
-  <dd>多 harness 实例同时跑时, cleanup 需要文件锁防重复删, 留作后续优化。</dd>
-  <dt>output store 跨进程引用</dt>
-  <dd>引用计数在单进程内准确, 跨进程时需要更复杂的分布式锁, 留作后续优化。</dd>
-  <dt>eval 重放的卫生系统</dt>
-  <dd>
-    eval 跑大量 trace 时也会产生大量临时文件, 需要单独的 cleanup 路径,
-    专题章展开。
+<dt>多 region LLM 路由</dt>
+<dd>
+    当前一个 LLM client, 工业级想要"美国区用 OpenAI, 欧洲区用
+    Anthropic, 中国区用 vLLM", 涉及 LLM 路由 + 故障转移。 留
+    P2 阶段。
+  </dd>
+<dt>端到端 trace (OpenTelemetry)</dt>
+<dd>
+    当前 logger 写文件, 工业级想接 OpenTelemetry 看分布式 trace
+    (agent → subagent → LLM → tool 链路), 涉及 trace SDK 接入。
+    留 P2 阶段。
   </dd>
 </dl>
-
-<h2 id="vibe-coding-15">本次如何 vibe code: 第 15 章的三件套</h2>
-
-<h3 id="vibe-feed-15">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。让 LLM 给出
-    <code>atomicWriteFile()</code> / <code>logRotation</code> /
-    <code>OutputHandle</code> / <code>Cleanup</code> /
-    <code>timeline</code> 五个模块的 interface。本轮不写实现, 重点钉"原子性 /
-    dry-run / 引用计数 / 时间统一" 四条原则。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。让 LLM 给出 atomic-write / log-rotation /
-    cleanup 三个新模块的 stub, 现有持久化 IO 仍走 fs.writeFile (暂不切换)。本轮
-    review 重点: 新模块工厂化, 现有调用点暂时不破坏。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。让 LLM 写五个模块实现 + 把现有持久化 IO
-    切换到 atomic write + output store 加引用计数 + 时间统一为 epoch ms。本轮
-    review 重点: 切换路径走 grep 验证全部持久化 IO 都过 atomic, 时间字段全部
-    number。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。让 LLM 写
-    <code>test/hardening.test.ts</code>。本轮 review 重点: "原子写不破坏原文件"
-    和 "cleanup dry-run 不真删" 两条必须有 spy 验证。
-  </li>
-</ol>
-
-<h3 id="vibe-review-15">Review: 第 15 章专属 checklist</h3>
-<ol>
-  <li>
-    <strong>所有持久化 IO 走 atomicWriteFile。</strong>验证:
-    <code>grep -rn 'fs.writeFile\|fs.promises.writeFile' src/</code> 应当 0 行
-    (除 atomic-write.ts 内部)。
-  </li>
-  <li>
-    <strong>cleanup dry-run 不真删。</strong>验证: dryRun() 内部不调 fs.unlink。
-  </li>
-  <li>
-    <strong>output store 引用计数。</strong>验证: refCount 字段在 write /
-    release 路径上变化, dryRun() 过滤 refCount === 0 的孤儿。
-  </li>
-  <li>
-    <strong>时间字段全部 number。</strong>验证:
-    <code>grep -rn 'new Date()' src/</code> 在持久化路径上 (memory / task /
-    schedule 写入) 应当 0 行, timeline.ts 集中转换。
-  </li>
-  <li>
-    <strong>log rotation 不丢日志。</strong>验证: 写日志时先写新文件再 rename
-    旧文件, 不存在"日志写到一半, 旧文件已 rename" 的窗口。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-15">调试: 第 15 章典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · 直接 fs.writeFile 替代 atomicWriteFile。</strong>症状:
-    某次代码提交忘了切路径, 仍然 fs.writeFile。验证:
-    <code>grep -rn 'fs.writeFile' src/</code> 不为 0 行时,
-    跑"原子写不破坏原文件" 测试应当抓到。
-  </li>
-  <li>
-    <strong>伪装 B · cleanup dryRun 内部偷偷 unlink。</strong>症状: dryRun()
-    顺手删了文件, 跑 dryRun 后再 run 找不到文件。验证: Validation 卡片"cleanup
-    dry-run 不真删" 那条测试通过 (run 之前文件存在)。
-  </li>
-  <li>
-    <strong>伪装 C · 时间用 Date 字符串, 不统一。</strong>症状: memory.set 的
-    updatedAt 是 <code>new Date().toISOString()</code>。验证:
-    <code>grep -rn 'toISOString' src/</code> 在持久化写入路径上应当 0 行, 只在
-    UI 渲染路径允许。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-15">迭代: 第 15 章 5 个 commit 节点</h3>
-<ol>
-  <li>
-    <code
-      >feat(ch15): 钉 atomicWriteFile / logRotation / OutputHandle / Cleanup /
-      timeline 五个模块接口</code
-    >
-    —— tsc 通过, 无实现。
-  </li>
-  <li>
-    <code
-      >feat(ch15): atomic-write + log-rotation + cleanup 三个模块 stub, 现有 IO
-      不切换</code
-    >
-    —— tsc 通过, stub noop。
-  </li>
-  <li>
-    <code
-      >feat(ch15): 切换所有持久化 IO 到 atomic + output store 引用计数 +
-      时间统一</code
-    >
-    —— 跑通 Validation 卡片前 3 条。
-  </li>
-  <li>
-    <code>feat(ch15): cleanup dry-run + run + 引用计数过滤</code> —— 跑通
-    Validation 卡片后 2 条。
-  </li>
-  <li>
-    <code
-      >test(ch15): 现有持久化路径全部走 atomic (grep 验证) + 时间全部 number
-      (grep 验证)</code
-    >
-    —— 全绿。
-  </li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
   <div class="card__head">
     <span class="card__tag">Prompt Card · 第 15 章</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
+    <button class="card__copy" data-copy-card="" type="button">复制</button>
   </div>
   <div class="card__body">
-    <p>
-      <strong>目标:</strong>实现 Runtime Hardening, 覆盖原子写、日志轮转、output
-      handle 引用计数、清理 dry-run、时间语义统一五个卫生系统。
-    </p>
-    <p>
-      <strong>场景:</strong>harness 跑一个月, 用户跑 cleanup dryRun, 报告含 5
-      个孤儿 output + 2 个老日志, 用户确认后 run() 删 7 个文件, 释放 50MB。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/atomic-write.ts</code> (新) 暴露
-      <code>atomicWriteFile()</code>; <code>src/log-rotation.ts</code> (新) 暴露
-      <code>createLogRotation(config)</code>;
-      <code>src/output-store.ts</code> (改) 加引用计数 + refCount 字段;
-      <code>src/cleanup.ts</code> (新) 暴露 <code>createCleanup()</code>;
-      <code>src/timeline.ts</code> (改) 统一时间语义为 epoch ms。
-    </p>
+    <p><strong>目标:</strong> 给 harness 加 8 个运行时安全网, 让
+      前面 14 章的所有模块在生产里跑稳。</p>
+    <p><strong>场景:</strong> team 上线 harness 跑 3 个月, 日志不
+      撑爆 + 多 LLM 可切换 + 多 session 不互干扰 + 配置可覆盖 +
+      终端可适配。 8 个模块各管一摊, 缺一个就出事故。</p>
+    <p><strong>模块:</strong> <code>src/log-rotation.ts</code> (新) /
+      <code>src/normalize.ts</code> (新) / <code>src/config.ts</code> (新) /
+      <code>src/session.ts</code> (新) / <code>src/system-prompt.ts</code> (新) /
+      <code>src/context-ranking.ts</code> (新) / <code>src/terminal.ts</code> (新) /
+      <code>src/cli-commands.ts</code> (新) / <code>src/llm-providers.ts</code> (新) /
+      <code>src/foundation-models.ts</code> (新); <code>src/index.ts</code> (改) Composition
+      Root 拼装。</p>
     <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
     <ul>
-      <li>所有持久化 IO 走 atomicWriteFile, 不直接 fs.writeFile</li>
-      <li>cleanup dryRun 不真删, run 之前文件存在</li>
-      <li>output store 引用计数: write 时 refCount = 1, release 时 -1</li>
-      <li>时间字段全部 number (epoch ms), 字符串只在 IO 边界</li>
-      <li>log rotation 不丢日志: 先写新文件再 rename 旧文件</li>
+      <li>日志轮转: 50MB maxBytes + 5 backups, 写日志前检查, rename 原子</li>
+      <li>normalize: 内部统一 OpenAI ChatCompletionMessageParam 格式, 3 provider adapter 转协议</li>
+      <li>config 优先级: CLI &gt; env &gt; default, 保留 source 字段调试</li>
+      <li>session 隔离: createSession 每次独立实例, history / tool / llm client 互不共享</li>
+      <li>system-prompt 分层: baseRules + memory + skill + toolRules + contextSummary, 缺段跳过</li>
+      <li>context-ranking: 分级保留 (system 100, 工具错误 90, 最近 5 轮 80, ...)</li>
+      <li>terminal: TTY + NO_COLOR + TERM + columns 4 点检测, 关闭颜色 / 固定 80 宽</li>
+      <li>cli-commands: 9 个 /xxx 命令注册, 命令之间不互相 import, 通过 deps 协作</li>
+      <li>llm-providers: 3 个工厂, 内部统一 LLMClient 接口, agent 主循环 0 改动</li>
+      <li>foundation-models: 5 个 model + unknown fallback, 能力清单 + 边界提示</li>
     </ul>
-    <p><strong>验证 (用 fake IO + spy, 逐条落到 vitest):</strong></p>
+    <p><strong>验证 (用 fake env + tmp dir + in-memory LLM + vitest, 逐条断言):</strong></p>
     <ul>
-      <li>fake atomicWriteFile 中断 (rename 前抛错), 原文件仍存在且内容完整</li>
-      <li>
-        fake 写 25MB 日志, 默认 maxFileSize=10MB, app.log ≤ 10MB 且 ≥ 2 个
-        app.log.N 备份
-      </li>
-      <li>
-        fake 写 3 个 output, refCount 3/1/0, dryRun 报告含 refCount=0 那 1 个
-      </li>
-      <li>fake dryRun 返回 5 个文件, run 之前文件存在, run 后文件不存在</li>
-      <li>memory.set / get 的 updatedAt 字段都是 number, 不是 string</li>
+      <li>log-rotation: 写 50MB 触发 2 次轮转, 文件数 ≤ 6, 总字节数不变</li>
+      <li>normalize: Anthropic content 数组 → OpenAI content 字符串, 字段对齐</li>
+      <li>config: CLI + env + default 三层各设值, 最终 = CLI, source.mode = "cli"</li>
+      <li>session 隔离: 2 个 session 写 history, 互不污染</li>
     </ul>
   </div>
 </div>
-
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    故意把 memory.set 改回 fs.writeFile (不走 atomic), 跑测试,
-    看"原子写不破坏原文件" 是否抓到。
+<li>
+    故意不写 log-rotation, 跑 3 个月模拟 (写 50MB 日志), 看"日志
+    轮转" 是否抓到 (单文件 50MB vs. 6 个文件总 60MB)。
   </li>
-  <li>
-    在 dryRun() 内部偷偷 fs.unlink, 跑测试, 看"cleanup dry-run 不真删"
-    是否抓到。
+<li>
+    故意让 agent.ts 直接 import "openai" SDK, 切换 provider 到
+    Anthropic, 看"normalize 缺失" 是否抓到 (agent.ts 报错 vs.
+    切 provider 只改 config)。
   </li>
-  <li>
-    把 memory.set 的 updatedAt 改回 <code>new Date().toISOString()</code>,
-    跑测试, 看"时间字段全部 number" 是否抓到 (sort 行为会变)。
+<li>
+    故意让 config 一把抓 <code>Object.assign(defaults, env, cli)</code>,
+    跑 CLI + env 各设不同值测试, 看"显式优先级" 是否抓到 (env
+    覆盖 CLI vs. CLI 覆盖 env)。
+  </li>
+<li>
+    故意把 <code>let history = []</code> 放模块顶层, 跑 2 个
+    session 隔离测试, 看"session 隔离" 是否抓到 (s1 写 s2 看到
+    vs. 互不影响)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本章给 harness 加了 Runtime Hardening 卫生系统: 原子写、日志轮转、 output
-  store 引用计数、清理 dry-run、时间语义统一。这五条原则 是 harness
-  长期运行的卫生底线, 任何持久化 IO 都必须遵守。 至此主线教程 16
-  章全部完成。下一专题 (eval) 讨论如何测试一个 不确定的 Coding
-  Agent——构建可重放的 trace 库、判定 LLM 输出 是否"做对"、用 eval 反馈给 prompt
-  优化。
+  Hardening 是给 harness 跑生产时的<strong>8 个安全网</strong>,
+  不增加业务能力, 只让已有能力<strong>在生产里不出事</strong>。
+  核心是 5 个原则:
 </p>
-
-<h2 id="next">下一章伏笔</h2>
+<ul>
+<li>
+<strong>Adapter 模式</strong>: 3 个 LLM provider + normalize 层,
+    内部统一格式, 换 provider 0 改动。
+  </li>
+<li>
+<strong>显式优先级</strong>: config CLI &gt; env &gt; default,
+    保留 source 字段调试。
+  </li>
+<li>
+<strong>工厂 + 闭包隔离</strong>: session / logger / terminal
+    每次独立, 多用户多项目不互污染。
+  </li>
+<li>
+<strong>分层拼装</strong>: system-prompt / context-ranking 按
+    层拼, 缺段跳过, 单独函数单独测试。
+  </li>
+<li>
+<strong>安全默认</strong>: log-rotation 50MB, terminal 80 宽,
+    config mode=default, overlap=skip, missed=skip。
+  </li>
 <p>
-  第 15 章让 harness 在长期运行下保持稳定, 但 LLM 行为是不确定的 —— 同一 prompt
-  跑 10 次, 可能 7 次对、3 次错。专题章 eval 讨论 如何"测试一个不确定的 Coding
-  Agent": 构建可重放的 trace 库 (deterministic LLM stub), 判定 LLM
-  输出是否"做对" (judge prompt), 用 eval 反馈给 prompt 优化 (regression test)。
+  教程到 15 章完结。 下一份文档是 <strong>专题 A · model-policy</strong>,
+  讲 LLM 选型的策略层 — 哪些 model 适合长任务, 哪些适合短
+  对话, model 切换的 graceful degradation, 成本 vs 质量的权衡。
 </p>

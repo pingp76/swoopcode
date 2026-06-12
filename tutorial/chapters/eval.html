@@ -1,537 +1,2006 @@
 <p class="article__eyebrow">专题 B · 测试不确定系统</p>
 <h1 class="article__title">如何测试一个不确定的 Coding Agent</h1>
 <p class="article__lede">
-  Coding Agent 会调用真实 LLM, 但测试不能一开始就依赖真实 LLM。本专题
-  讨论"测试一个不确定系统" 的方法论: 用 deterministic LLM stub 让测试
-  稳定可重放, 用 trace assertion 让行为可观测, 用 live judge 在固定
-  路径上做现实校准。
+  Coding Agent 调真实 LLM, 但测试不能一开始就依赖真实 LLM。本专题讲
+  harness 是怎么把"测试不确定系统" 拆成 4 层梯度的: 用 scripted LLM
+  让行为可重放, 用 trace 把中间过程结构化, 用 live regression 在固定路径
+  上做现实校准, 用 LLM judge 处理开放式语义质量。MCP 和 Agent Team
+  也属于同一套方法论, 但当前仅作为 harness 原型保留。
 </p>
-
-<nav id="article-inline-toc" class="article__meta" aria-label="页内小节"></nav>
-
-<hr class="rule" />
-
-<h2 id="delta-from-15">在第 15 章基础上改了什么</h2>
+<nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
+<hr class="rule"/>
+<h2 id="why-eval">为什么 Coding Agent 难测</h2>
 <p>
-  这一章不修改 harness 主代码, 而是在 <code>src/eval/</code> 下加一个
-  独立测试层。eval 层用 driver / trace / assertion 三个组件, 从外部 观察 agent
-  行为, 跑场景化的测试 case, 产出 report 文件。eval 层 与 harness 共享
-  <code>src/</code> 下的 interface (例如 LLMClient、
-  ToolRegistry、PermissionManager), 但不修改这些 interface 的实现。
+  跑一个 coding agent 的时候, 你面对的"被测对象"其实有 3 层不确定性。
+  朴素做法是直接连真实 LLM 跑断言, 这 3 层不确定性会同时放大。
+  下面先用 3 个真实失败故事说明"朴素做法哪里坏", 再讲我们的方法。
 </p>
-<div class="source-links" aria-label="本章 GitHub 永久链接">
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/eval/README.md"
-    target="_blank"
-    rel="noreferrer"
-    >1. src/eval/README.md: eval 入口</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/driver.ts"
-    target="_blank"
-    rel="noreferrer"
-    >2. src/eval/core/driver.ts: 跑场景的驱动器</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/trace.ts"
-    target="_blank"
-    rel="noreferrer"
-    >3. src/eval/core/trace.ts: 行为 trace 采集</a
-  >
-  <a
-    class="source-link"
-    href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/assertions.ts"
-    target="_blank"
-    rel="noreferrer"
-    >4. src/eval/core/assertions.ts: 行为断言</a
-  >
-</div>
-
-<h2 id="author-thinking">作者怎么想的: 这一章的思考链</h2>
-<dl class="defs">
-  <dt>想清楚现象</dt>
-  <dd>
-    同一段 prompt 跑 10 次 coding agent, 可能 7 次对、3 次错。普通单元
-    测试只断言"返回了字符串", 抓不到这 30% 的失败。eval 必须能 "重放 + 断言 +
-    报告", 才能让 harness 的行为可被讨论。
-  </dd>
-  <dt>想反例</dt>
-  <dd>
-    最朴素的反例是"用 e2e 测试, 跑真 LLM"。这有两个问题: 一是 LLM 输出不确定,
-    测试 flaky, 跑 10 次挂 3 次, 团队对测试失去信任; 二是 token 成本贵, 跑一次
-    e2e 要花 $1, 跑 1000 个 case 就破产。
-  </dd>
-  <dt>想接口和不变量</dt>
-  <dd>
-    接口:
-    <code
-      >interface Driver { run(scenario) }, interface Trace { events }, interface
-      Assertion { assert(trace) }</code
-    >。 不变量三条: (1) deterministic LLM stub 必须能预设 LLM 响应, 记录 所有
-    LLM 输入, 跑 1000 次结果一致, (2) trace 必须能反向回放 (从 trace 重现 agent
-    行为), (3) assertion 必须能拆"行为是否 符合 Prompt Card 边界",
-    而不是只断最终文本。
-  </dd>
-  <dt>想怎么验证</dt>
-  <dd>
-    fake LLM 预设 3 轮响应, 跑同一个 scenario 1000 次, 断言 trace 完全一致
-    (除了时间戳)。
-  </dd>
-</dl>
-
-<h2 id="observe-first">先观察: 两段故意有气味的实现</h2>
-
-<div class="note">
-  <p class="note__title">观察 1 · 用真 LLM 跑 e2e 测试</p>
-  <pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-// 错误: 用真 LLM 跑测试
-it("agent 应该读文件", async () =&gt; {
-  const answer = await agent.run("读 src/agent.ts");
-  expect(answer).toContain("createAgent");  // flaky
-}, 60_000);  // 60s 超时</code></pre>
-  <p><strong>问:</strong>为什么不直接跑真 LLM?</p>
-  <p>
-    <strong>答:</strong>三件事同时坏掉 —— flakiness: 同一 prompt 跑 10 次, LLM
-    输出可能略有差异, 测试 30% 挂, 团队不敢信测试; 成本: 1000 个 case × $1 =
-    $1000/次 CI; 速度: 60s timeout, CI 跑 100 个 case 要 100 分钟。
+<h3>失败故事 1 · 修了 prompt, 测试全挂</h3>
+<p>
+  某次更新里我们改了一行 system prompt 措辞, 想让模型"更简洁地总结"。
+  第二天 CI 红了 200 多个 case, 但代码逻辑根本没动。
   </p>
-</div>
-
-<div class="note">
-  <p class="note__title">观察 2 · 断言只断最终文本</p>
-  <pre class="code-block"><code>// 教学简化版
-expect(answer).toContain("createAgent");</code></pre>
-  <p><strong>问:</strong>为什么不只断最终文本?</p>
-  <p>
-    <strong>答:</strong>LLM 可能在不知道"createAgent" 是什么的情况下
-    也能输出这个字符串 (例如 hallucination)。最终文本对了, 但 行为完全错
-    (没读文件、没调工具、绕过了 permission)。要断 行为事实, 必须断 messages
-    序列、tool calls、permission 决策 这些结构性事实。
+<p>
+  <strong>根因</strong>: 那些 case 在断言"最终回复的完整文本"。
+  LLM 稍微改一下措辞, 文本差异就触发 golden snapshot 失败。
+  我们把这种失败叫做<strong>假阳性</strong>: 不是代码 bug, 是测试方法不对。
+  修复方式是改 case, 不是改代码。
+</p>
+<p>
+  这类问题的核心: <strong>不要断言模型"说了什么", 要断言模型"做了什么"</strong>。
+  "说了什么" 由 LLM 决定, 你控制不了; "做了什么" (调了哪个工具、读了什么文件) 由 harness 决定, 你能测。
+</p>
+<h3>失败故事 2 · 改了 tool schema, 真实 LLM 行为变了</h3>
+<p>
+  某次更新里我们给 <code>run_bash</code> 工具加了一个新参数 <code>timeoutMs</code>。
+  跑真实 LLM 时, 模型开始尝试用它, 但因为某些模型对 schema 变化敏感, 选择工具的策略整体漂移 —— 本来用 <code>run_read</code> 的场景, 现在用 <code>run_bash + cat</code>。
   </p>
-</div>
-
-<h2 id="three-layers">三层验证策略</h2>
-<p>本章的核心方法论。harness 的测试分三层, 各有各的用途, 不混:</p>
+<p>
+  <strong>根因</strong>: 测试完全依赖真实 LLM 行为, 任何上游变动都会放大成 case 失败。
+  这类问题更难定位: 你不知道是"模型行为变了" 还是"代码逻辑错了"。
+  修复方式是<strong>把模型行为和代码逻辑分开测</strong>。
+</p>
+<h3>失败故事 3 · 修了"代码 review 风格" 的 agent, 没法用代码判断</h3>
+<p>
+  我们做了一个 review agent, 输入一段代码, 它输出"哪里可以改进"。
+  没有正确答案, 没有 golden snapshot, 没法用 <code>expect(output).toBe(...)</code>。
+  </p>
+<p>
+  <strong>根因</strong>: 有些任务本身就是<strong>开放式的</strong>, 没有任何代码判断
+  "这个 review 好不好"。硬要写断言, 只能写非常宽松的正则,
+  等于没测。
+  修复方式是<strong>让另一个 LLM 来评这个 LLM</strong> (judge), 但要严格
+  控制"评的依据" 和"评的输出格式"。
+</p>
+<h3>3 类不确定性 → 3 种测试方式</h3>
+<p>
+  上面 3 个故事对应 3 类不确定性, 每一类需要不同的测试方式:
+</p>
 <dl class="defs">
-  <dt>第一层 · deterministic</dt>
-  <dd>
-    全部测试都跑。用 fake LLM (第 01 章 Cookbook) 预设响应, 跑 同一 scenario
-    1000 次结果完全一致。验证 harness 自身行为 (loop / state / 协议) 正确。token
-    成本: 0。CI 必跑。
+<dt>Runtime 不确定性</dt>
+<dd>
+    消息顺序对不对? tool_call 和 tool_result 配没配对? 权限检查有没有漏?
+    Context 超限时压缩行为是否正确? 一次更新会不会改坏这些?
+    <strong>测试方式</strong>: 用 scripted LLM (预设 response 序列),
+    让模型行为完全可预测, 测的就是 harness 本身。
   </dd>
-  <dt>第二层 · live</dt>
-  <dd>
-    <strong>不</strong>在 CI 跑, 在本地 opt-in。跑真 LLM, 验证 deterministic
-    测试没覆盖的"实际 LLM 行为" (例如 LLM 是否真的调对了 tool name,
-    是否按预期思考)。token 成本: 中等。开发时偶尔跑一次, 不强制 CI。
+<dt>模型不确定性</dt>
+<dd>
+    同一个 query, 同一个模型, 不同时间可能返回略不同的回答。
+    不同模型行为差异更大 (Kimi 强 coding, GLM 强长上下文, Qwen 强 agent)。
+    <strong>测试方式</strong>: 用真实 LLM 跑固定 case 集, 用结构性
+    hard 断言 (工具被调、文件存在) 判断"能力不退化", 不判断
+    "措辞变没变"。偶尔开启 judge 评开放式质量。
   </dd>
-  <dt>第三层 · judge</dt>
-  <dd>
-    <strong>不</strong>在 CI 跑, 单独 review 用。把 trace (LLM 输入输出 /
-    工具调用 / permission 决策) 喂给一个 "judge" LLM, 让 judge
-    评估"行为是否合理" (例如 "用户说删 /tmp, agent 真的删了 /tmp
-    没删错目录")。人 review judge 的输出, 不直接 CI。token 成本: 高。
+<dt>任务本身的不确定性</dt>
+<dd>
+    "改 README 的标题" 是结构化的, 改完用 diff 断言就行;
+    "代码 review 这段是否合理" 是开放式的, 只能让另一个 LLM 评。
+    <strong>测试方式</strong>: 用 judge LLM 读 trace 摘要 (不是完整日志),
+    给出结构化评分, judge prompt 不进 agent system prompt。
   </dd>
 </dl>
 <p>
-  这一章的"差 → 改 → 好": 普通单元测试只断最终文本, 跑真 LLM。 改进后:
-  deterministic 主 + live 副 + judge 复盘, 三层各司其职。
+  <strong>核心方法</strong>: 把 3 类不确定性分开, 每一类用最合适的方式测。
+  混在一起测, 任何一类波动都会污染其他两类的判断。
 </p>
-
-<h2 id="driver">Driver: 跑场景</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export interface Scenario {
-  name: string;
-  query: string;
-  fakeLlm: ScriptedLLM;
-  // 期望行为断言
-  expectations: Expectation[];
-}
-
-export interface Driver {
-  run(scenario: Scenario): Promise&lt;{ trace: Trace; passed: boolean; report: Report }&gt;;
-}</code></pre>
+<figure class="figure">
+<div class="flow-map" role="img" aria-label="测试不确定系统的 4 层梯度">
+<div class="flow-row">
+<span class="flow-node flow-node--accent">P0 · deterministic</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">scripted LLM + hard 断言<br/><small>守 runtime, 默认 CI 跑</small></span>
+</div>
+<div class="flow-row">
+<span class="flow-arrow">↓</span>
+</div>
+<div class="flow-row">
+<span class="flow-node flow-node--accent">P1 · replay</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">录制的 response fixture<br/><small>复现"那一次成功"</small></span>
+</div>
+<div class="flow-row">
+<span class="flow-arrow">↓</span>
+</div>
+<div class="flow-row">
+<span class="flow-node flow-node--accent">P2 · live smoke</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">真实 LLM + 极少 case + 软门禁<br/><small>验证 wrapper 通, 不阻塞 PR</small></span>
+</div>
+<div class="flow-row">
+<span class="flow-arrow">↓</span>
+</div>
+<div class="flow-row">
+<span class="flow-node flow-node--accent">P3 · live regression + judge</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">真实 LLM + hard 断言 + judge<br/><small>发布前 / 大改后触发</small></span>
+</div>
+</div>
+<figcaption>图 1 · 4 层梯度. 越往下越接近真实, 越往上越快越稳. 每一层都只关心一类不确定性。</figcaption>
+</figure>
+<h2 id="architecture">整体架构: Driver 边界中立</h2>
 <p>
-  driver 接受 scenario, 用 fakeLlm 跑 agent, 收集 trace (LLM 输入输出、
-  工具调用、permission 决策、reminder 注入), 把 trace 喂给 expectations 断言,
-  产出 report (通过 / 失败 + 失败原因)。
+  4 层梯度都需要一个<strong>中立 runner</strong> 来执行 case。
+  朴素做法是在 runner 里直接 <code>import { createAgent } from "../agent.js"</code>,
+  这条路走 3 步就会撞墙。下面先讲"撞墙过程", 再讲"Driver 边界怎么解"。
 </p>
-
-<h2 id="trace">Trace: 行为事实</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export interface Trace {
-  events: TraceEvent[];
-}
-
-export type TraceEvent =
-  | { type: "llm_call"; callIndex: number; inputMessages: Message[]; output: AssistantMessage }
-  | { type: "tool_call"; tool: string; args: unknown; result: ToolResult }
-  | { type: "permission_decision"; tool: string; action: "allow" | "ask" | "deny" }
-  | { type: "reminder_injected"; source: string; content: string }
-  | { type: "compaction"; beforeCount: number; afterCount: number }
-  | { type: "recovery_action"; kind: string; attempt: number };
-
-// trace 持久化到 JSON, 反向回放时从 trace 重现 agent 行为
-export function saveTrace(trace: Trace, path: string): Promise&lt;void&gt;;
-export function loadTrace(path: string): Promise&lt;Trace&gt;;</code></pre>
-<p>
-  trace 是 eval 的核心。它记录 agent 在跑 scenario 时做的所有事,
-  不仅是"返回了什么文本", 而是"调了哪些工具 / 过了哪些 permission / 注入了哪些
-  reminder"。trace 落盘后, 可以反向回放, 也能喂给 judge。
-</p>
-
-<h2 id="assertion">Assertion: 行为断言</h2>
-<pre class="code-block"><code>// 教学简化版, 仓库真实实现见 GitHub 永久链接
-export type Expectation =
-  | { kind: "messages_at_least"; count: number }
-  | { kind: "last_message_role"; role: "user" | "assistant" | "tool" }
-  | { kind: "tool_called"; tool: string; atLeast?: number }
-  | { kind: "tool_not_called"; tool: string }
-  | { kind: "permission_asked"; tool: string }
-  | { kind: "reminder_with_source"; source: string }
-  | { kind: "no_compaction" | { kind: "compaction_at_least"; count: number } }
-  | { kind: "final_text_contains"; substring: string }
-  | { kind: "final_text_not_contains"; substring: string };
-
-export function assertExpectations(trace: Trace, expectations: Expectation[]): { passed: boolean; failures: string[] };</code></pre>
-<p>
-  断言不直接断最终文本 (那是 LLM 行为, 不稳定), 而是断"行为事实"。 例如:
-  "至少调了 1 次 read_file 工具"、"permission 至少问过 1 次"、 "messages 至少 5
-  条"。这些断言即使 LLM 输出变了也能稳定通过。
-</p>
-
-<h2 id="judge">Judge: 复盘</h2>
-<p>judge 是第三层, 不在 CI 跑。流程:</p>
+<h3>朴素做法的 3 个撞墙</h3>
 <ol>
-  <li>开发者本地跑一个 scenario, 收集 trace。</li>
-  <li>把 trace + scenario 描述喂给 judge LLM (通常用更强模型)。</li>
-  <li>
-    judge 评估"行为是否合理", 输出结构化反馈 (例如"agent 在 第 3 轮调错了工具,
-    应该是 read_file 不是 bash" / "agent 跳过 了 permission 检查, 危险!")。
-  </li>
-  <li>开发者看 judge 反馈, 决定改哪一章的 Prompt Card。</li>
+<li>
+<strong>主代码改了, 测试全挂 (假阳性)</strong>: runner 绑死当前项目
+      内部类型, 任何重构都会让 case 失败, 但失败原因可能是 "case
+      写了私有事件细节", 不是代码 bug。
+    </li>
+<li>
+<strong>换被测对象写不出来</strong>: 假设想测一个 CLI 黑盒工具 (比如
+      包装另一个 agent), 因为 runner 写死了 <code>createAgent()</code>
+      调用, 没法换别的实现。
+    </li>
+<li>
+<strong>tool / permission / transcript 私有事件泄漏</strong>: case 写着
+      "transcript 事件的 historySequence == 5" 这种断言,
+      测的是实现细节, 改 main loop 就全挂。
+    </li>
 </ol>
-<p>judge 不替代单元测试, 而是用来"找出 Prompt Card 没覆盖的盲点"。</p>
+<p>
+  这 3 个撞墙都被同一个抽象层解决: <strong>CodingAgentDriver 接口</strong>。
+  Runner 只看这个接口, 不看 driver 内部。
+</p>
+<h3>CodingAgentDriver 接口</h3>
+<pre class="code-block"><code>interface CodingAgentDriver {
+  startCase(context: AgentCaseContext): Promise&lt;void&gt;;
+  send(input: AgentInput): Promise&lt;AgentTurnResult&gt;;
+  readEvents?(): Promise&lt;AgentRuntimeEvent[]&gt;;
+  close(): Promise&lt;void&gt;;
+}
 
+interface AgentCaseContext {
+  caseId: string;
+  workspaceRoot: string;        // 临时目录, driver 内部用
+  metadata?: Record&lt;string, unknown&gt;;
+}
+
+interface AgentInput {
+  stepId: string;              // 多 step case 用
+  query: string;
+}
+
+interface AgentTurnResult {
+  stepId: string;
+  finalOutput: string;
+  exitCode?: number;
+  events?: AgentRuntimeEvent[];  // tool_call / llm_call 等
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/driver.ts#L60" rel="noreferrer" target="_blank">GitHub · CodingAgentDriver 中立接口 (L60)</a></p>
+<p>
+  Runner 用法极简:
+</p>
+<pre class="code-block"><code>async function runEvalCase(case: EvalCase): Promise&lt;EvalRunResult&gt; {
+  const driver = createDriver(case.driver);    // ← 唯一感知 driver 的地方
+  const workspace = await createEvalWorkspace(case.workspace);
+  await driver.startCase({ caseId: case.id, workspaceRoot: workspace.root });
+
+  const stepTraces = [];
+  for (const step of case.steps) {
+    const result = await driver.send({ stepId: step.id, query: step.query });
+    stepTraces.push(result);
+  }
+
+  await driver.close();
+  return buildResult(case, stepTraces, workspace);
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/runner.ts#L53" rel="noreferrer" target="_blank">GitHub · runEvalCase 核心 runner (L53)</a></p>
+<p>
+  注意 <code>createDriver</code> 是<strong>唯一</strong>根据 case 选实现的地方。
+  Runner 内部没有任何 <code>if (driver.kind === "in-process") ...</code> 的分支。
+</p>
+<h3>3 种 driver 各司其职</h3>
+<p>
+  当前项目实现了 3 种 driver, 都在 <code>src/eval/drivers/learn-claude-code/</code> 下:
+</p>
+<table class="terms">
+<thead>
+<tr>
+<th>Driver</th>
+<th>驱动什么</th>
+<th>用什么 LLM</th>
+<th>典型场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>in-process</code></td>
+<td>当前项目 <code>createAgent()</code></td>
+<td>scripted / replay / live</td>
+<td>测当前 harness, 默认用这个</td>
+</tr>
+<tr>
+<td><code>cli</code></td>
+<td>外部命令 (child_process.spawn)</td>
+<td>外部 agent 自带</td>
+<td>黑盒测 CLI 类工具</td>
+</tr>
+<tr>
+<td><code>learn-claude-code-team</code></td>
+<td>顺序 supervisor 多 Agent 拓扑</td>
+<td>同 in-process</td>
+<td>原型阶段, 测 Team 协作</td>
+</tr>
+</tbody>
+</table>
+<p>
+  同<strong>一套 case schema</strong>可以驱动 3 种不同的被测对象, 不用改 runner。
+  </p>
+<figure class="figure">
+<div class="flow-map" role="img" aria-label="Eval Core + Driver 分层">
+<div class="flow-row">
+<span class="flow-node">EvalCase</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node flow-node--accent">runEvalCase()<br/><small>core/runner.ts</small></span>
+</div>
+<div class="flow-row">
+<span class="flow-arrow">↓</span>
+</div>
+<div class="flow-row">
+<span class="flow-node">createEvalWorkspace<br/><small>临时目录</small></span>
+<span class="flow-node">TraceRecorder<br/><small>runtime events</small></span>
+<span class="flow-node">runAssertions<br/><small>portable + instrumented</small></span>
+</div>
+<div class="flow-row">
+<span class="flow-arrow">↓</span>
+</div>
+<div class="flow-row">
+<span class="flow-node">CodingAgentDriver<br/><small>中立接口</small></span>
+</div>
+<div class="flow-row">
+<span class="flow-arrow">↓</span>
+</div>
+<div class="flow-row">
+<span class="flow-node">in-process</span>
+<span class="flow-node">cli</span>
+<span class="flow-node">team</span>
+</div>
+<div class="flow-row">
+<span class="flow-arrow">↓</span>
+</div>
+<div class="flow-row">
+<span class="flow-node">createAgent()<br/><small>当前项目</small></span>
+<span class="flow-node">child_process.spawn<br/><small>外部命令</small></span>
+<span class="flow-node">supervisor 拓扑<br/><small>原型</small></span>
+</div>
+</div>
+<figcaption>图 2 · Core 只看 Driver 接口. 换被测对象 = 换 driver 实现, runner 不变。</figcaption>
+</figure>
+<h2 id="case-structure">Case 长什么样</h2>
+<p>
+  一个 EvalCase 描述"用户问什么 + 期望发生什么"。它不写"模型应该说什么",
+  只写"模型应该做什么"。
+</p>
+<h3>Case 的 4 个核心字段</h3>
+<table class="terms">
+<thead>
+<tr>
+<th>字段</th>
+<th>作用</th>
+<th>常见配置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>driver</code></td>
+<td>被测对象 + LLM plan + 工具集</td>
+<td><code>learn-claude-code-in-process</code> + scripted / live LLM + core / full 工具</td>
+</tr>
+<tr>
+<td><code>workspace</code></td>
+<td>临时目录和初始文件</td>
+<td><code>initialFiles</code>, <code>keepOnFailure</code></td>
+</tr>
+<tr>
+<td><code>steps</code></td>
+<td>多 step query 序列, 复用同一 driver</td>
+<td>单 step (单轮) / 多 step (多轮 + 共享 context)</td>
+</tr>
+<tr>
+<td><code>assertions</code></td>
+<td>case 级 + step 级断言</td>
+<td>portable (fileContains) + instrumented (toolCalled) + 可选 judge</td>
+</tr>
+</tbody>
+</table>
+<h3>3 种 tools.kind: case 的"难度级别"</h3>
+<p>
+  <code>tools.kind</code> 决定 driver 内部装哪套工具, 直接决定 case 能测什么:
+</p>
+<table class="terms">
+<thead>
+<tr>
+<th><code>tools.kind</code></th>
+<th>工具集</th>
+<th>副作用</th>
+<th>典型场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fake</code></td>
+<td>case 自己定义的 fake 工具</td>
+<td>无</td>
+<td>测 runner / driver 本身</td>
+</tr>
+<tr>
+<td><code>core</code></td>
+<td>真实 <code>run_bash</code> / <code>run_read</code> / <code>run_write</code> / <code>run_edit</code> / <code>run_edit_exact</code></td>
+<td>临时 workspace 内</td>
+<td>live regression 主战场</td>
+</tr>
+<tr>
+<td><code>full</code></td>
+<td>完整工具系统 (TODO / Task / Memory / Skill / SubAgent / Async / Schedule / Output)</td>
+<td>临时 workspace + 临时 <code>agentHome</code></td>
+<td>live full regression</td>
+</tr>
+</tbody>
+</table>
+<h3>4 个真实 case 示例</h3>
+<p>
+  下面 4 个 case 来自当前仓库, 展示不同 <code>tools.kind</code> + 不同 LLM plan 的写法。
+</p>
+<p>
+  <strong>示例 1 · scripted LLM + fake 工具 (测 runner 本身)</strong>
+</p>
+<pre class="code-block"><code>const case1: EvalCase = {
+  id: "runner-no-tool",
+  title: "Runner: scripted LLM, no tool, just text",
+  driver: {
+    kind: "learn-claude-code-in-process",
+    llm: {
+      kind: "scripted",
+      scriptedResponses: [
+        { content: "Hello!", toolCalls: [], finishReason: "stop" },
+      ],
+    },
+    tools: { kind: "fake" },
+  },
+  steps: [{ query: "Say hello." }],
+  assertions: [
+    { kind: "allStepsCompleted" },
+    { kind: "finalOutputContains", text: "Hello" },
+  ],
+};</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/cases/deterministic.test.ts#L1" rel="noreferrer" target="_blank">GitHub · deterministic suite (scripted + fake 案例) (L1)</a></p>
+<p>
+  <strong>示例 2 · scripted LLM + core 工具 (测多步工具调用)</strong>
+</p>
+<pre class="code-block"><code>const case2: EvalCase = {
+  id: "core-read-then-answer",
+  title: "Read package.json and report test command",
+  driver: {
+    kind: "learn-claude-code-in-process",
+    llm: {
+      kind: "scripted",
+      scriptedResponses: [
+        // 第一次: 模型决定调 run_read
+        {
+          content: null,
+          toolCalls: [{ id: "c1", name: "run_read", args: { path: "package.json" } }],
+          finishReason: "tool_calls",
+        },
+        // 第二次: 模型看到结果, 给最终回复
+        { content: "Test command: npm test", toolCalls: [], finishReason: "stop" },
+      ],
+    },
+    tools: { kind: "core" },
+  },
+  workspace: {
+    initialFiles: { "package.json": '{ "scripts": { "test": "npm test" } }' },
+  },
+  steps: [{ query: "What test command does this project use?" }],
+  assertions: [
+    { kind: "toolCalled", toolName: "run_read" },
+    { kind: "finalOutputContains", text: "npm test" },
+  ],
+};</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/cases/deterministic.test.ts#L1" rel="noreferrer" target="_blank">GitHub · deterministic suite (scripted + core 案例) (L1)</a></p>
+<p>
+  <strong>示例 3 · live LLM + core 工具 (live regression 写法)</strong>
+</p>
+<pre class="code-block"><code>const case3: EvalCase = {
+  id: "live-core-write-report-with-sentinels",
+  title: "Create reports/eval-contract.md with exact sentinels",
+  driver: {
+    kind: "learn-claude-code-in-process",
+    llm: { kind: "live", live: { maxCalls: 8 } },
+    tools: { kind: "core" },
+  },
+  steps: [{
+    query: `Create reports/eval-contract.md.
+The file must contain these exact lines:
+case-id: LIVE-WRITE-001
+status: ready
+owner: eval
+After writing it, briefly say what you created.`,
+  }],
+  assertions: [
+    { kind: "allStepsCompleted" },
+    { kind: "toolCalled", toolName: "run_write" },
+    { kind: "fileExists", path: "reports/eval-contract.md" },
+    { kind: "fileContains", path: "reports/eval-contract.md", text: "case-id: LIVE-WRITE-001" },
+    { kind: "fileContains", path: "reports/eval-contract.md", text: "status: ready" },
+    { kind: "noWritesOutsideWorkspace" },
+  ],
+};</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-regression-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live regression suite (core tools live cases) (L1)</a></p>
+<p>
+  <strong>示例 4 · live LLM + full 工具 (live full regression 写法)</strong>
+</p>
+<pre class="code-block"><code>const case4: EvalCase = {
+  id: "live-full-skill-guided-output",
+  title: "Load seeded skill and follow its instructions",
+  driver: {
+    kind: "learn-claude-code-in-process",
+    llm: { kind: "live", live: { maxCalls: 10 } },
+    tools: {
+      kind: "full",
+      full: {
+        agentHome: "temp",
+        enabledTools: ["core", "skill"],
+        seedSkills: {
+          "eval-format/SKILL.md":
+            "When asked for status, first write the marker SKILL_USED_22, then include the status.",
+        },
+      },
+    },
+  },
+  steps: [{
+    query: "Use the eval-format skill to create skill-output.md with status: passed.",
+  }],
+  assertions: [
+    { kind: "toolCalled", toolName: "run_skill" },
+    { kind: "fileContains", path: "skill-output.md", text: "SKILL_USED_22" },
+    { kind: "fileContains", path: "skill-output.md", text: "status: passed" },
+  ],
+};</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-full-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live full suite (TODO/Memory/Skill/SubAgent live cases) (L1)</a></p>
+<p>
+  4 个 case 的 LLM 计划、工具集、断言类型、风险点都不同, 但都遵循同一个
+  <code>EvalCase</code> shape。Runner 不需要为 4 种 case 写 4 套执行逻辑。
+</p>
+<h2 id="assertions">断言分两类</h2>
+<p>
+  断言是"模型做了什么" 的代码表达。我们把所有断言拆成两类, 解决"测实现细节
+  vs 测行为" 的张力。
+</p>
+<h3>Portable 断言: 跨 driver 可用</h3>
+<p>
+  Portable 断言只看 <code>finalOutput</code>、workspace 文件、step result,
+  不依赖 driver 内部事件。<strong>换 driver 时, 这些断言不需要改</strong>。
+  case 主体应该尽量用 portable 断言。
+</p>
+<table class="terms">
+<thead>
+<tr>
+<th>断言</th>
+<th>检查什么</th>
+<th>例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>finalOutputContains</code></td>
+<td>最终回复包含文本</td>
+<td><code>{ kind: "finalOutputContains", text: "approved" }</code></td>
+</tr>
+<tr>
+<td><code>finalOutputMatches</code></td>
+<td>最终回复匹配正则</td>
+<td><code>{ kind: "finalOutputMatches", pattern: "(denied|permission|cannot)" }</code></td>
+</tr>
+<tr>
+<td><code>allStepsCompleted</code></td>
+<td>所有 step 跑完</td>
+<td><code>{ kind: "allStepsCompleted" }</code></td>
+</tr>
+<tr>
+<td><code>fileExists</code></td>
+<td>workspace 文件存在</td>
+<td><code>{ kind: "fileExists", path: "README.md" }</code></td>
+</tr>
+<tr>
+<td><code>fileNotExists</code></td>
+<td>workspace 文件不存在 (越界 / 拒绝后验证)</td>
+<td><code>{ kind: "fileNotExists", path: "blocked.txt" }</code></td>
+</tr>
+<tr>
+<td><code>fileContains</code></td>
+<td>workspace 文件包含文本</td>
+<td><code>{ kind: "fileContains", path: "README.md", text: "Usage" }</code></td>
+</tr>
+<tr>
+<td><code>noWritesOutsideWorkspace</code></td>
+<td>没有任何工具写到 workspace 外</td>
+<td><code>{ kind: "noWritesOutsideWorkspace" }</code></td>
+</tr>
+<tr>
+<td><code>exitCodeIs</code></td>
+<td>CLI driver 退出码</td>
+<td><code>{ kind: "exitCodeIs", code: 0 }</code></td>
+</tr>
+</tbody>
+</table>
+<h3>Instrumented 断言: 需要 driver 发射 runtime events</h3>
+<p>
+  Instrumented 断言依赖 driver 内部观察, <strong>CLI 黑盒 driver 不一定能用</strong>。
+  in-process driver 通过 <code>wrapToolRegistryForTrace</code> 和
+  <code>scripted-terminal</code> 自动发射这些事件, 所以 in-process case
+  可以放心使用。
+</p>
+<table class="terms">
+<thead>
+<tr>
+<th>断言</th>
+<th>检查什么</th>
+<th>例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>toolCalled</code></td>
+<td>工具被调过 (可设 <code>minCount</code>)</td>
+<td><code>{ kind: "toolCalled", toolName: "run_read" }</code></td>
+</tr>
+<tr>
+<td><code>toolNotCalled</code></td>
+<td>工具没被调</td>
+<td><code>{ kind: "toolNotCalled", toolName: "run_write" }</code></td>
+</tr>
+<tr>
+<td><code>toolCalledOneOf</code></td>
+<td>一组工具中至少一个被调</td>
+<td><code>{ kind: "toolCalledOneOf", toolNames: ["run_memory_list", "run_memory_read"] }</code></td>
+</tr>
+<tr>
+<td><code>toolCallCount</code></td>
+<td>工具调用次数等于指定值</td>
+<td><code>{ kind: "toolCallCount", toolName: "run_bash", count: 1 }</code></td>
+</tr>
+<tr>
+<td><code>toolArgsContain</code></td>
+<td>工具参数包含文本</td>
+<td><code>{ kind: "toolArgsContain", toolName: "run_read", text: "package.json" }</code></td>
+</tr>
+<tr>
+<td><code>toolResultContains</code></td>
+<td>工具结果包含文本 (验证工具返回, 而不是最终回复)</td>
+<td><code>{ kind: "toolResultContains", toolName: "run_task_group_read", text: "Live plan" }</code></td>
+</tr>
+<tr>
+<td><code>stepToolCalled</code></td>
+<td>指定 step 中工具被调</td>
+<td><code>{ kind: "stepToolCalled", stepId: "step-2", toolName: "run_write" }</code></td>
+</tr>
+<tr>
+<td><code>stepToolNotCalled</code></td>
+<td>指定 step 中工具没被调 (验证"先观察后写")</td>
+<td><code>{ kind: "stepToolNotCalled", stepId: "step-1", toolName: "run_write" }</code></td>
+</tr>
+<tr>
+<td><code>noToolErrors</code></td>
+<td>没有工具返回 <code>error: true</code></td>
+<td><code>{ kind: "noToolErrors" }</code></td>
+</tr>
+<tr>
+<td><code>allToolsSucceeded</code></td>
+<td>所有 <code>tool_result</code> 不带 <code>error</code></td>
+<td><code>{ kind: "allToolsSucceeded" }</code></td>
+</tr>
+<tr>
+<td><code>permissionPromptShown</code></td>
+<td>权限确认弹窗出现过</td>
+<td><code>{ kind: "permissionPromptShown" }</code></td>
+</tr>
+<tr>
+<td><code>transcriptEventTypes</code></td>
+<td>transcript 事件类型序列匹配</td>
+<td><code>{ kind: "transcriptEventTypes", expected: ["user_message", "tool_result", ...] }</code></td>
+</tr>
+</tbody>
+</table>
+<h3>复杂 case 还需要 4 个补充断言</h3>
+<p>
+  跑全系统 live case 时, 上面的断言不够用, 我们又加了 4 个:
+</p>
+<ul>
+<li><code>fileNotExists</code> —— 验证越界路径 / 权限拒绝后文件没生成</li>
+<li><code>toolCalledOneOf</code> —— 模型可能用多个等价工具达成目标, 不想写死</li>
+<li><code>toolResultContains</code> —— 看工具结果本身是否含目标内容 (而不是只看最终回复)</li>
+<li><code>stepToolCalled</code> / <code>stepToolNotCalled</code> —— 验证"第一步只读, 第二步才写"</li>
+</ul>
+<h3>断言选择经验法则</h3>
+<ol>
+<li>case 的"主断言" 全部用 portable</li>
+<li>需要验证"模型走了某条路径" 时加 instrumented (例如验证"权限拒绝后没继续写")</li>
+<li>开放式质量用 judge, 不要硬塞到 hard 断言</li>
+</ol>
+<h2 id="scripted-llm">Scripted LLM: 确定性测试的支柱</h2>
+<p>
+  Scripted LLM 是 deterministic 层的核心。设计极简:
+  <strong>每次 <code>chat()</code> 消耗一个预设 response, response 用完抛错</strong>。
+  实现大概 60 行, 但解决了"模型行为不可预测" 的根本问题。
+</p>
+<h3>为什么这种"看起来太朴素"的设计是对的</h3>
+<p>
+  朴素的设计有两个好处:
+</p>
+<ol>
+<li>
+<strong>强迫 case 作者把模型行为显式写出来</strong>: 不能依赖模型"自然" 做对。
+      跑测试如果失败, 一眼能看到"实际行为" 和"case 期望" 的差异,
+      不是"真实 LLM 升级后行为变了"。
+    </li>
+<li>
+<strong>把模型不确定性关在 case 里</strong>: 同样的 case 跑 1000 次, 行为都一样。
+      CI 跑过 = 代码逻辑正确, CI 挂了 = 代码逻辑错。模型波动不会假阳性。
+    </li>
+</ol>
+<h3>工具调用的 response 必须成对出现</h3>
+<p>
+  工具调用场景下, scripted response 必须成对:
+  <strong>第一次 <code>finishReason: "tool_calls"</code> + toolCalls 数组,
+  第二次 <code>finishReason: "stop"</code> + content</strong>。
+  </p>
+<pre class="code-block"><code>scriptedResponses: [
+  // 第 1 轮: 模型决定调 run_bash
+  {
+    content: null,
+    toolCalls: [{ id: "call_1", name: "run_bash", args: { command: "cat package.json" } }],
+    finishReason: "tool_calls",
+  },
+  // 第 2 轮: 模型看到工具结果, 给最终回复
+  { content: "package.json says test = npm test", toolCalls: [], finishReason: "stop" },
+]</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/scripted-llm.ts#L32" rel="noreferrer" target="_blank">GitHub · createScriptedLLMClient (L32)</a></p>
+<p>
+  如果 case 需要调 3 个工具, scripted response 要排 4 个
+  (3 个 tool_calls + 1 个 stop)。
+</p>
+<h3>3 个常见 scripted bug</h3>
+<p>
+  写 case 时容易踩 3 个坑, 几乎每个新 case 作者都会遇到一次:
+</p>
+<dl class="defs">
+<dt>Bug 1 · response 配对错</dt>
+<dd>
+      第一次写了 <code>finishReason: "stop"</code> 但同时写了 <code>toolCalls</code>,
+      或者反过来。Driver 会用工具数判定"还有下一轮", 配对错会导致
+      case 跑到一半 response 用完, 抛 <code>Eval case &lt;id&gt; has no
+      scripted LLM response for call &lt;n&gt;</code>。
+    </dd>
+<dt>Bug 2 · toolCall id 漂移</dt>
+<dd>
+      scripted 里写 <code>id: "call_1"</code>, 但真实 OpenAI 协议里
+      <code>tool_call_id</code> 拼写不一致。Driver 在 tool_result 配对时
+      用的是 <code>toolCall.id</code>, 拼错会导致 tool message 找不到
+      对应 assistant 消息, 整个 conversation 序列错乱。
+    </dd>
+<dt>Bug 3 · tool args 类型错</dt>
+<dd>
+      scripted 里 <code>args</code> 期望是 object, 但 case 作者
+      写成 JSON 字符串。Driver 会自动 <code>JSON.stringify</code>,
+      字符串再 stringify 就成了 <code>"{\"command\": \"ls\"}"</code>
+      (外层多引号), 模型看到时 JSON 解析失败。
+    </dd>
+</dl>
+<p>
+  解决方式: 第一版 case 都跑一遍 dry run, 确认 response 数量正确、
+  id 拼写一致、args 是 object。后期可以加 scripted LLM 单元测试自动检查。
+</p>
+<h2 id="workspace">临时 workspace + 临时 agentHome</h2>
+<p>
+  <strong>第一原则: case 跑完不能污染任何东西</strong>。
+  这一条不做到, 后面所有判断都是空中楼阁。
+</p>
+<h3>Workspace: 每个 case 独立临时目录</h3>
+<pre class="code-block"><code>async function createEvalWorkspace(plan?: EvalWorkspacePlan): Promise&lt;EvalWorkspace&gt; {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "swoopcode-eval-"));
+  // 写入 initialFiles
+  if (plan?.initialFiles) {
+    for (const [relPath, content] of Object.entries(plan.initialFiles)) {
+      const abs = safeResolve(root, relPath);   // 拒绝 .. 和绝对路径
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      await fs.writeFile(abs, content, "utf8");
+    }
+  }
+  return {
+    root,
+    readFile: (p) =&gt; fs.readFile(safeResolve(root, p), "utf8"),
+    exists: (p) =&gt; fs.access(safeResolve(root, p)).then(() =&gt; true).catch(() =&gt; false),
+    cleanup: async () =&gt; { /* case 跑完默认删 */ },
+  };
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/workspace.ts#L50" rel="noreferrer" target="_blank">GitHub · createEvalWorkspace 临时目录 (L50)</a></p>
+<p>
+  4 条安全防线:
+</p>
+<ol>
+<li>
+<strong>mkdtemp 生成唯一目录</strong>: 多个 case 并行跑不会冲突。
+    </li>
+<li>
+<strong>initialFiles 拒绝绝对路径和 <code>..</code></strong>:
+      case 写 <code>{ "/etc/passwd": "..." }</code> 会被 <code>safeResolve</code> 拒绝,
+      防止 case 作者不小心写到 tmp 外面。
+    </li>
+<li>
+<strong>readFile / exists 也走 <code>safeResolve</code></strong>:
+      断言 <code>fileContains("/etc/passwd", "root")</code> 一样被拒。
+    </li>
+<li>
+<strong>cleanup 默认删目录, <code>keepOnFailure: true</code> 时保留</strong>:
+      失败的 case 把 <code>workspaceRoot</code> 写进 trace, 方便人工排查。
+    </li>
+</ol>
+<h3>AgentHome: full-tools 必须隔离</h3>
+<p>
+  <code>tools.kind = "full"</code> 装载的是完整工具系统, 包括
+  <code>run_memory_create</code>、<code>run_task_group_create</code>、
+  <code>run_schedule_create</code>、<code>run_skill</code> 等。
+  这些工具默认写到 <code>~/.swoopcode</code> 下的 memoryDir /
+  tasksDir / schedulesDir / skillsDir。
+</p>
+<p>
+  <strong>如果不隔离</strong>: 跑一个 test 创建了
+  <code>release-keyword = LIVE-MEM-42</code> 的 memory,
+  会污染用户真实数据; 第二次跑还会读到上次的污染,
+  看起来 case 跑通了, 其实是脏数据。
+  </p>
+<p>
+  所以 full-tools driver 第一步就是创建临时 <code>agentHome</code>:
+  </p>
+<pre class="code-block"><code>if (tools.kind === "full") {
+  const tempAgentHome = await fs.mkdtemp(path.join(os.tmpdir(), "swoopcode-agent-home-"));
+  const ctx = createProjectContext({ projectRoot: workspace.root, agentHome: tempAgentHome });
+  // skillsDir / memoryDir / tasksDir / schedulesDir / taskOutputsDir
+  // 全部从 tempAgentHome 派生, 不读 ~/.swoopcode
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/full-tool-runtime.ts#L137" rel="noreferrer" target="_blank">GitHub · createFullEvalRuntime (L137)</a></p>
+<p>
+  case 结束后 <code>cleanup()</code> 把 tempAgentHome 整个删除。
+  </p>
+<h3>为什么不用 in-memory store?</h3>
+<p>
+  有人会问: "为什么不直接用内存对象模拟 store, 跑得更快?"
+  答案是<strong>持久化路径是 agent 的一部分</strong>。Memory / Task
+  / Schedule 都有原子写、索引重建、跨进程恢复这些逻辑,
+  内存模拟会跳过这些真实路径, case 永远测不到"原子写失败"
+  "索引文件损坏" 这类边界 bug。
+  临时目录 + 真实模块, 才是端到端测试该有的样子。
+</p>
+<h2 id="trace">Trace 是事实来源</h2>
+<p>
+  测试失败时, 不能只看到 <code>expected true to be false</code>。
+  失败者必须能立刻定位"哪一步、哪个工具、什么参数、什么结果"。
+  这就是 <code>EvalTrace</code> 的职责。
+</p>
+<h3>EvalTrace 包含什么</h3>
+<ul>
+<li><code>caseId</code> / <code>title</code> / <code>startedAt</code> / <code>endedAt</code> / <code>mode</code></li>
+<li><code>workspaceRoot</code> (失败时定位临时目录)</li>
+<li><code>steps[]</code> —— 每 step 的 query / finalOutput / 错误</li>
+<li><code>runtimeEvents[]</code> —— 标准化事件流</li>
+<li><code>assertions[]</code> —— 每条断言 passed / message / evidence</li>
+<li><code>judge?</code> —— 可选 LLM judge 结果</li>
+</ul>
+<h3>完整 trace JSON 示例</h3>
+<pre class="code-block"><code>{
+  "caseId": "live-core-edit-existing-config",
+  "title": "Change retryLimit from 2 to 4, keep sentinel",
+  "mode": "live",
+  "workspaceRoot": "/var/folders/.../swoopcode-eval-abc123",
+  "startedAt": "2026-06-10T12:00:00.000Z",
+  "endedAt": "2026-06-10T12:00:18.234Z",
+  "steps": [{
+    "stepId": "step-1",
+    "query": "In src/config.ts, change retryLimit from 2 to 4...",
+    "finalOutput": "Done. retryLimit is now 4, sentinel and featureName preserved."
+  }],
+  "runtimeEvents": [
+    { "kind": "llm_call", "id": "e1", "messageCount": 5, "toolDefinitionCount": 5 },
+    { "kind": "tool_call", "id": "e2", "toolName": "run_read", "args": { "path": "src/config.ts" } },
+    { "kind": "tool_result", "id": "e3", "toolName": "run_read", "result": "..." },
+    { "kind": "llm_response", "id": "e4", "contentPreview": "I'll change retryLimit to 4." },
+    { "kind": "tool_call", "id": "e5", "toolName": "run_edit", "args": { "path": "src/config.ts", "newText": "export const retryLimit = 4;" } },
+    { "kind": "tool_result", "id": "e6", "toolName": "run_edit", "result": "OK" },
+    { "kind": "llm_response", "id": "e7", "contentPreview": "Done." }
+  ],
+  "assertions": [
+    { "kind": "allStepsCompleted", "passed": true, "message": "All 1 step completed." },
+    { "kind": "toolCalled", "passed": true, "message": "run_read was called 1 time." },
+    { "kind": "fileContains", "passed": true, "message": "src/config.ts contains 'export const retryLimit = 4;'." },
+    { "kind": "noWritesOutsideWorkspace", "passed": true, "message": "All writes stayed inside workspace." }
+  ]
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-regression-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live regression 6 case 定义 (L1)</a></p>
+<p>
+  失败时看到这份 trace, 立刻知道: 工具调用序列对不对、文件改对了没、模型
+  最终回答了什么。不用重跑也能定位。
+</p>
+<h3>trace 与 llm.log 的边界</h3>
+<p>
+  trace 不追求和 <code>llm.log</code> 一样完整。两者用途不同:
+</p>
+<table class="terms">
+<thead>
+<tr>
+<th>维度</th>
+<th><code>llm.log</code></th>
+<th>EvalTrace</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>用途</td>
+<td>完整通信日志, 调试 LLM 行为</td>
+<td>测试证据, 验证 case 通过/失败</td>
+</tr>
+<tr>
+<td>体积</td>
+<td>大, 含所有 payload</td>
+<td>小, 含事件摘要和断言结果</td>
+</tr>
+<tr>
+<td>开启</td>
+<td>默认开 (按轮转)</td>
+<td><code>EVAL_TRACE_DIR</code> 显式开启</td>
+</tr>
+<tr>
+<td>写仓库</td>
+<td>写到 <code>agentHome/logs/</code></td>
+<td>不写仓库目录, 默认只存内存</td>
+</tr>
+</tbody>
+</table>
+<h2 id="replay">Replay: 复现"那一次成功"</h2>
+<p>
+  跑真实 LLM 成功了, 想把这个成功固定下来防止回归?
+  Replay 把那次成功的 response 序列录成 JSON fixture,
+  之后 deterministic 跑同一 fixture, 任何偏差都是回归。
+</p>
+<h3>Fixture 格式</h3>
+<pre class="code-block"><code>{
+  "version": 1,
+  "caseId": "edit-readme",
+  "provider": "openai_compatible",
+  "model": "example-model",
+  "recordedAt": "2026-06-03T00:00:00.000Z",
+  "responses": [
+    { "content": null, "toolCalls": [{ "id": "call_1", "name": "run_read", "args": { "path": "README.md" } }], "finishReason": "tool_calls" },
+    { "content": "Done.", "toolCalls": [], "finishReason": "stop" }
+  ]
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-regression-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live regression case 定义 (L1)</a></p>
+<h3>录制过程 (手动)</h3>
+<ol>
+<li>写一个 <code>scripted</code> 版本的 case, 用真实 LLM 跑通</li>
+<li>用 <code>llm.log</code> 或 LLM 客户端日志, 把 <code>chat.completions.create()</code> 的请求和响应抄成上面格式</li>
+<li>把 fixture 存到 <code>src/eval/cases/fixtures/&lt;case-id&gt;.json</code></li>
+<li>把 case 改成 <code>llm: { kind: "replay", replayFile: "..." }</code></li>
+</ol>
+<p>
+  第一版 replay 只<strong>读取</strong> fixture, 不负责自动录制。
+  自动录制 (跑真实 LLM → 自动落 fixture) 是后续增强,
+  避免本阶段扩散。
+</p>
+<h3>Replay 内部复用 Scripted LLM</h3>
+<p>
+  Replay 在 driver 内部实际是 Scripted LLM 的特殊形式:
+  </p>
+<pre class="code-block"><code>function createReplayLLMClient(opts: { replayFile: string; caseId: string }): LLMClient {
+  const fixture = JSON.parse(fs.readFileSync(opts.replayFile, "utf8"));
+  if (fixture.version !== 1) throw new Error("Unsupported fixture version");
+  if (fixture.caseId !== opts.caseId) throw new Error("caseId mismatch");   // 防混用
+  return createScriptedLLMClient({
+    caseId: opts.caseId,
+    responses: fixture.responses,   // 转成 ScriptedLLMResponse[]
+  });
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-regression-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live regression case 定义 (L1)</a></p>
+<p>
+  Runner 层完全感知不到 scripted / replay 的区别,
+  同样的断言、同样的 trace 事件流。
+</p>
+<h2 id="live-regression">Live Regression: 现实校准</h2>
+<p>
+  Live smoke (2-3 个 case) 验证"LLM wrapper 链得通",
+  live regression (6 个 case) 才是真正的现实校准:
+  跑真实 LLM, 用结构性断言判断核心能力不退化。
+</p>
+<h3>第一轮 6 个 case</h3>
+<table class="terms">
+<thead>
+<tr>
+<th>Case ID</th>
+<th>场景</th>
+<th>核心断言</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>live-core-read-structured-summary</code></td>
+<td>读 fixture, 用三个 bullet 回答</td>
+<td>三个关键事实 (sentinel) 都在最终回复</td>
+</tr>
+<tr>
+<td><code>live-core-write-report-with-sentinels</code></td>
+<td>写文件并嵌入稳定 sentinel</td>
+<td>文件存在 + 3 行 sentinel 都在</td>
+</tr>
+<tr>
+<td><code>live-core-edit-existing-config</code></td>
+<td>改一个常量, 保留 sentinel 和其他字段</td>
+<td>目标字段改了 + 无关字段没动</td>
+</tr>
+<tr>
+<td><code>live-core-bash-readonly-command</code></td>
+<td>跑 <code>node -e</code> 并报告输出</td>
+<td>输出含固定字符串</td>
+</tr>
+<tr>
+<td><code>live-core-permission-denied-write</code></td>
+<td>用户拒绝权限后, 文件没被创建</td>
+<td>权限被问 + 写工具没被调</td>
+</tr>
+<tr>
+<td><code>live-core-multi-turn-stateful-edit</code></td>
+<td>多 turn 共享 context, 先观察后修改</td>
+<td>第一步只读 + 第二步基于结果改</td>
+</tr>
+</tbody>
+</table>
+<h3>3 个 case 设计细节</h3>
+<p>
+  <strong>写文件 case (sentinel 设计)</strong>: 让模型写
+  <code>reports/eval-contract.md</code>, 必须含 3 行精确 sentinel:
+</p>
+<pre class="code-block"><code>case-id: LIVE-WRITE-001
+status: ready
+owner: eval</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-regression-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live regression case 定义 (L1)</a></p>
+<p>
+  为什么用 sentinel? 因为真实 LLM 的措辞不可预测, 但 "这 3 行必须存在"
+  是任务的核心要求, 写死能精确验证。
+</p>
+<p>
+  <strong>权限拒绝 case</strong>: 设 <code>permissionAnswers: [false]</code>,
+  让 driver 在第一次权限确认时自动拒绝。验证:
+</p>
+<pre class="code-block"><code>assertions: [
+  { kind: "permissionPromptShown" },
+  { kind: "toolNotCalled", toolName: "run_write" },
+  { kind: "toolNotCalled", toolName: "run_edit" },
+  { kind: "toolNotCalled", toolName: "run_edit_exact" },
+  { kind: "finalOutputMatches", pattern: "(denied|cannot|not allowed)" },
+]</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/replay/replay-llm.ts#L60" rel="noreferrer" target="_blank">GitHub · createReplayLLMClient fixture 读取 (L60)</a></p>
+<p>
+  5 条断言联合验证"用户拒绝后, agent 不写文件, 不假装写成功"。
+</p>
+<p>
+  <strong>多 turn case (stateful edit)</strong>: 同一个 case 有 2 个 step,
+  复用 driver 实例, 验证多轮 context 共享:
+</p>
+<pre class="code-block"><code>steps: [
+  { id: "observe", query: "Read notes/state.md and tell me the current phase. Do not edit files in this step." },
+  { id: "update", query: "Now update notes/state.md so phase becomes reviewed, and add a line reviewer: live-e2e." },
+],
+assertions: [
+  { kind: "stepToolNotCalled", stepId: "observe", toolName: "run_write" },
+  { kind: "fileContains", path: "notes/state.md", text: "phase: reviewed" },
+  { kind: "fileContains", path: "notes/state.md", text: "reviewer: live-e2e" },
+]</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-regression-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live regression 写文件 case (L1)</a></p>
+<p>
+  第一步用 <code>stepToolNotCalled</code> 验证"只观察"约束, 第二步
+  验证"基于观察结果改对了"。
+</p>
+<h3>Live safety 默认</h3>
+<p>
+  所有 live suite 默认 skip, 显式开启:
+  </p>
+<pre class="code-block"><code># live smoke (2 个 case)
+EVAL_LIVE=1 npm run test:eval:live
+
+# live regression (6 个 case)
+EVAL_LIVE_REGRESSION=1 npm run test:eval:live:regression
+
+# regression + judge (5 个 case 加 judge)
+EVAL_LIVE_REGRESSION=1 EVAL_JUDGE=1 npm run test:eval:live:regression</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-regression-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live regression 编辑 case (L1)</a></p>
+<p>
+  每个 case 都有 <code>maxCalls</code> (8-12) / <code>maxRounds</code> (8-12)
+  / Vitest timeout (30-60s), 防止 LLM 无限循环。
+  </p>
+<h2 id="live-full">Live Full Regression: 完整工具系统</h2>
+<p>
+  core-tools 跑完后, 我们要测"完整工具系统"。这层加在 regression 之上,
+  用 <code>tools.kind = "full"</code>, 验证 TODO / Memory / Skill /
+  SubAgent 这些系统级能力不退化。
+</p>
+<h3>Release 组 4 个 case</h3>
+<p>
+  <strong>case 1 · TODO 跟踪 + 文件修改 (<code>live-full-todo-guided-file-change</code>)</strong>
+  </p>
+<p>
+  让模型用 TODO 跟踪一个 2 步任务: 读文件 → 改文件 + 加 marker。
+  </p>
+<pre class="code-block"><code>// fixture
+docs/todo-target.md: "status: draft"
+
+// query
+Use a TODO list to track this work:
+1. Read docs/todo-target.md.
+2. Update it so status becomes complete and add marker TODO_LIVE_DONE.
+
+// 断言
+toolCalled(run_todo_create)             // 必须建 TODO
+toolCalled(run_todo_update, minCount: 2) // 至少 update 2 次
+fileContains("docs/todo-target.md", "status: complete")
+fileContains("docs/todo-target.md", "TODO_LIVE_DONE")
+allToolsSucceeded</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-full-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live full TODO case (L1)</a></p>
+<p>
+  <strong>case 2 · Memory create + read (<code>live-full-memory-confirmed-create-and-read</code>)</strong>
+</p>
+<p>
+  2 步: 第一步明确要求记忆 <code>LIVE-MEM-42</code>, 第二步读回。
+  </p>
+<pre class="code-block"><code>steps: [
+  { id: "create", query: "Please remember this for the eval project: release keyword is LIVE-MEM-42." },
+  { id: "read",   query: "List or read your memories and tell me the release keyword." },
+],
+assertions: [
+  toolCalled(run_memory_create),
+  toolCalledOneOf(["run_memory_list", "run_memory_read"]),  // 模型可能用 list 或 read
+  { kind: "finalOutputContains", text: "LIVE-MEM-42", stepId: "read" },
+]</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-full-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · live full suite (L1)</a></p>
+<p>
+  <strong>case 3 · Skill 加载 + 遵循 (<code>live-full-skill-guided-output</code>)</strong>
+</p>
+<p>
+  预先 seed 一个临时 skill, 让模型加载并按 skill 指示写文件:
+  </p>
+<pre class="code-block"><code>// seed skill 内容
+"eval-format/SKILL.md": "When asked to create an eval status file, first write the marker SKILL_USED_22, then include the user's requested status."
+
+// query
+Use the eval-format skill to create skill-output.md with status: passed.
+
+// 断言
+toolCalled(run_skill)                   // 加载 skill
+fileContains("skill-output.md", "SKILL_USED_22")   // marker 出现
+fileContains("skill-output.md", "status: passed")  // 任务内容
+allToolsSucceeded</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/judge/judge.ts#L1" rel="noreferrer" target="_blank">GitHub · judge 4 层 JSON 解析降级 (L1)</a></p>
+<p>
+  <code>SKILL_USED_22</code> 是 skill 行为的指纹, 调试 trace 时用 grep
+  就能确认模型确实加载并遵循了 skill。
+</p>
+<p>
+  <strong>case 4 · SubAgent 只读分析 (<code>live-full-subagent-readonly-analysis</code>)</strong>
+</p>
+<p>
+  父 Agent 委托子智能体分析文件, 验证子智能体没写文件:
+  </p>
+<pre class="code-block"><code>// fixture
+src/a.ts: "export const liveToken = \"SUBAGENT_LIVE_01\";"
+
+// query
+Ask a subagent to inspect src/a.ts and report the liveToken value. Do not modify any files.
+
+// 断言
+toolCalled(run_subagent)
+finalOutputContains("SUBAGENT_LIVE_01")
+toolNotCalled(run_write)               // 父 Agent 不直接写
+toolNotCalled(run_edit)                // 父 Agent 不直接编辑
+toolNotCalled(run_edit_exact)</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/case-schema.ts#L311" rel="noreferrer" target="_blank">GitHub · EvalJudgeInput 类型 (L311)</a></p>
+<h3>Nightly 组 3 个 case (默认 skip)</h3>
+<p>
+  Task Group / Async Run / Schedule 3 个 case 涉及"运行时系统回归",
+  放 nightly (默认 <code>describe.skip</code>), 等 flake 率稳定后再纳入 release。
+  </p>
+<ul>
+<li><code>live-full-task-group-durable-plan</code>: Task Group 创建 / 更新 / 读回</li>
+<li><code>live-full-async-output-handle</code>: Async Run 启动 / 读 output_id</li>
+<li><code>live-full-schedule-create-read-cancel</code>: Schedule 创建 / 读 / 取消</li>
+</ul>
+<h3>启用命令</h3>
+<pre class="code-block"><code>EVAL_LIVE_FULL=1 npm run test:eval:live:full
+EVAL_LIVE_FULL=1 EVAL_JUDGE=1 npm run test:eval:live:full</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/mcp/fixture-server.ts#L1" rel="noreferrer" target="_blank">GitHub · MCP fixture server 实现 (L1)</a></p>
+<h2 id="judge">Judge: 开放式语义的补充</h2>
+<p>
+  Hard 断言判断<strong>事实</strong>: 工具是否调用、文件是否含 sentinel。
+  Judge 判断<strong>质量</strong>: TODO 是否反映真实执行步骤、汇总是否忠实于
+  成员结果、Agent 是否没有夸大成功。
+  </p>
+<p>
+  没有 judge, 这类问题只能用宽松正则, 等于没测。
+  但 judge LLM 本身也有不确定性, 必须严格控制。
+</p>
+<h3>关键顺序</h3>
+<ol>
+<li>先跑 hard 断言, 失败就 <code>case failed</code>, 不再跑 judge</li>
+<li>Hard 通过后, judge 用<strong>另一个 LLM</strong> 读 trace 摘要, 输出
+      <code>passed / score / summary / strengths / problems / evidence / needsHumanReview</code></li>
+<li>Judge 失败也导致 case failed, 但报告里要明确标 <code>(judge failed)</code> 防止混淆</li>
+</ol>
+<h3>Judge prompt 与 agent 隔离</h3>
+<p>
+  <strong>judge prompt 不进 agent system prompt</strong>。
+  它是 eval runner 的单独 LLM 调用, 与被测 agent 隔离。
+  Judge 模型可以和被测 agent 不同 (用 <code>JUDGE_MODEL</code> 覆盖),
+  常见选择是用更轻量的模型做 judge 降本。
+</p>
+<h3>4 层 JSON 解析降级</h3>
+<p>
+  Judge LLM 可能返回 markdown code block、额外文本、无效 JSON。
+  解析器采用 4 层降级:
+</p>
+<pre class="code-block"><code>function parseJudgeOutput(raw: string): EvalJudgeResult {
+  // 第 1 层: 直接 JSON.parse
+  try { return JSON.parse(raw); }
+  catch {}
+
+  // 第 2 层: 正则提取 ```json ... ``` 块
+  const codeBlock = raw.match(/```json\s*([\s\S]+?)\s*```/);
+  if (codeBlock) {
+    try { return JSON.parse(codeBlock[1]); } catch {}
+  }
+
+  // 第 3 层: 括号深度计数器 + 字符串引号跟踪
+  const balanced = extractBalancedJson(raw);
+  if (balanced) {
+    try { return JSON.parse(balanced); } catch {}
+  }
+
+  // 第 4 层: 降级
+  return {
+    enabled: true,
+    passed: false,
+    score: 0,
+    summary: "judge_failed",
+    strengths: [],
+    problems: ["judge output was not parseable JSON"],
+    evidence: [],
+    needsHumanReview: true,
+  };
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/team-driver.ts#L70" rel="noreferrer" target="_blank">GitHub · createLearnClaudeCodeTeamDriver (L70)</a></p>
+<p>
+  第 4 层返回的 <code>judge_failed</code> 不会影响 hard result,
+  但报告里要明确标出, 让人工排查。
+</p>
+<h3>Trace 摘要而非完整 trace</h3>
+<p>
+  Judge 不要读完整 trace (太大), 也不读 <code>llm.log</code>。
+  我们为 judge 构造一个结构化摘要:
+</p>
+<pre class="code-block"><code>interface EvalJudgeInput {
+  caseId: string;
+  title: string;
+  userQueries: string[];             // 用户问过什么
+  finalOutputs: string[];            // 每 step 最终回复
+  toolCallSummary: Array&lt;{
+    stepId: string;
+    toolName: string;
+    argsPreview: string;
+  }&gt;;
+  hardAssertionResults: EvalAssertionResult[];  // 已跑的 hard 结果
+  rubric: EvalJudgeRubric;            // 评分标准
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/agent.ts#L1" rel="noreferrer" target="_blank">GitHub · agent.ts (反例: 主代码写 if (provider) 是禁止的) (L1)</a></p>
+<p>
+  Judge 看完摘要, 给出 pass/fail + 评分 + 证据。
+  这种结构化输入让 judge 输出可解析、可断言、可追溯。
+</p>
+<h2 id="mcp-team">MCP 与 Agent Team: Harness 原型</h2>
+<p>
+  这两个方向把方法论扩展到外部协议 (MCP) 和多主体协作 (Team)。
+  本项目当前<strong>没实现生产级 MCP runtime / 真实 Team runtime</strong>,
+  这两类 suite 当前全部 <code>describe.skip</code>, 只作为 harness
+  草案保留。<strong>不要在公开文档里暗示这些是生产能力</strong>。
+</p>
+<h3>MCP harness</h3>
+<p>
+  MCP 是 JSON-RPC 风格的外部协议。Eval 设计需要<strong>可控 fixture server</strong>,
+  不走真实 GitHub / Slack / DB server, 因为:
+</p>
+<ol>
+<li>真实 server 不可控 (限流、下线、版本变化)</li>
+<li>真实 server 行为会影响 case 稳定性, 把模型不确定性叠加到协议不确定性上</li>
+<li>真实 server 可能需要凭据, 不适合 PR 自动化</li>
+</ol>
+<p>
+  Fixture server 实现 5 类 JSON-RPC 方法, 覆盖 MCP 2025-06-18 的最小子集:
+</p>
+<table class="terms">
+<thead>
+<tr>
+<th>方法</th>
+<th>用途</th>
+<th>可注入行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>initialize</code></td>
+<td>协议握手, 协商 capabilities</td>
+<td>初始化失败</td>
+</tr>
+<tr>
+<td><code>tools/list</code></td>
+<td>发现 server 暴露的工具</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>tools/call</code></td>
+<td>调用工具</td>
+<td>延迟、错误码、crash</td>
+</tr>
+<tr>
+<td><code>resources/list</code></td>
+<td>发现 server 暴露的资源</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>resources/read</code></td>
+<td>读取资源</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>
+  8 类 MCP runtime 事件进入 trace:
+  <code>mcp_server_start</code> / <code>mcp_server_stop</code> /
+  <code>mcp_initialize</code> / <code>mcp_tools_list</code> /
+  <code>mcp_tool_call</code> / <code>mcp_tool_result</code> /
+  <code>mcp_resource_read</code> / <code>mcp_error</code>。
+  配套断言: <code>mcpServerStarted</code> / <code>mcpToolListed</code> /
+  <code>mcpToolCalled</code> / <code>mcpToolResultContains</code> /
+  <code>mcpResourceRead</code> / <code>mcpErrorCode</code>。
+</p>
+<p>
+  4 类 case 覆盖: 正常工具调用 / 资源读取 / 错误恢复 / server crash。
+  第一版 transport 只做 <code>stdio</code>, <code>http</code> 后续扩展。
+</p>
+<h3>Team harness</h3>
+<p>
+  Agent Team 的关键不是"最终答案像不像", 而是<strong>协作过程是否正确</strong>。
+  Trace 必须能回答:
+</p>
+<ul>
+<li>启动了哪些 agent, 各自什么角色</li>
+<li>谁把什么任务交给谁 (handoff)</li>
+<li>谁调用了什么工具</li>
+<li>谁失败了, 失败如何被处理</li>
+<li>谁产出了什么 artifact</li>
+<li>coordinator 如何汇总</li>
+</ul>
+<p>
+  Team driver 第一版是<strong>顺序 supervisor 拓扑</strong>:
+  planner / implementer / reviewer / researcher 等成员依次运行,
+  每个成员是真实 Agent 实例, 有独立 history / compressor,
+  共享临时 workspace 和同一份 LLM client, 工具组由
+  <code>members[].tools</code> 显式声明。
+  </p>
+<p>
+  9 类 Team runtime 事件:
+  <code>team_start</code> / <code>agent_spawned</code> /
+  <code>agent_message</code> / <code>agent_tool_call</code> /
+  <code>handoff</code> / <code>artifact_produced</code> /
+  <code>agent_completed</code> / <code>agent_failed</code> /
+  <code>team_completed</code>。
+  </p>
+<p>
+  8 类 Team 断言:
+  <code>teamAgentSpawned</code> / <code>teamRoleUsed</code> /
+  <code>teamHandoffOccurred</code> / <code>teamAgentToolCalled</code> /
+  <code>teamAgentToolNotCalled</code> / <code>teamArtifactContains</code> /
+  <code>teamAllAgentsCompleted</code> / <code>teamNoUnauthorizedWrites</code>。
+</p>
+<p>
+  Team judge 读的不是完整 trace, 而是<strong>summary</strong>:
+  每个 agent 的角色、是否完成、失败原因、工具调用列表、产出 artifact 预览。
+  judge rubric 关注: 是否正确分工 / 是否忠实引用成员结果 / 是否处理失败 /
+  是否遵守权限边界 / 是否产生用户要求的 artifact。
+</p>
+<figure class="figure">
+<div class="flow-map" role="img" aria-label="Eval 5 大套件当前状态">
+<div class="flow-row">
+<span class="flow-node flow-node--accent">deterministic</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">默认 CI 跑</span>
+</div>
+<div class="flow-row">
+<span class="flow-node flow-node--accent">replay</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">默认 CI 跑</span>
+</div>
+<div class="flow-row">
+<span class="flow-node flow-node--accent">live smoke</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">EVAL_LIVE=1 开启</span>
+</div>
+<div class="flow-row">
+<span class="flow-node flow-node--accent">live regression</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">EVAL_LIVE_REGRESSION=1 开启</span>
+</div>
+<div class="flow-row">
+<span class="flow-node flow-node--accent">live full</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">EVAL_LIVE_FULL=1 开启</span>
+</div>
+<div class="flow-row">
+<span class="flow-node">MCP / Team</span>
+<span class="flow-arrow">→</span>
+<span class="flow-node">describe.skip, 仅 harness 原型</span>
+</div>
+</div>
+<figcaption>图 3 · 5 大套件当前状态. 越往下越接近真实, 越往上越快越稳。</figcaption>
+</figure>
+<h2 id="how-to-write-case">如何写好一个 case</h2>
+<p>
+  讲完 4 层梯度 + 3 种 driver + 12 个断言类型, 最后讲"如何写好一个 case"。
+  这是个心法问题, 不是 API 问题。
+</p>
+<h3>3 条心法</h3>
+<dl class="defs">
+<dt>心法 1 · 先写失败用例, 再写 driver</dt>
+<dd>
+      写 case 的正确顺序: 先写 EvalCase (期望行为),
+      再用 fake driver 跑通断言, 最后才换 in-process driver 接入。
+      这样写出来的 case 不依赖具体 driver 内部, 也不会"为了 driver 写 case"。
+    </dd>
+<dt>心法 2 · 用 sentinel 而非完整文本</dt>
+<dd>
+      真实 LLM 措辞不可预测。如果 case 断言"模型说了什么",
+      措辞稍微变就挂。改用 sentinel: 写"输出必须含 LIVE-WRITE-001",
+      写"文件必须含 status: ready"。
+      任务核心要求 + 精确短字符串, 比完整文本 golden snapshot 稳定得多。
+    </dd>
+<dt>心法 3 · live case 要写"能力退化检测", 不写"完美行为"</dt>
+<dd>
+      Live regression 不是"证明 agent 完美", 是"证明核心能力不退化"。
+      期望是"v0.1 跑通的 6 个 case, v0.2 还跑通"。如果 v0.2 多调了
+      几次工具但最终结果一样, 不算退化; 如果少调了关键工具导致
+      文件没改对, 算退化。
+    </dd>
+</dl>
+<h3>case 评审清单</h3>
+<p>
+  写完一个 case, 跑一遍下面 5 条检查:
+</p>
+<ol>
+<li>
+<strong>断言是否都是 portable</strong>?
+      <code>grep 'kind:'</code>, 看看有没有 <code>toolCalled</code> /
+      <code>transcriptEventTypes</code> 这种 instrumented 断言当主断言的。
+    </li>
+<li>
+<strong>case 是否能跑通 fake driver</strong>?
+      把 <code>tools.kind</code> 改成 <code>fake</code>, 跑一次。
+      如果挂, 说明 case 依赖 driver 内部。
+    </li>
+<li>
+<strong>是否有 <code>maxCalls</code> / <code>maxRounds</code></strong>?
+      live case 必须有, 否则可能无限循环。
+    </li>
+<li>
+<strong>workspace 边界是否合理</strong>?
+      <code>initialFiles</code> 不能有 <code>..</code> 和绝对路径。
+    </li>
+<li>
+<strong>断言失败时 trace 是否能定位</strong>?
+      故意改错一处 (比如把 sentinel 改成 <code>LIVE-WRITE-002</code>),
+      跑一次, 看 trace 能不能立刻告诉失败原因。
+    </li>
+</ol>
+<h2 id="decoupling">Eval 和 Agent 主循环如何解耦</h2>
+<p>
+  一个常被新同学问的问题: "为什么 agent.ts 不需要知道自己被测? 主循环
+  不写'如果是 test 就...' 的分支吗?"
+</p>
+<p>
+  答案: 完全不解耦, 跑 3 个项目驱动就出 bug。
+  解耦靠<strong>依赖注入</strong>, 不靠 if 分支。
+</p>
+<h3>4 个注入点</h3>
+<p>
+  Eval 测试和真实运行共用同一个 <code>createAgent()</code>, 唯一区别是
+  注入的实例不同:
+</p>
+<table class="terms">
+<thead>
+<tr>
+<th>注入项</th>
+<th>真实运行</th>
+<th>Eval scripted</th>
+<th>Eval live</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LLM client</td>
+<td><code>createLLMClient()</code></td>
+<td><code>createScriptedLLMClient()</code></td>
+<td><code>createLLMClient()</code> + <code>maxCalls</code> 限制</td>
+</tr>
+<tr>
+<td>Terminal</td>
+<td>真实 readline</td>
+<td><code>createScriptedTerminal()</code></td>
+<td>同真实</td>
+</tr>
+<tr>
+<td>Tool registry</td>
+<td>直接组装</td>
+<td><code>wrapToolRegistryForTrace()</code></td>
+<td>同真实</td>
+</tr>
+<tr>
+<td>workspace</td>
+<td>process.cwd()</td>
+<td>临时 mkdtemp 目录</td>
+<td>临时目录</td>
+</tr>
+</tbody>
+</table>
+<p>
+  Agent 主循环只看这 4 个注入的接口 (LLMClient / Terminal / ToolRegistry /
+  ProjectContext), 不知道也不关心是真实还是测试。
+  </p>
+<h3>常见反模式: if (isTest) ...</h3>
+<p>
+  有人想在 <code>agent.ts</code> 写:
+</p>
+<pre class="code-block"><code>// ❌ 错误: 污染主代码
+async function run(query: string) {
+  if (process.env.NODE_ENV === "test") {
+    // 跳过权限确认
+    // 跳过 compression
+    // 用 mock 工具
+  }
+  // ...
+}</code></pre>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/drivers/learn-claude-code/in-process-driver.ts#L1" rel="noreferrer" target="_blank">GitHub · in-process driver 边界 (反例: 拒绝时 throw 会破坏 messages) (L1)</a></p>
+<p>
+  立刻坏 3 件事:
+  </p>
+<ol>
+<li>主代码和测试逻辑绑死, 改任何一边另一边都挂</li>
+<li>测试测的是"加 if 后的代码", 不是"真实代码"</li>
+<li>production 行为和 test 行为可能漂移, case 跑通但 prod 挂</li>
+</ol>
+<p>
+  <strong>正确做法</strong>: <code>createAgent()</code> 接收所有可注入实例,
+  测试时把"假实例" 传进去, 主代码 0 改动。
+</p>
 <h2 id="trap">反例梯度</h2>
-
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">新手错法 · A</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>用真 LLM 跑 e2e 测试, 断言最终文本。</p>
-    <p><strong>为什么错:</strong>flaky + 贵 + 慢, CI 跑不起, 团队不信测试。</p>
-    <p>
-      <strong>正确做法:</strong>deterministic 主 + live 副 + judge 复盘,
-      三层各司其职。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">新手错法 · A</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> Eval Core 直接 <code>import { createAgent } from "../agent.js"</code>。
+    </p>
+<p>
+<strong>为什么错:</strong> runner 绑死当前项目内部类型, 换 driver 写不出;
+      case 写"transcript 事件 sequence = 5" 这种私有细节, 主代码改了全挂。
+    </p>
+<p>
+<strong>正确做法:</strong> Eval Core 只认识 <code>CodingAgentDriver</code> 接口,
+      当前项目实现藏在 <code>src/eval/drivers/learn-claude-code/</code> 下。
+    </p>
+</div>
+</div>
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">中级错法 · B</span>
-  </div>
-  <div class="card__body">
-    <p><strong>常见错误:</strong>断言只断最终文本, 不断行为事实。</p>
-    <p>
-      <strong>为什么错:</strong>LLM 可能 hallucinate 出对的文本, 行为完全错。
-    </p>
-    <p>
-      <strong>正确做法:</strong>断言走 Expectation 类型 (tool_called /
-      permission_asked / messages_at_least 等), 不只断 final_text。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">中级错法 · B</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> 跑 live case 不设 <code>maxCalls</code> / <code>maxRounds</code>。
+    </p>
+<p>
+<strong>为什么错:</strong> LLM 卡住或循环时, case 跑几分钟不退出, 阻塞 CI。
+    </p>
+<p>
+<strong>正确做法:</strong> 每个 live case 都设 <code>maxCalls</code> / <code>maxRounds</code> /
+      Vitest timeout (通常 30-60s)。
+    </p>
+</div>
+</div>
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">高级错法 · C</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>judge LLM 直接决定测试通过 / 失败, 写进 CI。
-    </p>
-    <p>
-      <strong>为什么错:</strong>judge 自己也不稳定, 写进 CI 就把不确定性引入 CI,
-      团队还是不信测试。
-    </p>
-    <p>
-      <strong>正确做法:</strong>judge 输出只给开发者看, 不写进 CI; CI 只跑
-      deterministic + live (opt-in)。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">高级错法 · C</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> Live case 写进用户真实 <code>~/.swoopcode</code>。
+    </p>
+<p>
+<strong>为什么错:</strong> memory / task / schedule 污染用户数据, 第二次跑
+      还会读到上次结果, 假阳性。
+    </p>
+<p>
+<strong>正确做法:</strong> <code>tools.kind = "full"</code> 必须配
+      <code>agentHome: "temp"</code>; case 结束后清空临时目录。
+    </p>
+</div>
+</div>
 <div class="card card--trap">
-  <div class="card__head">
-    <span class="card__tag">边界错法 · D</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>常见错误:</strong>trace 只记录"成功路径", 不记录"被 permission
-      拒绝的工具调用"。
-    </p>
-    <p>
-      <strong>为什么错:</strong>调试时不知道"为什么 agent 没做某件事", 可能
-      permission 拒了但 trace 没记录。
-    </p>
-    <p>
-      <strong>正确做法:</strong>trace 记录所有事件, 包括 permission decision
-      (allow / ask / deny), judge 反馈能基于完整 trace。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">边界错法 · D</span>
 </div>
-
+<div class="card__body">
+<p>
+<strong>常见错误:</strong> Judge 失败时让 case 通过, 或者让 judge 覆盖 hard 失败。
+    </p>
+<p>
+<strong>为什么错:</strong> judge LLM 也有不确定性, 让 judge 覆盖硬规则等于
+      把模型不确定性放回主路径, 整个测试失去意义。
+    </p>
+<p>
+<strong>正确做法:</strong> 顺序固定: hard 先跑, hard 失败 case 直接 failed;
+      judge 单独评分, judge 失败 case 也标 failed (报告里加 <code>(judge failed)</code> 区分)。
+    </p>
+</div>
+</div>
 <h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
 <div class="card card--validation">
-  <div class="card__head">
-    <span class="card__tag">Validation · eval 专题</span>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>deterministic 1000 次结果一致:</strong>同一 scenario 跑 1000 次,
-      断言 trace 除了时间戳外完全一致 (deepEqual)。
-    </p>
-    <p>
-      <strong>trace 落盘 + 回放:</strong>saveTrace + loadTrace 之后, 跑 driver
-      回放, 断言产出的 trace 与原 trace 一致。
-    </p>
-    <p>
-      <strong>Expectation 覆盖行为事实:</strong>scenario 期望"至少调 1 次
-      read_file", trace 里 tool_called 事件 ≥ 1。
-    </p>
-    <p>
-      <strong>CI 不依赖真 LLM:</strong>CI 配置里没有 ANTHROPIC_API_KEY
-      等环境变量, 跑测试不需要任何 LLM 凭证。
-    </p>
-    <p>
-      <strong>judge 不写进 CI:</strong>judge 命令行工具存在, 但 CI 脚本不调用。
-    </p>
-  </div>
+<div class="card__head">
+<span class="card__tag">Validation · 专题 B</span>
 </div>
-
-<h2 id="lookback">回望第 00–15 章: 哪些原则在 eval 中兑现了</h2>
+<div class="card__body">
+<p>
+<strong>Eval Core 不知道 driver 内部:</strong> 在 <code>src/eval/core/</code> 下
+      <code>grep -n 'createAgent\|agent.ts\|tasks.ts\|memory.ts'</code> 应当 0 行。
+    </p>
+<p>
+<strong>deterministic suite 默认跑通:</strong> <code>npm run test:eval</code> 不用
+      任何 env, 通过所有 scripted case。
+    </p>
+<p>
+<strong>Live case 默认 skip:</strong> 不设 <code>EVAL_LIVE*</code> 时,
+      <code>npx vitest run src/eval/live/</code> 全部 skipped, 不应 failed。
+    </p>
+<p>
+<strong>trace 不写仓库目录:</strong> 不设 <code>EVAL_TRACE_DIR</code> 时,
+      <code>git status</code> 不应出现 trace JSON。
+    </p>
+<p>
+<strong>临时 workspace 隔离:</strong> <code>tools.kind = "full"</code> 配
+      <code>agentHome: "temp"</code> 时, 跑完 case 后 <code>~/.swoopcode</code>
+      不应被改动 (可用 stat 时间戳验证)。
+    </p>
+<p>
+<strong>judge 失败标记:</strong> mock 一个返回非 JSON 的 judge LLM,
+      case 标 <code>failed</code> 且 report 出现 <code>(judge failed)</code>。
+    </p>
+</div>
+</div>
+<h2 id="lookback">回望第 00–15 章: 哪些原则在本章兑现了</h2>
 <ul>
-  <li>
-    <strong>fake LLM Cookbook 复用:</strong>第 01 章的 fake LLM 在 eval
-    层直接复用, 不重新发明。
-  </li>
-  <li>
-    <strong>事实与视图分离:</strong>trace 是事实, report 是视图, judge
-    反馈是另一个视图。三者职责清晰。
-  </li>
-  <li>
-    <strong>防自欺原则:</strong>eval 的核心就是"用 trace 取代肉眼判断",
-    直接兑现第 00 章的红灯 1。
-  </li>
-  <li>
-    <strong>append-only 原则:</strong>trace 是 append-only 事件流, 不修改不回放,
-    eval 重放是基于已存 trace 重现, 不修改 trace。
-  </li>
+<li>
+<strong>Composition Root 唯一感知 driver:</strong> 第 00 章 composition root
+      模式让 Eval Core 通过 driver 边界解耦, 不直接依赖 <code>createAgent()</code>。
+    </li>
+<li>
+<strong>依赖注入</strong>: scripted LLM / scripted terminal / trace wrapper
+      全是注入, 没有在 <code>agent.ts</code> 里写"如果是 test 就..." 分支。
+      跟第 04 章工厂模式 + 第 07 章 permission 注入一致。
+    </li>
+<li>
+<strong>Stable system prompt 优先</strong>: judge prompt 不进 agent system prompt,
+      eval 测试不污染主 agent 行为。
+    </li>
+<li>
+<strong>失败可观测</strong>: trace JSON 含完整 runtime events + assertion
+      evidence, 跟第 11 章 recovery + transcript 事件流一脉相承。
+    </li>
 </ul>
-
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
-  <dt>eval 跨模型对比</dt>
-  <dd>
-    同一 scenario 跑 Claude / GPT / Gemini, 收集 trace 对比, 反馈给 model-policy
-    专题章。
-  </dd>
-  <dt>eval 反馈 prompt 优化</dt>
-  <dd>
-    judge 反馈自动汇总成"Prompt Card 改进建议", 跑出一份 diff, 人工 review
-    后合并。
-  </dd>
-  <dt>eval 长期积累</dt>
-  <dd>
-    跑过的 scenario 和 trace 沉淀为 regression suite, 后续章节改动时跑全量,
-    看是否破坏老行为。
-  </dd>
-  <dt>eval 性能测试</dt>
-  <dd>
-    trace 里记录 token 用量 / 工具调用次数 / 压缩触发次数, 跑性能 regression。
-  </dd>
+<dt>真实 MCP runtime 接入</dt>
+<dd>
+      当前 MCP harness 原型只能跑 fixture server。等真实 MCP SDK + transport
+      落地后, fixture harness 可平滑切换到真实 server 路径。
+    </dd>
+<dt>真实 Agent Team runtime 接入</dt>
+<dd>
+      当前顺序 supervisor 是简化的拓扑, 不能覆盖并行调度、动态成员、消息总线。
+      等真实 Team runtime 落地后, <code>team-driver.ts</code> 可换为真实 runtime adapter。
+    </dd>
+<dt>Eval 结果驱动开发</dt>
+<dd>
+      当前 eval 是验证工具。未来可以让 eval 失败自动开 issue, 或把 eval
+      report 直接喂给下个版本的开发 plan。
+    </dd>
 </dl>
-
-<h2 id="vibe-coding-eval">本次如何 vibe code: eval 专题的三件套</h2>
-
-<h3 id="vibe-feed-eval">拆卡: 4 轮迭代的具体产物</h3>
-<ol>
-  <li>
-    <strong>第 1 轮 · 接口</strong>。让 LLM 给出 <code>Scenario</code> /
-    <code>Driver</code> / <code>Trace</code> / <code>Expectation</code> /
-    <code>Report</code> 五个 interface。本轮不写实现, 重点钉"deterministic 主 +
-    live 副 + judge 复盘"。
-  </li>
-  <li>
-    <strong>第 2 轮 · 接线</strong>。让 LLM 给出
-    <code>src/eval/</code> 目录结构, driver 是 stub (永远返回 passed=true)。本轮
-    review 重点: eval 层不修改 src/ 下任何实现。
-  </li>
-  <li>
-    <strong>第 3 轮 · 边界</strong>。让 LLM 写 driver + trace + assertion 实现 +
-    1 个 example scenario。本轮 review 重点: trace 记录所有事件 (含 permission
-    decision), assertion 走 Expectation 类型不只断文本。
-  </li>
-  <li>
-    <strong>第 4 轮 · 验证</strong>。让 LLM 写
-    <code>test/eval.test.ts</code>。本轮 review 重点: "deterministic 1000
-    次结果一致" 和 "trace 落盘 + 回放" 两条必须有 spy 验证。
-  </li>
-</ol>
-
-<h3 id="vibe-review-eval">Review: eval 专题专属 checklist</h3>
-<ol>
-  <li>
-    <strong>CI 不依赖真 LLM。</strong>验证: 跑
-    <code>npm run test</code> 不需要任何 API key。
-  </li>
-  <li>
-    <strong>trace 记录所有事件 (含 permission)。</strong>验证:
-    <code>grep -n 'permission_decision' src/eval/trace.ts</code> ≥ 1 行。
-  </li>
-  <li>
-    <strong>assertion 走 Expectation 类型。</strong>验证:
-    <code>grep -n 'final_text_contains' src/eval/assertion.ts</code>
-    应当是多个之一, 不应当是唯一断言类型。
-  </li>
-  <li>
-    <strong>judge 不写进 CI。</strong>验证: judge 命令行存在, 但 CI 配置 (例如
-    <code>.github/workflows/*.yml</code>) 不调用。
-  </li>
-  <li>
-    <strong>trace 落盘 + 回放。</strong>验证:
-    <code>saveTrace + loadTrace</code> 之后 driver 跑同一 scenario, trace 一致
-    (deepEqual)。
-  </li>
-</ol>
-
-<h3 id="vibe-debug-eval">调试: eval 专题典型伪装</h3>
-<ol>
-  <li>
-    <strong>伪装 A · 跑真 LLM 写进 CI。</strong>症状: CI 跑测试时要求
-    ANTHROPIC_API_KEY。验证:
-    <code>unset ANTHROPIC_API_KEY; npm test</code> 应当全部通过。
-  </li>
-  <li>
-    <strong>伪装 B · assertion 只断最终文本。</strong>症状: 期望 "agent
-    应该读文件" 写成 <code>final_text_contains("createAgent")</code>。验证:
-    写一个 LLM 不读文件但输出含 "createAgent" 的 scenario, deterministic
-    测试应当失败。
-  </li>
-  <li>
-    <strong>伪装 C · judge 写进 CI 自动判通过 / 失败。</strong>症状: CI 跑
-    <code>npm run eval:judge</code> 自动判通过。验证: 删掉 CI 配置里的 judge
-    调用, 仍然全部通过, judge 只在本地 opt-in。
-  </li>
-</ol>
-
-<h3 id="vibe-iterate-eval">迭代: eval 专题 4 个 commit 节点</h3>
-<ol>
-  <li>
-    <code
-      >feat(eval): 钉 Scenario / Driver / Trace / Expectation / Report
-      接口</code
-    >
-    —— tsc 通过, 无实现。
-  </li>
-  <li>
-    <code
-      >feat(eval): createDriver + createTraceRecorder + 1 个 example scenario
-      stub</code
-    >
-    —— tsc 通过, driver 永远 passed=true。
-  </li>
-  <li>
-    <code
-      >feat(eval): driver 跑 scenario + trace 落盘 + assertion 走
-      Expectation</code
-    >
-    —— 跑通 Validation 卡片前 3 条。
-  </li>
-  <li>
-    <code
-      >test(eval): 1000 次 deterministic 一致 + trace 回放 + CI 不依赖 API
-      key</code
-    >
-    —— 全绿。
-  </li>
-</ol>
-
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
-  <div class="card__head">
-    <span class="card__tag">Prompt Card · eval 专题</span>
-    <button class="card__copy" type="button" data-copy-card>复制</button>
-  </div>
-  <div class="card__body">
-    <p>
-      <strong>目标:</strong>实现 eval 层, 用 deterministic 主 + live 副 + judge
-      复盘三层策略, 测试不确定的 Coding Agent。
-    </p>
-    <p>
-      <strong>场景:</strong>开发者跑一个 scenario "agent 应该读文件后回答",
-      deterministic 测试断言 trace 含 read_file 工具调用 + messages 末尾是
-      assistant 消息。跑 1000 次结果一致。
-    </p>
-    <p>
-      <strong>模块:</strong> <code>src/eval/driver.ts</code> (新) 跑 scenario;
-      <code>src/eval/trace.ts</code> (新) 记录行为;
-      <code>src/eval/assertion.ts</code> (新) Expectation 类型;
-      <code>src/eval/judge.ts</code> (新, 不进 CI) judge LLM 反馈。
-    </p>
-    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
-    <ul>
-      <li>CI 不依赖真 LLM, 不读环境变量里的 API key</li>
-      <li>
-        trace 记录所有事件, 含 permission_decision / tool_call /
-        reminder_injected / compaction
-      </li>
-      <li>assertion 走 Expectation 类型, 不只断 final_text</li>
-      <li>judge 不写进 CI, 只本地 opt-in</li>
-      <li>trace 落盘走 atomic write, 可回放</li>
-    </ul>
-    <p><strong>验证 (用 fake LLM + spy, 逐条落到 vitest):</strong></p>
-    <ul>
-      <li>同一 scenario 跑 1000 次, trace 除了时间戳完全一致 (deepEqual)</li>
-      <li>
-        saveTrace + loadTrace 后, driver 跑同一 scenario, 产出 trace 与原 trace
-        一致
-      </li>
-      <li>
-        scenario 期望 "至少调 1 次 read_file", trace 里 tool_called 事件 ≥ 1
-      </li>
-      <li>unset ANTHROPIC_API_KEY 后 npm test 全部通过</li>
-      <li>CI 脚本不调用 judge, judge 仅本地 opt-in</li>
-    </ul>
-  </div>
+<div class="card__head">
+<span class="card__tag">Prompt Card · 专题 B</span>
+<button class="card__copy" data-copy-card="" type="button">复制</button>
 </div>
-
+<div class="card__body">
+<p>
+<strong>目标:</strong> 给 harness 加一套测试不确定系统的方法论, 让 runtime
+      不确定性和模型不确定性分开测, 切测试范围 = 换 driver / 换 LLM plan,
+      不改 case 主体。
+    </p>
+<p>
+<strong>场景:</strong> 项目主循环大改后, 跑 <code>npm run test:eval</code>
+      看 scripted suite 是否挂; 发布前跑
+      <code>EVAL_LIVE_REGRESSION=1</code> + <code>EVAL_JUDGE=1</code>
+      看 core tools 真实 LLM 行为是否退化; 复杂工具系统变更后跑
+      <code>EVAL_LIVE_FULL=1</code> 看 TODO/Memory/Skill/SubAgent 是否正常。
+    </p>
+<p>
+<strong>必须实现的能力 (功能导向, 不限定代码结构):</strong></p>
+<ul>
+<li>
+<strong>中立 driver 边界</strong>
+<ul>
+<li>eval runner 只认识 <code>CodingAgentDriver</code> 接口 (startCase / send / readEvents / close)</li>
+<li>runner 不直接 import harness 主代码</li>
+<li>换被测对象 = 换 driver 实现, runner 不动</li>
+</ul>
+</li>
+<li>
+<strong>4 层梯度</strong>
+<ul>
+<li>deterministic (scripted LLM, 默认 CI 跑)</li>
+<li>replay (fixture 文件, 默认 CI 跑)</li>
+<li>live smoke (真实 LLM, 显式 opt-in)</li>
+<li>live regression (真实 LLM + hard 断言 + 可选 judge, 显式 opt-in)</li>
+</ul>
+</li>
+<li>
+<strong>断言分两类</strong>
+<ul>
+<li>portable: fileExists / fileContains / finalOutputContains / noWritesOutsideWorkspace (跨 driver 可用)</li>
+<li>instrumented: toolCalled / toolCallCount / permissionPromptShown (依赖 runtime events)</li>
+<li>case 主体尽量用 portable, instrumented 作为补充调试</li>
+</ul>
+</li>
+<li>
+<strong>case 结构</strong>
+<ul>
+<li>每个 case 有独立临时 workspace, 跑完默认清理</li>
+<li>full-tools case 强制用临时 <code>agentHome</code>, 不污染用户真实数据</li>
+<li>steps 数组复用同一 driver 实例, 支持多 turn 共享 context</li>
+<li>步骤级断言可挂 stepId, 验证"第一步只读, 第二步才写"</li>
+</ul>
+</li>
+<li>
+<strong>trace 是事实来源</strong>
+<ul>
+<li>case 失败时 trace 必须能告诉"哪一步、哪个工具、什么参数、什么结果"</li>
+<li>trace 不写仓库目录, 由 <code>EVAL_TRACE_DIR</code> 显式开启</li>
+<li>runtime events 标准化: tool_call / tool_result / llm_call / llm_response / permission_prompt / log / raw / driver_error</li>
+</ul>
+</li>
+<li>
+<strong>judge 边界</strong>
+<ul>
+<li>hard 断言先跑, hard 失败 case 直接 failed, 不再跑 judge</li>
+<li>judge 用单独的 LLM 调用, prompt 不进 agent system prompt</li>
+<li>judge 必须输出 JSON, 解析失败标 <code>judge_failed</code> 不影响 hard result</li>
+<li>judge 模型可与被测 agent 不同 (用 <code>JUDGE_MODEL</code> 覆盖)</li>
+</ul>
+</li>
+<li>
+<strong>live safety</strong>
+<ul>
+<li>所有 live suite 默认 skip, 显式 env 开启</li>
+<li>每个 live case 设 <code>maxCalls</code> / <code>maxRounds</code> / Vitest timeout</li>
+<li>live case 不用完整回复文本做 golden snapshot</li>
+<li>live case 只用临时 workspace + 临时 agentHome</li>
+</ul>
+</li>
+</ul>
+<p><strong>验证 (用 fake driver + scripted LLM, 逐条断言):</strong></p>
+<ul>
+<li>eval runner 只看 driver 接口, core 模块不 import harness 主代码</li>
+<li>deterministic case 用 scripted LLM, 跑通 hard 断言</li>
+<li>同一 case 多 step 复用 driver 实例, 共享 history</li>
+<li>trace JSON 含 runtime events + assertion evidence, 失败时能定位</li>
+<li>judge mock 返回非 JSON, case 标 failed 但不抛异常</li>
+<li>live case 默认 skip, 设 <code>EVAL_LIVE_REGRESSION=1</code> 才跑</li>
+</ul>
+</div>
+</div>
 <h2 id="practice">本章练习</h2>
 <ol>
-  <li>
-    故意把 CI 配置里加 ANTHROPIC_API_KEY 依赖, 跑测试, 看"CI 不依赖真 LLM"
-    是否抓到。
+<li>
+    故意在 <code>runner.ts</code> 写 <code>import { createAgent } from "../agent.js"</code>,
+    跑测试, 看"Eval Core 不知道 driver 内部"是否抓到 (切 driver 后挂)。
   </li>
-  <li>
-    把 assertion 改成只断 final_text, 跑测试, 看"Expectation 覆盖行为事实"
-    是否抓到 (写一个 hallucinate 的 scenario)。
+<li>
+    写一个 live case 不设 <code>maxCalls</code>, 用一个会循环调工具的 scripted response 模拟, 跑测试, 看"Live case 默认 skip / maxCalls" 是否抓到 (超时挂)。
   </li>
-  <li>
-    把 judge 写进 CI, 跑测试, 看"judge 不写进 CI" 是否抓到 (CI 配置 grep 验证)。
+<li>
+    让 <code>tools.kind = "full"</code> 配 <code>agentHome</code> 指向真实路径, 跑测试, 看"临时 agentHome 隔离" 是否抓到 (写入真实数据)。
   </li>
 </ol>
-
 <h2 id="summary">本章小结</h2>
 <p>
-  本专题给 harness 加了 eval 层, 用三层策略测试不确定的 Coding Agent:
-  deterministic 主 (CI 必跑, 跑 fake LLM, 0 token 成本) + live 副 (本地 opt-in,
-  跑真 LLM, 中等成本) + judge 复盘 (不进 CI, 单独 review, 高成本)。trace 是核心,
-  记录所有行为事件 (含 permission decision), 可落盘可回放。 assertion 走
-  Expectation 类型, 不只断最终文本。
+  测试 Coding Agent 的核心是<strong>把 3 类不确定性分开</strong>。
+  </p>
+<ul>
+<li>
+<strong>Runtime 正确性</strong> 用 deterministic scripted LLM 守住,
+      默认 CI 跑, 不依赖 API key。
+    </li>
+<li>
+<strong>工具系统能力</strong> 用 live regression 跑真实 LLM + hard 断言,
+      发布前 / 大改后触发, 默认 skip。
+    </li>
+<li>
+<strong>开放语义质量</strong> 用 judge 补充 hard 跑不到的部分, judge 失败
+      也标 failed 但不影响 hard result。
+    </li>
+</ul>
+<p>
+  4 层梯度 + 临时 workspace + 临时 agentHome + 中立 driver 边界 + 标准化
+  trace + 解析鲁棒的 judge = 一套"跑得通"和"跑得稳"都能验的方法论。
+  </p>
+<p>
+  MCP 和 Agent Team 也属于同一套方法论, 但当前仅作为 harness 原型
+  保留, 等真实 runtime 落地后再恢复 opt-in 运行。
 </p>
+<h2 id="how-to-write-eval-prompt-card">如何写好一个 eval case: 6 段 Prompt Card 模板</h2>
+<p>
+  读到这里, 你应该已经知道 eval 系统"能做什么"。 这一节讲"如果你想
+  自己 vibe 一组测试 case, 怎么写 Prompt Card"。
+  </p>
+<p>
+  这一节按第 00 章"6 段 Prompt Card 模板" 展开, 但专门针对 eval case
+  写。 你可以直接复制本节的整段 prompt 喂给大模型, 让它生成符合
+  harness 结构的 EvalCase 对象。
+  </p>
+<h3>第 1 段: 目标 (Goal)</h3>
+<p>
+  目标段回答 "我想让 LLM 帮我写什么测试"。 这一段必须含
+  <strong>测试边界</strong> (P0/P1/P2/P3 哪一层) 和 <strong>驱动边界</strong>
+  (scripted / replay / live / judge 哪几种)。
+  </p>
+<pre class="code-block"><code>// 差
+目标: 写一个 eval case 测试 run_write
+
+// 改
+目标: 写一个 live regression case, 验证 agent 调 run_write 创建文件
+      时会嵌入稳定 sentinel, 跨 LLM 升级不退化</code></pre>
+<p>
+  <strong>关键反问</strong>: "这段 case 跑通后, 我能放心地说'这个能力不退化'
+  吗?" 如果不能, 说明目标没钉死。
+</p>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/cases/deterministic.test.ts#L1" rel="noreferrer" target="_blank">GitHub · 现有 deterministic suite 模板 (L1)</a></p>
+<h3>第 2 段: 场景 (Scenario)</h3>
+<p>
+  场景段必须能讲一个具体用户故事。 一段对话能走通, 不是抽象描述。
+  </p>
+<pre class="code-block"><code>// 差
+场景: 测文件写入
+
+// 改
+场景: 用户说 "Create reports/eval-contract.md with these exact lines:
+      case-id: LIVE-WRITE-001 / status: ready / owner: eval"。
+      agent 调 run_write 写文件, 我们验证:
+      1. 文件被创建
+      2. 3 行 sentinel 都在
+      3. 没写到 workspace 外</code></pre>
+<p>
+  <strong>关键反问</strong>: "一个真人读这段, 知道'用户说了什么 + 期望
+  什么' 吗?" 如果还要解释, 写得太抽象。
+</p>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-regression-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · 现有 live regression 案例 (L1)</a></p>
+<h3>第 3 段: 工具与步骤 (Tools &amp; Steps)</h3>
+<p>
+  这一段声明 case 跑什么 LLM 计划、用什么工具集、走几步。
+  </p>
+<pre class="code-block"><code>// 改
+工具与步骤:
+  driver:
+    kind: learn-claude-code-in-process
+    llm: { kind: live, live: { maxCalls: 8 } }   // 真实 LLM, 限 8 次
+    tools: { kind: core }                         // 真实核心工具
+  steps:
+    - id: write
+      query: "Create reports/eval-contract.md with these exact lines:
+             case-id: LIVE-WRITE-001 ..."
+    # 单 step, 一次写完</code></pre>
+<p>
+  3 个必须钉死的字段:
+</p>
+<ol>
+<li>
+<strong>LLM 计划</strong>: scripted / replay / live 之一。 live 必须设
+      <code>maxCalls</code>, 防止 LLM 无限循环。
+    </li>
+<li>
+<strong>工具集</strong>: fake / core / full 之一, 显式声明
+      <code>agentHome: "temp"</code> (full 时), 防止污染用户数据。
+    </li>
+<li>
+<strong>步骤数</strong>: 单 step (单轮) 还是多 step (多轮共享 context)。
+      多 step 必填 <code>id</code> 字段, 给 step 级断言用。
+    </li>
+</ol>
+<p>
+  <strong>关键反问</strong>: "LLM 写错 / 写多 / 写少一步, 都会影响断言结果吗?"
+  如果是, 步骤数要明确。
+</p>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/case-schema.ts#L268" rel="noreferrer" target="_blank">GitHub · EvalCase 类型定义 (L268)</a></p>
+<h3>第 4 段: 边界 (Checklist)</h3>
+<p>
+  边界段是 "LLM 必须遵守的硬规则", 每条<strong>可验证</strong>。
+  </p>
+<pre class="code-block"><code>// 差
+边界: 代码要清晰
+
+// 改
+边界 (LLM 必须遵守的 checklist):
+  - 必须用 run_write 工具, 不允许 run_edit 或 run_bash "echo &gt;" 替代
+  - 写入路径必须是 reports/eval-contract.md, 不允许其他路径
+  - 文件必须含 3 行精确 sentinel: case-id: LIVE-WRITE-001 /
+    status: ready / owner: eval
+  - 跨模型升级后行为不退化 (用 fileContains 验证, 不用 golden snapshot)
+  - maxCalls=8, 跑超 8 次自动 fail, 避免烧钱</code></pre>
+<p>
+  5 条边界全部可断言:
+  </p>
+<ol>
+<li>必须用哪个工具 → 验证 <code>toolCalled</code></li>
+<li>路径限制 → 验证 <code>fileContains</code></li>
+<li>sentinel 内容 → 验证 <code>fileContains(text="case-id: LIVE-WRITE-001")</code></li>
+<li>不用 golden snapshot → 写断言时<strong>故意</strong>避免字符串相等</li>
+<li>maxCalls 上限 → 验证 case 跑超 8 次 fail</li>
+</ol>
+<p>
+  <strong>关键反问</strong>: "这 5 条每条都能在 vitest 里写一条 <code>expect()</code> 吗?"
+  如果某条不能, 那就是空话, 删掉。
+</p>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/core/assertions.ts#L35" rel="noreferrer" target="_blank">GitHub · runAssertions 断言执行器 (L35)</a></p>
+<h3>第 5 段: 验证 (Verification)</h3>
+<p>
+  验证段是"用 fake LLM + fake tool 逐条断言"。 至少 4 条, 每条对应
+  边界段的一条。
+  </p>
+<pre class="code-block"><code>// 改
+验证 (用 fake LLM + vitest, 逐条断言):
+  - allStepsCompleted (case 跑完一轮 step)
+  - toolCalled("run_write") (验证用了对的工具)
+  - fileExists("reports/eval-contract.md") (验证文件被创建)
+  - fileContains("reports/eval-contract.md", "case-id: LIVE-WRITE-001") (验证 sentinel)
+  - fileContains("reports/eval-contract.md", "status: ready")
+  - fileContains("reports/eval-contract.md", "owner: eval")
+  - noWritesOutsideWorkspace (验证没写到 workspace 外)
+  - allToolsSucceeded (验证工具没返回 error)</code></pre>
+<p>
+  8 条断言, 6 个 portable (fileExists / fileContains / noWrites / allTools) +
+  2 个 instrumented (toolCalled / allStepsCompleted)。
+  </p>
+<p>
+  <strong>关键反问</strong>: "如果我故意改一行 sentinel (把 LIVE-WRITE-001 改成
+  LIVE-WRITE-002), 这条断言会立刻挂吗?" 如果不会, 断言设计错了。
+</p>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/live/live-regression-suite.test.ts#L1" rel="noreferrer" target="_blank">GitHub · 完整 live regression 案例参考 (L1)</a></p>
+<h3>第 6 段: 整套 Prompt (可复制粘贴)</h3>
+<p>
+  把前 5 段拼一起, 就是直接喂给大模型的 prompt。 完整模板:
+</p>
+<pre class="code-block"><code>帮我写一个 eval case, 目标如下:
+
+目标: 写一个 live regression case, 验证 agent 调 run_write 创建文件
+      时会嵌入稳定 sentinel, 跨 LLM 升级不退化
+
+场景: 用户说 "Create reports/eval-contract.md with these exact lines:
+      case-id: LIVE-WRITE-001 / status: ready / owner: eval"。
+      agent 调 run_write 写文件, 我们验证文件被创建、3 行 sentinel 都在、
+      没写到 workspace 外。
+
+工具与步骤:
+  driver: { kind: "learn-claude-code-in-process",
+            llm: { kind: "live", live: { maxCalls: 8 } },
+            tools: { kind: "core" } }
+  steps: [{ query: "Create reports/eval-contract.md with these exact lines: ..." }]
+
+边界 (LLM 必须遵守的 checklist):
+  - 必须用 run_write 工具, 不允许 run_edit / run_bash 替代
+  - 路径必须是 reports/eval-contract.md
+  - 文件必须含 3 行精确 sentinel
+  - 跨 LLM 升级行为不退化
+  - maxCalls=8
+
+验证 (用 fake LLM + vitest):
+  - allStepsCompleted
+  - toolCalled("run_write")
+  - fileExists("reports/eval-contract.md")
+  - 3 条 fileContains 验证 sentinel
+  - noWritesOutsideWorkspace
+  - allToolsSucceeded
+
+输出: 完整的 EvalCase 对象 (TypeScript 代码), 放在 src/eval/live/ 下
+       新建一个 .test.ts 文件, 命名 live-core-write-report-with-sentinels.test.ts。
+       注释里说明 6 段 Prompt Card 每一段对应的字段。</code></pre>
+<p>
+  把这段 prompt 复制给大模型, 大模型会按 6 段对应字段生成 EvalCase
+  对象 + vitest 测试。 你的 review checklist 跟着 6 段走, 每段一段
+  review 点。
+  </p>
+<h3>3 个常见 prompt card 错误</h3>
+<p>
+  学生 vibe eval case 时最容易踩的 3 个坑:
+</p>
+<dl class="defs">
+<dt>错误 1 · 边界用空话, 不可验证</dt>
+<dd>
+      "代码要清晰" / "跑得通" / "边界要严" — 这种 prompt 让 LLM 写
+      出来"看起来对" 但实际跑不过测试。 每条边界必须能转成一条
+      <code>expect()</code>。
+    </dd>
+<dt>错误 2 · 断言依赖措辞 (golden snapshot)</dt>
+<dd>
+      写 "<code>finalOutputContains("看起来很对")"</code> 这种断言,
+      真实 LLM 升级后措辞变化就挂。 改用 sentinel 短字符串:
+      <code>finalOutputContains("LIVE-WRITE-001")</code>。
+    </dd>
+<dt>错误 3 · 写完 case 不跑 dry run</dt>
+<dd>
+      LLM 生成 case 后直接进 live suite, 跑超 maxCalls / fixture
+      文件读不到 / 工作区边界违规, 排查 1 小时。 流程: scripted LLM
+      dry run 一次 (5 秒) → fake driver 跑通 (3 秒) → 上 live (1 分钟)。
+    </dd>
+</dl>
+<h3>把这节当 checklist 用</h3>
+<p>
+  写完 prompt card 后, 用这 5 个反问自检:
+</p>
+<ol>
+<li>
+<strong>目标段</strong>: "跑通后, 我能说'这个能力不退化' 吗?" 不行就重写。
+    </li>
+<li>
+<strong>场景段</strong>: 真人读完, 知道"用户说什么 + 期望什么" 吗? 不知道就
+    加具体例子。
+    </li>
+<li>
+<strong>工具步骤</strong>: 钉死 LLM plan + 工具集 + 步骤数, 别留模糊。
+    </li>
+<li>
+<strong>边界段</strong>: 每条边界都能写一条 <code>expect()</code> 吗? 不能就
+    删或重写。
+    </li>
+<li>
+<strong>验证段</strong>: 故意改 1 个 sentinel, 立刻挂吗? 不挂就断言写错了。
+    </li>
+</ol>
+<p>
+  5 条都过了, 你的 prompt card 就可以喂给大模型 vibe 出来一个
+  "跑得通、跑得稳" 的 eval case。
+  </p>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/eval/README.md#L1" rel="noreferrer" target="_blank">GitHub · eval 系统使用文档 (L1)</a></p>
+<h2 id="next">下一章伏笔</h2>
+<p>
+  专题 B 解决了"测试不确定系统"。剩下两个问题留给后续:
+  <strong>Reference 查阅页</strong>汇总术语表 / Prompt Pack / 验证手册,
+  供学生在写 case / 调 harness 时快速查; <strong>网页版教程</strong>继续
+  沿主线 / 专题 / Reference 三栏展开, 让学生可以离线查阅整条教学叙事。
+  </p>
+</content>

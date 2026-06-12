@@ -15,3 +15,5 @@ skills/
 web/temp/
 doc/web-tutorial-plan.md
 doc/todo.md
+tmp/
+.DS_Store
