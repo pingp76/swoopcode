@@ -10,6 +10,12 @@ npm run test:eval
 
 # 运行所有 eval 相关测试（含 runner 集成测试）
 npx vitest run src/eval/
+
+# 清理过期 eval 临时产物（默认 7 天）
+npm run eval:cleanup
+
+# 先预览会删除什么
+npm run eval:cleanup -- --dry-run
 ```
 
 ## 设计原则
@@ -17,7 +23,7 @@ npx vitest run src/eval/
 - **确定性**：所有 case 使用 scripted LLM，不依赖真实模型，确保任何环境都能稳定通过
 - **可移植**：Eval Core 不直接依赖当前项目内部模块（agent.ts、llm.ts 等），只认识 `CodingAgentDriver` 接口
 - **可观测**：通过 instrumented assertions 验证工具调用、权限确认等内部行为
-- **隔离性**：每个 case 在独立临时 workspace 中运行，自动清理
+- **隔离性**：每个 case 在独立临时 workspace 中运行，默认自动清理；失败调试产物通过 TTL manifest 和 `npm run eval:cleanup` 定期回收
 
 ## Case 结构
 
@@ -199,6 +205,31 @@ EVAL_TRACE_DIR=./eval-traces npm run test:eval
 ```
 
 Trace 文件包含：case 信息、步骤痕迹、runtime events、断言结果。
+
+## 临时产物清理
+
+Eval 会创建三类临时产物：
+
+1. **workspace**：每个 case 的隔离工作目录，默认通过后立即删除
+2. **agentHome**：full-tools / team eval 的临时持久化根目录，保存 Memory、Skill、Task、Schedule、Output 等状态
+3. **trace**：开启 `trace.enabled` 或 `EVAL_TRACE_DIR` 后写出的 `*.trace.json`
+
+当 case 设置 `workspace.keepOnFailure: true` 且运行失败时，runner 会保留 workspace；full-tools / team driver 也会同步保留自己的临时 `agentHome`。这些目录会写入 `.eval-artifact.json`，记录 `caseId`、`createdAt` 和 `expiresAt`，便于后续清理。
+
+定期清理命令：
+
+```bash
+# 删除默认 OS tmpdir 下超过 7 天的 eval 产物
+npm run eval:cleanup
+
+# CI 中常用：删除超过 24 小时的残留
+npm run eval:cleanup -- --older-than 24h
+
+# 本地接入前先预览
+npm run eval:cleanup -- --dry-run
+```
+
+清理器只扫描白名单前缀（如 `eval-`、`learn-claude-eval-home-`、`learn-claude-team-home-` 等），不会递归扫描任意临时目录。`eval-traces` 目录中只删除过期的 `*.trace.json` 文件，避免误删手工放入的其他说明文件。
 
 ## 编写 Core Tool Case 的注意事项
 

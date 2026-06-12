@@ -50,6 +50,7 @@ import {
   type EvalMcpRuntime,
 } from "./mcp-runtime.js";
 import { emitTeamEvent, previewTeamText } from "../../team/team-trace.js";
+import { writeEvalArtifactManifest } from "../../core/temp-cleanup.js";
 
 interface MemberRunReport {
   agentId: string;
@@ -194,9 +195,23 @@ export async function createLearnClaudeCodeTeamDriver(
     async close(options): Promise<void> {
       terminal.close();
       await mcpRuntime?.cleanup();
-      if (agentHome && options?.keepArtifacts !== true) {
-        await rm(agentHome, { recursive: true, force: true });
+      if (!agentHome) {
+        return;
       }
+      if (options?.keepArtifacts === true) {
+        try {
+          // Team eval 的成员共享一个临时 agentHome。失败时保留可帮助排查成员状态，
+          // 但同样写入过期 manifest，避免长期 live eval 后积累过多目录。
+          await writeEvalArtifactManifest(agentHome, {
+            caseId: context?.caseId ?? "unknown",
+            kind: "agentHome",
+          });
+        } catch {
+          // manifest 写入失败不影响失败现场保留；GC 仍可按 mtime 兜底。
+        }
+        return;
+      }
+      await rm(agentHome, { recursive: true, force: true });
     },
   };
 

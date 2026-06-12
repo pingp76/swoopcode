@@ -40,6 +40,7 @@ import { createTraceRecorder } from "./trace.js";
 import { runAssertions } from "./assertions.js";
 import { writeEvalTrace } from "./trace-writer.js";
 import { runJudge } from "../judge/judge.js";
+import { writeEvalArtifactManifest } from "./temp-cleanup.js";
 
 /**
  * runEvalCase — 执行单个 eval case
@@ -269,7 +270,18 @@ export async function runEvalCase(
   // 12. 清理 workspace（如果 case 失败且设置了 keepOnFailure，则保留）
   const shouldKeep =
     evalCase.workspace?.keepOnFailure === true && status !== "passed";
-  if (!shouldKeep) {
+  if (shouldKeep) {
+    try {
+      // 失败调试时保留 workspace 很有用，但必须给跨运行 GC 留下过期信息，
+      // 否则长期打开 keepOnFailure 后，系统临时目录会无限膨胀。
+      await writeEvalArtifactManifest(workspace.root, {
+        caseId: evalCase.id,
+        kind: "workspace",
+      });
+    } catch {
+      // manifest 写入失败不改变 eval 结果；后续 cleanup 仍可用 mtime 兜底。
+    }
+  } else {
     try {
       await workspace.cleanup();
     } catch {
