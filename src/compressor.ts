@@ -345,12 +345,6 @@ export function createContextCompressor(
       // 按类型遍历旧块，提取关键信息构建摘要文本
       const summaryLines: string[] = [];
 
-      // 如果之前已有摘要，先加入，实现多层摘要的级联压缩
-      if (lastSummary) {
-        summaryLines.push(lastSummary);
-        summaryLines.push("---");
-      }
-
       for (const block of oldBlocks) {
         if (block.type === "text") {
           const userContent = block.user ? extractText(block.user) : "";
@@ -386,7 +380,12 @@ export function createContextCompressor(
             }
           });
         } else if (block.type === "summary") {
-          // 之前的 summary 块：保留其文本，纳入新摘要
+          // 之前的 summary 块：保留其文本，纳入新摘要。
+          // 注意：lastSummary 只作为 getState() 的状态快照，不再作为摘要输入源。
+          // compactHistory(blocks) 的语义是“总结本次传入的完整 block 视图”：
+          // - prepareMessages 路径不会写回 history，下一次传入的 blocks 仍包含原始旧消息；
+          // - recovery 写回路径会把旧摘要作为 summary block 放回 history。
+          // 如果再额外拼闭包缓存，就会把同一段旧摘要重复写入新 summary。
           summaryLines.push(extractText(block.user));
         }
       }
