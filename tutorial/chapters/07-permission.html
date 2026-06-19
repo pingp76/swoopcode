@@ -375,22 +375,117 @@ if (toolName === "run_write" &amp;&amp; !isPathInWorkspace(args.path, workspaceR
   </p>
 <h2 id="terminal-askuser">Terminal.askUser 同步等待</h2>
 <p>
-  ask 必须<strong>同步</strong>等用户回答。 这跟普通 readline.question()
-  不一样, 后者是一问一答, 前者是一问一等 + 必须答。
-  </p>
+  上一节提到, ask 决策要调 <code>terminal.askUser(prompt)</code> 弹出
+  确认. 这一节专门讲 <code>askUser</code> 的<strong>同步等待</strong>语义 —
+  它跟普通 <code>readline.question()</code> 不一样, 必须理解清楚
+  才能写对代码.
+</p>
+<p>
+  <strong>先讲 "同步" 是什么意思</strong>
+</p>
+<p>
+  "同步" 在这里指<strong>调用方必须等返回值, 才能继续往下走</strong>.
+  翻译成代码: <code>askUser()</code> 返回一个 <code>Promise&lt;boolean&gt;</code>,
+  <code>await</code> 它就<strong>卡住</strong>当前这行代码, 直到用户回答
+  ("y" 或 "n") 才继续. 在用户回答之前, agent loop 的整个下一步
+  都被冻住, LLM 不能调下一个工具, agent 也不返回.
+</p>
+<p>
+  <strong>举个具体例子: 普通 readline.question() vs askUser()</strong>
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 1 · 两种问法的执行时序对比</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">普通 readline.question() — 一问一答, 不卡</div>
+      <div class="flow-stack__body" style="font-family: monospace; font-size: 90%;">
+        <strong>第 1 行</strong>: const name = await rl.question("你叫什么? ")<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;↓ 用户输入 "Alice", 按回车, 拿到 "Alice"<br/>
+        <strong>第 2 行</strong>: console.log("hi", name)<br/>
+        <strong>第 3 行</strong>: const age = await rl.question("多大了? ")<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;↓ 用户输入 "30"<br/>
+        <strong>第 4 行</strong>: console.log("age:", age)<br/>
+        <br/>
+        <strong>特点</strong>: 每次问, 等回答, 再问下一个. 但不是"必须答" —
+        用户可以 ctrl-c 退出, 抛异常.
+      </div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">askUser() — 一问一等, 必须答, 卡整个 agent loop</div>
+      <div class="flow-stack__body" style="font-family: monospace; font-size: 90%;">
+        <strong>第 1 行</strong>: const ok = await terminal.askUser("允许 rm 吗? (y/n) ")<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;↓ 整个 REPL 提示暂停, 等用户输入<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;↓ 用户输入 "y" 或 "n", <strong>agent loop 整条暂停线</strong><br/>
+        <strong>第 2 行</strong>: if (ok) { tool.invoke(...) } else { /* 写拒绝 */ }<br/>
+        <br/>
+        <strong>特点</strong>: 必须答 (y 或 n) 才能继续. <strong>整个 agent loop
+        在等用户</strong>, LLM 不能调下一个工具, 整个 harness 暂时不
+        推进. 用户回答前, 时间<strong>冻住</strong>.
+      </div>
+    </div>
+  </div>
+</div>
+<p>
+  <strong>"同步等" 的 3 个具体含义</strong>
+</p>
+<ol>
+<li>
+<strong>代码卡在 await</strong>: <code>await terminal.askUser(...)</code>
+    这一行执行后, 整个 JavaScript event loop 在等 resolve,
+    后续代码不跑. 类似 <code>await fetch(...)</code> 卡在网络 IO
+    上, 只是这里是卡在"用户敲键盘".
+  </li>
+<li>
+<strong>agent loop 整个不推进</strong>: harness 跑着, 突然调 askUser,
+    等 30 秒用户不答, harness 整个冻 30 秒, 不调 LLM, 不调工具,
+    不输出任何东西. 用户能看到 REPL 提示"等待用户输入".
+  </li>
+<li>
+<strong>必须答才能继续</strong>: readline.question() 抛 ctrl-c 异常
+    也能跑下去, askUser() 必须拿到 y 或 n (或类似) 才能 resolve.
+    不能 "超时默认拒绝" 或 "超时默认允许" — 都是反模式 (后面
+    "deny 假装成功" 一节展开).
+  </li>
+</ol>
+<p>
+  <strong>为什么必须这么设计?</strong>
+</p>
+<p>
+  因为 ask 的语义是"<strong>用户决定这个工具能不能跑</strong>", 跟
+  普通问"<strong>你叫什么名字</strong>" 是两件事:
+</p>
+<ul>
+<li>
+<strong>普通 question</strong>: 收集信息, 用户不答也能继续 (用 default
+    或异常), 不影响程序正确性.
+  </li>
+<li>
+<strong>ask</strong>: 安全决策, 用户不答 = 不知道允不允许, <strong>不能
+    跑这个工具</strong>. 必须等用户拍板. 让 agent 假装"用户默认允许"
+    就回到了 Permission 缺失的老路.
+  </li>
+</ul>
+<p>
+  <strong>实现细节</strong>:
+</p>
 <pre class="code-block"><code>// 教学简化版
 interface Terminal {
-  question(prompt: string): Promise&lt;string&gt;;        // 普通 readline
-  askUser(prompt: string): Promise&lt;boolean&gt;;       // 同步 ask, 必须答
+  question(prompt: string): Promise&lt;string&gt;;        // 普通 readline: 收集信息, 可中断
+  askUser(prompt: string): Promise&lt;boolean&gt;;       // 安全决策: 必须答, 卡整个 loop
   println(text: string): void;
   close(): void;
 }</code></pre>
 <p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/terminal.ts#L1" rel="noreferrer" target="_blank">GitHub · src/terminal.ts Terminal 接口 (L1)</a></p>
 <p>
+  <strong>注意类型差异</strong>: <code>question()</code> 返回 <code>Promise&lt;string&gt;</code>
+  (用户答的字符串), <code>askUser()</code> 返回 <code>Promise&lt;boolean&gt;</code>
+  (y/n 转成 true/false). 两个语义不同, 不能混用.
+</p>
+<p>
   真实 readline 实现的 askUser:
 </p>
 <pre class="code-block"><code>async function askUser(prompt: string): Promise&lt;boolean&gt; {
-  // 暂停 readline 主循环, 弹出确认
+  // 暂停 readline 主循环, 否则用户在主 readline 输的内容会被吞
   this.rl.pause();
   process.stdout.write(`${prompt} (y/n) `);
   return new Promise((resolve) =&gt; {
@@ -403,9 +498,47 @@ interface Terminal {
   });
 }</code></pre>
 <p>
-  关键: <code>rl.pause()</code> 暂停主 readline 循环, 否则用户在主
-  readline 输的内容会被吞。 ask 完 <code>rl.resume()</code> 恢复。
-  </p>
+  关键细节:
+</p>
+<ol>
+<li>
+<strong><code>rl.pause()</code> 暂停主 readline 循环</strong>: REPL 已经在跑一个
+    readline (主输入循环), 如果不暂停, 用户在 ask 期间敲的
+    内容会被主 readline 吞掉, askUser 永远等不到回答.
+    <code>rl.pause()</code> 让主 readline 停止接收输入, 这次只听
+    askUser 自己的 listener.
+  </li>
+<li>
+<strong><code>return new Promise((resolve) =&gt; ...)</code> 一直挂着</strong>:
+    askUser 函数返回 Promise 后, await 那一行卡住, 整个 agent
+    loop 等待 resolve. resolve 之前, agent loop 一步都不推进.
+  </li>
+<li>
+<strong>用户输入 y/n 后 resolve</strong>: <code>onLine</code> listener 拿到用户
+    敲的一行, parse 成 boolean, <code>resolve()</code> 让 await
+    返回, 代码继续. 同时 <code>rl.removeListener</code> + <code>rl.resume()</code>
+    恢复主 readline 循环.
+  </li>
+</ol>
+<p>
+  <strong>伪代码的时序</strong>:
+</p>
+<pre class="code-block"><code>// 1. agent 跑, 准备调 run_bash("rm -rf /tmp/old")
+// 2. permission 检查: mode=default, command 不在白名单 → 决策 = ask
+// 3. 调 await terminal.askUser("Allow rm -rf /tmp/old? (y/n) ")
+// 4. **卡住** — 整个 agent loop 暂停
+// 5. 用户看到 REPL 提示, 敲 "y" 按回车 (或 "n")
+// 6. resolve(true/false), agent loop 继续
+// 7. if (ok) { tool.invoke(...) } else { /* 写 Permission denied tool message */ }
+// 8. 继续下一轮 LLM 调用</code></pre>
+<p>
+  <strong>这跟第 02 章 "tool_call 协议" 的关系</strong>: askUser 卡住期间,
+  LLM 看不到 tool result, 因为 tool result 还没写. 等用户答完,
+  tool result 才写进 history, 下一轮 LLM 调用才看到. 整个过程
+  LLM 视角是"它调了工具, 工具在跑, 工具跑完了, 返回了结果", 它
+  不知道中间 user 介入过. <strong>这跟 LLM 视角的"工具正常返回"
+  完全等价</strong> — askUser 是在 harness 内部做的安全检查, LLM 不感知.
+</p>
 <h2 id="deny-pretends-success">拒绝时怎么写 tool result</h2>
 <p>
   拒绝时, tool message 应该明确写"Permission denied", 不能假装成功:

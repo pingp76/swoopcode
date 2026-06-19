@@ -89,6 +89,11 @@ function makeSummaryBlock(summaryText: string, round?: number): MessageBlock {
   return block;
 }
 
+/** 统计子串出现次数，用于断言 P2 不会把同一段摘要重复拼接。 */
+function countOccurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1;
+}
+
 // ---------------------------------------------------------------------------
 // P0 衰减压缩
 // ---------------------------------------------------------------------------
@@ -562,6 +567,33 @@ describe("compactHistory (P2)", () => {
       const content = (summaryBlock.user as { content: string }).content;
       // 第二次 summary 应该包含第一次 summary 的内容
       expect(content).toContain("[Context Summary]");
+      // 但不能同时从 lastSummary 闭包和 summary block 各拼一次。
+      expect(countOccurrences(content, "User: q1")).toBe(1);
+    }
+  });
+
+  it("does not duplicate cached summary when raw history is compacted again", () => {
+    const compressor = createContextCompressor({ compactKeepRecent: 1 });
+
+    // prepareMessages 路径只压缩本次请求视图，不会把 summary 写回 history。
+    // 因此第二次压缩时传入的仍是完整原始 history；如果再拼 lastSummary，
+    // q1/q2 会既来自闭包摘要，又来自原始 oldBlocks，造成重复膨胀。
+    compressor.compactHistory([
+      makeTextBlock("q1", "a1", 1),
+      makeTextBlock("q2", "a2", 2),
+    ]);
+
+    const result = compressor.compactHistory([
+      makeTextBlock("q1", "a1", 1),
+      makeTextBlock("q2", "a2", 2),
+      makeTextBlock("q3", "a3", 3),
+    ]);
+
+    const summaryBlock = result.blocks[0]!;
+    if (summaryBlock.type === "summary") {
+      const content = (summaryBlock.user as { content: string }).content;
+      expect(countOccurrences(content, "User: q1")).toBe(1);
+      expect(countOccurrences(content, "User: q2")).toBe(1);
     }
   });
 
