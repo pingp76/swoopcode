@@ -23,6 +23,7 @@
       >模式 2 · 窄接口 + Adapter 翻译 (Narrow Interface + Adapter)</a
     >
     <a href="#pattern-3">模式 3 · 依赖注入 (Dependency Injection)</a>
+    <a href="#pattern-3-5">模式 3.5 · 桥接模式 / 0 循环依赖</a>
     <a href="#pattern-4">模式 4 · Composition Root (唯一组装点)</a>
     <a href="#pattern-5">模式 5 · 注册表模式 (Registry Pattern)</a>
     <a href="#pattern-6">模式 6 · Builder / Pipeline 模式</a>
@@ -854,6 +855,187 @@ export function createAgent(deps: {
       一起)。
     </dd>
   </dl>
+  <h2 id="pattern-3-5">模式 3.5 · 0 循环依赖: 桥接模式 (Bridge Pattern)</h2>
+  <p>
+    <strong>出现频率</strong>
+    : 仓库里<strong>几乎每个跨模块集成点</strong>都用这个模式
+    (memory + hook, skill + registry, async run + subagent,
+    todo reminder + agent 主循环 ...)。 这是整个项目架构设计的
+    <strong>核心原则</strong>, 模式 3 (依赖注入) 和模式 4 (Composition
+    Root) 都是为了实现这个原则。
+  </p>
+  <p>
+    <strong>解决什么问题</strong>
+    : 两个模块互相需要对方的能力 (memory 需要把内容发到 LLM,
+    LLM 需要在启动时拿到 memory 段), 但两个模块<strong>不能互相
+    import</strong> (会栈溢出, 也违反分层)。 怎么"互相调用但不互相
+    import"?
+  </p>
+  <p>
+    <strong>朴素想法 1 · 直接互相 import</strong>
+    : <code>memory.ts</code> 顶部写 <code>import { agent } from
+    "./agent.js"</code>, <code>agent.ts</code> 顶部写 <code>import
+    { memoryManager } from "./memory.js"</code>。 一启动两个模块互相
+    找, 栈溢出。 即便不溢出, 也<strong>违反关注点分离</strong> —
+    memory 模块该管文件读写, 不该知道 "agent 长什么样", 反之亦然。
+  </p>
+  <p>
+    <strong>朴素想法 2 · 一个模块直接调另一个</strong>
+    : <code>agent.ts</code> 启动时调
+    <code>memoryManager.buildPromptSection()</code> 拼 system prompt。
+    表面行, 但<strong>违反关注点分离 + 难以扩展</strong>。 agent
+    主循环不该关心"memory 是什么" / "怎么拼"。 哪天加 Skill 注入
+    规范, 是不是又改 agent.ts? 加 Schedule 提醒是不是又改? agent.ts
+    会变成"巨型 switch", 谁都不敢动。
+  </p>
+  <p>
+    <strong>正确做法 · 桥接文件</strong>
+    : 写一个<strong>第三文件</strong>, 这个文件同时 import 两个
+    模块, 作为"桥"调用两边, 但两边互相不 import。
+  </p>
+  <p>
+    <strong>具体例子: memory + hook 的桥接</strong>
+  </p>
+  <pre class="code-block"><code>// src/hooks/memory-inject.ts — 桥接文件, 唯一同时 import 两边的
+import type { HookHandler } from "../hooks.js";
+import type { MemoryManager } from "../memory.js";
+
+// 返回 handler 函数, 闭包持有 memoryManager
+export function createMemoryInjectHandler(
+  memoryManager: MemoryManager,
+): HookHandler {
+  return (event) =&gt; {
+    const section = memoryManager.buildPromptSection();
+    if (!section) return { exitCode: 0 };
+    return { exitCode: 2, message: section };
+  };
+}</code></pre>
+  <p>
+    <strong>依赖图 (3 个模块, 0 循环 import)</strong>
+  </p>
+  <pre class="code-block"><code>memory.ts        ── 不知道 ──&gt; hooks.ts          (memory 不 import hooks)
+hooks.ts         ── 不知道 ──&gt; memory.ts        (hooks 不 import memory)
+agent.ts         ── 不知道 ──&gt; memory.ts        (agent 不 import memory)
+hooks/memory-inject.ts                                  ← 唯一同时 import 两边
+  ├── import memory.ts  (拿到 buildPromptSection)
+  └── import hooks.ts    (拿到 HookHandler 类型)
+
+Composition Root (index.ts) 把 3 个模块拼起来:
+  const memory = createMemoryManager(...)
+  const hookRunner = createHookRunner({
+    SessionStart: [createMemoryInjectHandler(memory)]  ← 桥接文件被调用
+  }, logger)
+  const agent = createAgent({ hookRunner })              ← agent 不知道 memory</code></pre>
+  <p>
+    <strong>4 条铁律</strong>
+  </p>
+  <ol>
+    <li>
+      <strong>业务模块之间不直接 import</strong>: <code>memory.ts</code>
+      不 import <code>hooks.ts</code> (反之亦然), <code>agent.ts</code>
+      不 import <code>memory.ts</code>。 任何两个<strong>业务模块</strong>
+      都通过第 3 个文件桥接。
+    </li>
+    <li>
+      <strong>桥接文件命名清晰</strong>: <code>hooks/memory-inject.ts</code>
+      的文件名就说明"这是 hook 系统的 memory 注入桥"。 一眼能看出
+      这是个桥, 不是业务逻辑。
+    </li>
+    <li>
+      <strong>桥接文件只做翻译, 不做业务</strong>: 它把
+      <code>memory.buildPromptSection()</code> 的字符串返回包成
+      <code>{exitCode: 2, message}</code>, 没有任何业务逻辑。 业务
+      都在被桥接的模块里。
+    </li>
+    <li>
+      <strong>Composition Root 负责把桥"插上去"</strong>: 业务模块 +
+      桥接文件都是"独立单元", Composition Root (index.ts) 负责
+      把它们拼起来 — 哪个 handler 注册到哪个事件, 哪个 manager
+      注入到哪个 handler。 业务模块和桥接文件都不知道自己会被怎么
+      拼。
+    </li>
+  </ol>
+  <p>
+    <strong>这个原则在整个仓库的 5 个体现</strong>
+  </p>
+  <table class="terms">
+    <thead>
+      <tr>
+        <th>集成场景</th>
+        <th>桥接文件</th>
+        <th>做什么</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>memory → system prompt</td>
+        <td><code>hooks/memory-inject.ts</code></td>
+        <td>调 <code>buildPromptSection()</code>, 包成 <code>{exitCode: 2, message}</code></td>
+      </tr>
+      <tr>
+        <td>todo reminder → user message</td>
+        <td><code>tools/run-todo-*.ts</code></td>
+        <td>调 <code>todoManager.list()</code>, 在 tool result 里格式化</td>
+      </tr>
+      <tr>
+        <td>async run → subagent</td>
+        <td><code>async-runs.ts</code> 内部 launchSubagentRunner</td>
+        <td>调 <code>createAgentFn(...)</code> 派生 child agent, 注入只读工具集</td>
+      </tr>
+      <tr>
+        <td>schedule → async run</td>
+        <td><code>schedules.ts</code> 内部 onAsyncRunFinish</td>
+        <td>调 <code>asyncRunManager.start(...)</code> 启动后台执行</td>
+      </tr>
+      <tr>
+        <td>cache debug → agent</td>
+        <td><code>agent.ts</code> 内部 inspect 调用</td>
+        <td>调 <code>cacheTracker.inspect({messages, tools})</code> 输出日志</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    <strong>违反这条原则会怎样</strong>
+  </p>
+  <ul>
+    <li>
+      <strong>栈溢出</strong>: <code>memory.ts</code> import <code>agent.ts</code>,
+      <code>agent.ts</code> import <code>memory.ts</code> → 启动时两个
+      模块互相找, 无限递归。
+    </li>
+    <li>
+      <strong>巨型 switch</strong>: <code>agent.ts</code> 直接读 memory,
+      又直接读 skill, 又直接读 schedule, 几百行 import + if-else,
+      没人敢改。
+    </li>
+    <li>
+      <strong>不可测</strong>: memory 测 memory 时被迫 mock agent, 互相
+      耦合, 测试写不下去。
+    </li>
+  </ul>
+  <p>
+    <strong>为什么模式 3 (依赖注入) 和模式 4 (Composition Root)
+    都要服务这个原则</strong>
+  </p>
+  <ul>
+    <li>
+      <strong>模式 3 (依赖注入)</strong>: 业务模块不直接 <code>new</code>
+      别的模块, 而是通过<strong>工厂参数</strong>接收。 这样模块
+      之间没有 import 关系, 都能独立测试。
+    </li>
+    <li>
+      <strong>模式 4 (Composition Root)</strong>: 所有"new" /
+      "createXxx" 调用集中在 <code>index.ts</code>。 业务模块只看
+      到"我已经创建好的依赖", 不知道谁创建的, 也没有 import
+      别的模块。
+    </li>
+  </ul>
+  <p>
+    两个模式一起实现了"0 循环 import" + "0 业务模块互相知道"
+    的目标。 <strong>桥接模式是这两个模式在跨模块集成点的具体应用</strong> —
+    当两个业务模块要互通时, 写第 3 个文件当桥, 桥里 import 两边
+    然后做翻译。
+  </p>
   <h2 id="pattern-4">模式 4 · Composition Root (唯一组装点)</h2>
   <p>
     <strong>出现频率</strong>

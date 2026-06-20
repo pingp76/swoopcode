@@ -70,9 +70,13 @@ tools:
   </li>
 <li>
 <strong>声明式 vs 命令式</strong>: 工具列表是"声明" skill 含哪些工具,
-  不是"注册"。 harness 启动时读所有 SKILL.md, 建立映射; LLM
-  调 <code>load_skill("code-review")</code> 时按名字查找, 不需要
-  import / require。
+  不是"注册"。
+  </li>
+<li>
+<strong>harness 启动时</strong>: 读所有 SKILL.md, 建立映射。
+  </li>
+<li>
+<strong>LLM 调用时</strong>: 调 <code>load_skill("code-review")</code>, 按名字查找, 不需要 import / require。
   </li>
 </ol>
 <p>

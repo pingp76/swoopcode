@@ -193,12 +193,13 @@
   不可恢复场景。
 </p>
 <p>
-  <strong>真实场景</strong>: LLM 流式输出跑到 8k token 时网络抖
-  断了, 错误是 output_interrupted, 动作 = continue (从 8k
-  断点续, 不从头来); LLM 返回 413, 动作 = compact (压缩历史
-  后重试, 同等长度仍太长才 fail); LLM 返回 401, 动作 = fail
-  (config 错误, 永远不重试)。
+  <strong>真实场景</strong>:
 </p>
+<ul>
+<li>LLM 流式输出跑到 8k token 时网络抖断了, 错误是 output_interrupted, 动作 = continue (从 8k 断点续, 不从头来)</li>
+<li>LLM 返回 413, 动作 = compact (压缩历史后重试, 同等长度仍太长才 fail)</li>
+<li>LLM 返回 401, 动作 = fail (config 错误, 永远不重试)</li>
+</ul>
 <p>
   <strong>设计思想</strong>: <strong>动作类型枚举</strong> — 看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L39"><code>src/recovery.ts</code> 第 39 行的 <code>RecoveryAction</code> union</a>:
@@ -247,7 +248,7 @@
 <p>
   <strong>设计思想</strong>: <strong>决策 vs 执行分离</strong> —
   decideRecovery 只<strong>算</strong>"应该做什么", 调方负责
-  "做" 和 "state++"。 看
+  "做"和"state++"。 看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L198"><code>src/recovery.ts</code> 第 198 行的 <code>decideRecovery</code></a>:
 </p>
 <pre><code class="language-typescript">export function decideRecovery(
@@ -605,7 +606,7 @@ test("decideRecovery 是纯函数: 同样输入多次调用结果相同", () =&g
   </li>
 <li>
 <strong>决策 vs 执行分离</strong>: decideRecovery 只算"应该
-    做什么", 调方负责 "做" 和 "state++"。
+    做什么", 调方负责"做"和"state++"。
   </li>
 <li>
 <strong>作用域清晰</strong>: RecoveryState 每次 agent.run() 重建,

@@ -1425,7 +1425,7 @@ function flattenToMessages(blocks: Block[]): ChatCompletionMessageParam[] {
     </p>
   <p>
 <strong>P1 即时可逆:</strong> run_bash 返回 5000 字符, 触发 P1,
-      tool message 含 output_id; LLM 调 run_output_read(output_id)
+      tool message 含 output_id。 LLM 调 <code>run_output_read(output_id)</code>
       读完整内容。
     </p>
   <p>

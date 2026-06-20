@@ -139,11 +139,17 @@
   monthly / yearly。 多了维护成本上升, 少了不够用。
 </p>
 <p>
-  <strong>真实场景</strong>: "每 5 分钟查 CI 状态" 用 every_seconds
-  (5 * 60 = 300 秒); "每天 9 点跑测试" 用 daily (9:00); "每周一
-  10 点扫 TODO" 用 weekly (mon, 10:00); "每月 1 号清理日志" 用
-  monthly (1, 00:00); "每年 1 月 1 号跑年度报告" 用 yearly
-  (1/1, 00:00)。 6 种全覆盖。
+  <strong>真实场景</strong>:
+</p>
+<ul>
+<li>"每 5 分钟查 CI 状态" 用 every_seconds (5 * 60 = 300 秒)</li>
+<li>"每天 9 点跑测试" 用 daily (9:00)</li>
+<li>"每周一 10 点扫 TODO" 用 weekly (mon, 10:00)</li>
+<li>"每月 1 号清理日志" 用 monthly (1, 00:00)</li>
+<li>"每年 1 月 1 号跑年度报告" 用 yearly (1/1, 00:00)</li>
+</ul>
+<p>
+  6 种全覆盖。
 </p>
 <p>
   <strong>设计思想</strong>: <strong>固定枚举 + 字段类型</strong> —
@@ -321,10 +327,13 @@ const runningOccurrences = new Map&lt;string, Set&lt;string&gt;&gt;(); // schedu
 <p>
   <strong>真实场景</strong>: 用户设 "每天 9 点跑 nightly test"
   schedule, 链接到 migration-001 group 的 task_nightly_test。
-  test 通过 → 不改 task 状态; test 失败 → task 标 failed +
-  note 写 "auto-failed by schedule at 2026-06-12T09:05:23, reason:
-  5 tests failed"。 LLM 下次开 session 看到 task failed, 知道
-  "夜跑挂了, 去看下"。
+</p>
+<ul>
+<li>test 通过 → 不改 task 状态</li>
+<li>test 失败 → task 标 failed + note 写 "auto-failed by schedule at 2026-06-12T09:05:23, reason: 5 tests failed"</li>
+</ul>
+<p>
+  LLM 下次开 session 看到 task failed, 知道"夜跑挂了, 去看下"。
 </p>
 <p>
   <strong>设计思想</strong>: <strong>桥接 schedule ↔ task</strong> —
@@ -374,11 +383,15 @@ const runningOccurrences = new Map&lt;string, Set&lt;string&gt;&gt;(); // schedu
   test / install) / workspace_write (允许 workspace 内写)。
 </p>
 <p>
-  <strong>真实场景</strong>: nightly test schedule 用 ci profile
-  (允许 npm install + npm test); "每天清理 7 天前的日志" schedule
-  用 workspace_write (允许 rm 工作区文件); "每天扫 TODO" 用
-  readonly (只 grep 不改)。 3 种 profile 表达"这个 schedule 的写
-  权限边界"。
+  <strong>真实场景</strong>:
+</p>
+<ul>
+<li>nightly test schedule 用 ci profile (允许 npm install + npm test)</li>
+<li>"每天清理 7 天前的日志" schedule 用 workspace_write (允许 rm 工作区文件)</li>
+<li>"每天扫 TODO" 用 readonly (只 grep 不改)</li>
+</ul>
+<p>
+  3 种 profile 表达"这个 schedule 的写权限边界"。
 </p>
 <p>
   <strong>设计思想</strong>: <strong>3 种 profile 表达权限边界</strong> —

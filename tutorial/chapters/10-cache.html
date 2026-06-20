@@ -134,22 +134,202 @@
   概率 ~4 × 10⁻¹⁰, 调试用 8 位 (~1.6 × 10⁻⁹) 也够。 用 Node
   内置 <code>crypto</code> 模块, 不引入外部依赖。
 </p>
+<h2 id="debug-purpose">从这里开始, 全是为了本地调试</h2>
+<p>
+  上一节讲了 hash 怎么算 (SHA256 + 8 位 hex), 这一节开始讲的
+  5 个工具 (stableStringify / createCacheDebugTracker /
+  formatCacheDebugLog / loop-integration / changed-actions) —
+  <strong>全部是为了<strong>本地调试</strong></strong>, 跟真实 cache 命中率
+  <strong>无关</strong>。 这一节专门解释"为什么需要这些", 避免你读到后面
+  糊涂"这堆 hash 工具到底要干啥"。
+</p>
+<p>
+  <strong>先说清楚: 教学版不假装读真实 cache hit rate</strong>
+</p>
+<p>
+  真实 cache 命中率只有 LLM 后端知道, 存在响应头的
+  <code>cached_tokens</code> 字段里。 教学版<strong>不调 LLM 响应头</strong>,
+  也不接 LLM SDK 的内部 cache 统计, 假装能读真实命中率。 我们
+  能做的只有 "harness <strong>期望</strong> cache 怎么命中" (基于
+  prefix hash), 不是 "cache <strong>实际</strong> 命中多少" (基于
+  LLM 后端统计)。 这是教学版的<strong>故意</strong>简化, 不是
+  bug。
+</p>
+<p>
+  <strong>那为什么还要搞一堆 hash 工具</strong>
+</p>
+<p>
+  真正的问题是: <strong>开发者不知道自己改了什么</strong>。 团队
+  leader 改 system prompt, 上线 1 个月账单 ×10, 但他不知道
+  是"改 system prompt" 还是"改 tools" 还是"加新 skill" 引起
+  的 cache miss。 没有 hash 工具, 排查靠"猜 + 改一行部署
+  一次看账单", 几周才查出来。
+</p>
+<p>
+  教学版的 hash 工具解决的是这个<strong>排查效率</strong>问题:
+  本地观察 prefix hash 变化, 立刻知道 "哪一段变了", <strong>不用
+  部署到生产看账单</strong>。 提前发现问题, 不让账单当报警器。
+</p>
+<p>
+  <strong>5 个工具的定位 (一张表)</strong>
+</p>
+<table class="terms">
+  <thead>
+    <tr>
+      <th>工具</th>
+      <th>作用</th>
+      <th>生产用吗?</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>stableStringify</code></td>
+      <td>对象 key 排序后序列化, 让"内容等价" → "字符串相等"</td>
+      <td>调试用 (生产 hash 也要, 但实现一样)</td>
+    </tr>
+    <tr>
+      <td><code>createCacheDebugTracker</code></td>
+      <td>闭包持有 lastSnapshot, 每次 inspect 对比"上一轮 vs 这一轮"</td>
+      <td><strong>只调试用</strong>, 生产可关</td>
+    </tr>
+    <tr>
+      <td><code>formatCacheDebugLog</code></td>
+      <td>把 state 拼成单行 <code>[cache] systemPrompt=stable ...</code></td>
+      <td><strong>只调试用</strong>, 生产可关</td>
+    </tr>
+    <tr>
+      <td>loop-integration (主循环调 tracker.inspect)</td>
+      <td>每轮 LLM 调用前调一次, 输出日志</td>
+      <td><strong>只调试用</strong>, 生产可关</td>
+    </tr>
+    <tr>
+      <td>changed-actions (prefix changed 的 4 个原因)</td>
+      <td>排查指南, 教人看到日志后怎么定位问题</td>
+      <td><strong>纯教学</strong>, 不是代码</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  <strong>一句话总结</strong>:
+</p>
+<blockquote>
+  cache-debug 模块是<strong>开发者的"望远镜"</strong>, 帮你在本地
+  看到 cache 行为, 提前发现问题。 它<strong>不是</strong> cache
+  本身, 也<strong>不</strong> 帮 LLM 提高命中率 — 命中率是 LLM
+  后端的事, 我们改不了。 改的是<strong>排查时间</strong>: 从
+  "几周看账单" 缩到 "几秒看日志"。
+</blockquote>
+<p>
+  读完下一节 (stableStringify / tracker / log-format / 集成 /
+  排查), 回头看这一节, 就知道每个工具在排查链里负责哪一段。
+</p>
 <h2 id="stable-stringify">stableStringify: 顺序无关的对象序列化</h2>
 <p>
-  <strong>用途</strong>: 工具定义的 JSON 顺序变了 (例如新增一个
-  工具让数组末尾变化), hash 应该<strong>不变</strong> (因为内容
-  集合没变, 顺序是次要)。 稳定序列化按 key 排序后输出, 避免
-  假阳性。
+  <strong>场景: tools 数组顺序变了, hash 也变了 (明明内容一样)</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: tools 数组 <code>[run_read, run_bash, run_write]</code>
-  重新启动后变成 <code>[run_bash, run_read, run_write]</code> (注册
-  顺序变了), toolsHash 应该不变 (内容集合没变)。 直接
-  <code>JSON.stringify(tools)</code> 会变, 误报 cache miss。
+  跑 100 轮对话观察 cache 行为, 看到日志:
+  <code>[cache] systemPrompt=stable tools=changed prefix=changed</code>。 意思是
+  "system prompt 没变, 但 tools 部分变了, 所以整个前缀 hash
+  变了, cache miss"。 但你确信 tools 内容没改啊! 怎么回事?
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>内容 hash, 不是字面 hash</strong> —
-  对象按 key 排序, 数组保序, undefined 跳过, 递归处理嵌套。 看
+  朴素做法: 写日志看 tools 是什么:
+</p>
+<pre class="code-block"><code>// 第 1 次跑
+const tools = [run_read, run_bash, run_write];
+console.log(JSON.stringify(tools));
+// 输出: [{"name":"run_read",...},{"name":"run_bash",...},{"name":"run_write",...}]
+
+// 第 2 次跑 (注册顺序变了, 业务上等价)
+const tools = [run_bash, run_read, run_write];
+console.log(JSON.stringify(tools));
+// 输出: [{"name":"run_bash",...},{"name":"run_read",...},{"name":"run_write",...}]
+
+// 两个字符串不一样! 但内容集合完全一样 (都是 3 个工具, 名字一样)
+// → hash 不一样 → cache 误报 miss</code></pre>
+<p>
+  <strong>问题根源: <code>JSON.stringify</code> 是<strong>字面</strong>序列化,
+  数组顺序 / 对象 key 顺序变了, 输出就变, hash 就变</strong>。 但
+  你关心的是 "内容集合是否一样", 不是 "字面是否一样"。 这两个
+  概念在 hash 时混在一起, 就会误报 cache miss。
+</p>
+<p>
+  <strong>正确做法: 写一个"内容 hash" 用的稳定序列化</strong>
+</p>
+<p>
+  规则:
+</p>
+<ul>
+<li><strong>对象按 key 字母升序排序</strong>: <code>{b: 1, a: 2}</code> 和
+  <code>{a: 2, b: 1}</code> 内容一样, 序列化输出必须一样
+  (<code>{"a":2,"b":1}</code>)</li>
+<li><strong>数组保序</strong>: <code>[a, b]</code> 和 <code>[b, a]</code>
+  内容不一样, 序列化输出必须不一样 (因为数组是有序列表, 顺序有意义)</li>
+<li><strong>undefined 跳过</strong>: 跟 <code>JSON.stringify</code>
+  行为一致, 避免引入"同一对象两种表示"</li>
+<li><strong>递归处理嵌套</strong>: 对象套对象, 数组套对象, 都要按规则处理</li>
+</ul>
+<p>
+  <strong>具体例子: 3 个工具数组, 顺序变了, 序列化结果一样</strong>
+</p>
+<pre class="code-block"><code>// 输入 1 (注册顺序 A)
+const tools1 = [
+  { name: "run_read",  params: {...} },
+  { name: "run_bash",  params: {...} },
+  { name: "run_write", params: {...} },
+];
+
+// 输入 2 (注册顺序 B, 内容等价)
+const tools2 = [
+  { name: "run_bash",  params: {...} },
+  { name: "run_read",  params: {...} },
+  { name: "run_write", params: {...} },
+];
+
+// JSON.stringify 行为
+JSON.stringify(tools1);  // [{"name":"run_read",...},{"name":"run_bash",...},{"name":"run_write",...}]
+JSON.stringify(tools2);  // [{"name":"run_bash",...},{"name":"run_read",...},{"name":"run_write",...}]
+// ↑ 字面不同, hash 不同, 误报 cache miss
+
+// stableStringify 行为
+stableStringify(tools1);  // [{"name":"run_read",...},{"name":"run_bash",...},{"name":"run_write",...}]
+stableStringify(tools2);  // [{"name":"run_bash",...},{"name":"run_read",...},{"name":"run_write",...}]
+// ↑ 字面也不同! 数组保序!
+
+// 等等, 数组保序的话, 顺序变了 hash 不也变吗?  对!
+// 所以这个例子实际上是"误用", stableStringify 主要解决的是
+// 对象 key 顺序问题, 不是数组顺序问题。</code></pre>
+<p>
+  <strong>关键反直觉点: stableStringify 主要解决"对象 key 顺序", 不是"数组顺序"</strong>
+</p>
+<p>
+  数组是有序列表, <code>[a, b]</code> 和 <code>[b, a]</code> 真的不一样,
+  hash 必须不一样。 stableStringify<strong>不</strong> 解决数组顺序
+  问题。 它解决的是<strong>对象 key 顺序</strong>问题 —
+  <code>{a: 1, b: 2}</code> 和 <code>{b: 2, a: 1}</code> 是同一个对象,
+  hash 必须一样。
+</p>
+<p>
+  <strong>具体例子: 真正解决的是对象 key 顺序</strong>
+</p>
+<pre class="code-block"><code>// 输入 1 (object key 顺序 A)
+const config1 = { name: "run_read", description: "读文件", parameters: {...} };
+
+// 输入 2 (object key 顺序 B, 内容等价)
+const config2 = { parameters: {...}, description: "读文件", name: "run_read" };
+
+// JSON.stringify 行为
+JSON.stringify(config1);  // {"name":"run_read","description":"读文件","parameters":{...}}
+JSON.stringify(config2);  // {"parameters":{...},"description":"读文件","name":"run_read"}
+// ↑ 字面不同! hash 不同! 但内容是同一个 config, 应该 cache 命中
+
+// stableStringify 行为
+stableStringify(config1);  // {"description":"读文件","name":"run_read","parameters":{...}}
+stableStringify(config2);  // {"description":"读文件","name":"run_read","parameters":{...}}
+// ↑ 字面也相同! hash 相同! cache 命中</code></pre>
+<p>
+  <strong>代码</strong>:
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/cache-debug.ts#L64"><code>src/cache-debug.ts</code> 第 64 行的 <code>stableStringify</code></a>:
 </p>
 <pre><code class="language-typescript">function stableStringify(value: unknown): string {
@@ -160,7 +340,7 @@
   }
   if (typeof value === "object") {
     const obj = value as Record&lt;string, unknown&gt;;
-    const keys = Object.keys(obj).sort();
+    const keys = Object.keys(obj).sort();   // ← 关键: key 排序
     const pairs = keys
       .filter((k) =&gt; obj[k] !== undefined)
       .map((k) =&gt; `${JSON.stringify(k)}:${stableStringify(obj[k])}`);
@@ -169,6 +349,42 @@
   return "null";
 }</code></pre>
 <p>
+  <strong>逐行走一遍</strong> (假设输入是上面的 <code>config1</code>):
+</p>
+<ol>
+<li>
+<code>value</code> 是对象, 不是 null / string / array。
+  </li>
+<li>
+进入 "object" 分支, <code>keys = Object.keys(obj).sort()</code> →
+    <code>["description", "name", "parameters"]</code> (按字母升序)。
+  </li>
+<li>
+每个 key 生成 <code>"key":value</code> 对, 递归处理 value (如果 value 是
+    嵌套对象, 也按字母排序)。
+  </li>
+<li>
+用逗号拼起来, 包 <code>{}</code>。 输出:
+    <code>{"description":"读文件","name":"run_read","parameters":{...}}</code>。
+  </li>
+</ol>
+<p>
+  同样的 key 顺序, 同样的输出, 同样的 hash, cache 命中。
+</p>
+<p>
+  <strong>教学版的局限 (vs 工业级)</strong>:
+</p>
+<ul>
+<li>
+<strong>不处理 <code>NaN</code> / <code>BigInt</code> / 循环引用</strong>:
+    LLM API 返回值不会有这些类型, 教学版不管。
+  </li>
+<li>
+<strong>不保证跨语言一致</strong>: Python 的 <code>json.dumps(sort_keys=True)</code>
+    也做了类似事, 但字符顺序可能和 JS 不一样 (比如 unicode
+    转义)。 教学版只关心"同一进程内稳定", 不跨进程。
+  </li>
+</ul>
   <strong>实现细节</strong>: 4 条规则 — 普通对象按 key 字母升序
   排序; 数组保持原序 (tools 顺序是 LLM 看到的顺序, 不能乱);
   string 用 JSON.stringify (保留转义); undefined 跳过 (与
@@ -286,6 +502,265 @@
   tracker, 注入 agent; agent 第 3 步调 inspect + log。 默认可以
   不传 tracker, agent 不输出 cache 日志 (用空对象模式, 类似
   createNoopHookRunner)。
+</p>
+<h2 id="how-to-debug">实战: 拿到日志后, 怎么找 cache miss 原因</h2>
+<p>
+  上一节讲完怎么<strong>输出</strong>日志, 这一节讲拿到日志后
+  <strong>怎么用</strong>。 假设你已经跑完一个 100 轮的 agent, 拿到
+  <code>agent.log</code> 文件 (几百行), 接下来怎么定位"为什么
+  cache miss 这么多"?
+</p>
+<p>
+  <strong>3 步排查法 (从粗到细)</strong>
+</p>
+<p>
+  <strong>步骤 1 · grep changed, 找出所有变化点</strong>
+</p>
+<pre class="code-block"><code>grep '\[cache\].*changed' agent.log
+
+# 典型输出 (假设跑了 100 轮, 改了 5 次):
+[cache] systemPrompt=changed tools=stable prefix=changed systemHash=abc12345 ...   (第 1 轮, 启动)
+[cache] systemPrompt=stable  tools=stable prefix=stable  systemHash=abc12345 ...   (第 2-4 轮, 全部命中)
+[cache] systemPrompt=stable  tools=changed prefix=changed systemHash=abc12345 toolsHash=def67890 ...   (第 30 轮, 改了 tools)
+[cache] systemPrompt=changed tools=stable prefix=changed systemHash=fedcba98 ...   (第 80 轮, 改了 system prompt)
+[cache] systemPrompt=stable  tools=stable prefix=stable  systemHash=fedcba98 ...   (第 81-100 轮, 稳定)</code></pre>
+<p>
+  看到结果后, 立刻知道 3 件事:
+</p>
+<ul>
+<li>第 1 轮首次启动必然 changed (baseline), <strong>忽略</strong>。</li>
+<li>第 2-4 轮 stable, 说明稳定 3 轮。</li>
+<li>第 30 轮 <code>tools=changed</code>, 改了 tools。</li>
+<li>第 80 轮 <code>systemPrompt=changed</code>, 改了 system prompt。</li>
+</ul>
+<p>
+  <strong>步骤 2 · 看每条 changed 前后的 git diff</strong>
+</p>
+<p>
+  看到第 30 轮 <code>tools=changed</code> 了, 但"为什么变" 不知道。
+  看 git log:
+</p>
+<pre class="code-block"><code>git log --oneline --before="2026-06-15 14:30"
+
+# 典型输出:
+a1b2c3d  2026-06-15 14:25  fix: 给 run_bash 加新参数
+d4e5f6a  2026-06-15 14:10  docs: 更新 README
+...</code></pre>
+<p>
+  <code>a1b2c3d</code> 在 14:25 commit, 第 30 轮在 14:30 (假设),
+  时间对得上 — <code>tools=changed</code> 是这次 commit 引起的。
+  打开 diff 看具体改了什么:
+</p>
+<pre class="code-block"><code>git show a1b2c3d -- src/tools/run-bash.ts
+
+# 看到: 给 run_bash 的 description 加了 10 个字符
+- description: "跑 bash 命令"
++ description: "跑 bash 命令, 支持后台执行"</code></pre>
+<p>
+  <strong>找到原因了: 改了一个 tool 的 description, 10 个字符,
+  hash 变, cache miss 1 次。</strong>
+</p>
+<p>
+  <strong>步骤 3 · 评估这次变化是否值得</strong>
+</p>
+<p>
+  知道原因后, 问自己: 这 10 个字符的描述真的需要改吗?
+</p>
+<ul>
+<li>
+<strong>值得</strong>: 描述从"跑 bash 命令" 改成"跑 bash 命令, 支持
+    后台执行", 这是真功能差异, 改得对。 cache miss 1 次
+    是合理代价。
+  </li>
+<li>
+<strong>不值得</strong>: 描述只是改了个错别字, 没必要, 立刻
+    <code>git revert</code> 恢复, 下次重启 cache 又命中。
+  </li>
+</ul>
+<p>
+  <strong>具体例子: 一次完整的排查</strong>
+</p>
+<p>
+  假设用户跑 200 轮, 账单 ×3, 怀疑 cache miss 太多。 排查:
+</p>
+<ol>
+<li>
+<strong>grep changed</strong>: 找到 8 次 changed (200 轮里 8 次
+    cache miss)。
+  </li>
+<li>
+<strong>逐条看 git log</strong>: 8 次分别对应 8 个 commit。
+  </li>
+<li>
+<strong>逐条看 diff</strong>: 5 个是"故意改" (加新工具 / 改 description),
+    3 个是"无意改" (refactor 时手抖改了 system prompt)。
+  </li>
+<li>
+<strong>回滚 3 个无意改</strong>: <code>git revert</code> 3 个 commit,
+    下次重启 cache 重新累积。
+  </li>
+<li>
+<strong>留下 5 个故意改</strong>: 不可避免, 接受。
+  </li>
+</ol>
+<p>
+  账单从 ×3 降到 ×1.5 (少了 3 次无意 miss)。
+</p>
+<p>
+  <strong>常见反模式: 改了 system prompt 不知道为什么</strong>
+</p>
+<p>
+  跑了 50 轮, 看到第 25 轮 <code>systemPrompt=changed</code>,
+  但 git log 没看到最近的 system prompt 改动。 这种最坑 —
+  "我什么都没改, 为什么变了?"
+</p>
+<p>
+  排查方法:
+</p>
+<ol>
+<li>
+<strong>查 memory 段</strong>: SessionStart handler 注入的 memory
+    段如果改了 (用户加了新 memory 文件), system prompt 就变。
+    看 <code>~/.memory/</code> 目录最近的文件时间。
+  </li>
+<li>
+<strong>查 skill 段</strong>: 加载了 skill (e.g. 调
+    <code>load_skill("react")</code>) 会把 skill 工具描述拼到
+    system prompt。 第一次加载必然变。
+  </li>
+<li>
+<strong>查 schedule / todo reminder</strong>: 启动时 todo reminder
+    注入到 user message (不进 system), 但 schedule 提醒可能进。
+    看 reminder 来源。
+  </li>
+</ol>
+<p>
+  <strong>常见反模式: tools=changed 但没改 tool 代码</strong>
+</p>
+<p>
+  跑了 30 轮, 看到 <code>tools=changed</code>, git log 没看到
+  tool 文件改动。 排查:
+</p>
+<ol>
+<li>
+<strong>查 ToolRegistry 注册顺序</strong>: 工具注册顺序变了 (e.g.
+    <code>index.ts</code> 调整了 import 顺序), 数组顺序变了,
+    <strong>但 stableStringify 应该排除这个</strong>。 看到变了,
+    可能是 stableStringify 没用 (查 cache-debug.ts 配置)。
+  </li>
+<li>
+<strong>查 tool description 动态拼接</strong>: 某工具的 description
+    是动态拼的 (e.g. 包含当前时间戳, 包含 git commit hash)。
+    <strong>错</strong> — description 必须稳定, 不能含动态数据
+    (第 10 章 "cache 影响" 一节讲过)。 改源码去掉动态部分。
+  </li>
+</ol>
+<p>
+  <strong>手动调试: 不靠日志, 直接 inspect</strong>
+</p>
+<p>
+  有时候 grep 不够, 想<strong>立刻</strong>看当前轮 system prompt
+  是什么, 不用跑 100 轮等日志。 用 REPL 命令:
+</p>
+<pre class="code-block"><code>// 在 REPL 输 /cache-debug
+> /cache-debug
+
+# 输出 (假设当前在第 15 轮):
+=== Current Cache State ===
+system prompt hash:    abc12345  (changed from def67890 at round 12)
+tools hash:            11112222  (stable for 14 rounds)
+stable prefix hash:    xyz98765  (changed at round 12)
+message count:         23
+tool count:            6
+
+=== System Prompt (first 500 chars) ===
+你是 swe agent。 工具见下方 tools 字段。
+
+[Memory Index]
+- [user] chinese-answer: 用户偏好中文回答
+- [user] no-any: TypeScript 不用 any
+
+... (500 chars)
+
+=== Tools (names only) ===
+- run_bash
+- run_read
+- run_write
+- run_edit
+- run_skill
+- run_subagent
+
+=== Last Changed At Round 12 ===
+Looking at git log around round 12...
+a1b2c3d  fix: 给 run_bash 加新参数</code></pre>
+<p>
+  立刻看到: 当前 system prompt 长什么样, hash 是什么, 跟上一轮
+  对比, 何时变, 哪个 commit 引起的。 不用 grep, 不用等。
+</p>
+<p>
+  <strong>更深入的调试: 对比两轮的 system prompt</strong>
+</p>
+<p>
+  看到 <code>systemPrompt=changed at round 12</code>, 想知道具体
+  改了什么, 输:
+</p>
+<pre class="code-block"><code>> /cache-diff 12 11
+
+# 输出两轮 system prompt 的 diff (类似 git diff):
+--- system_prompt_round_11.txt
++++ system_prompt_round_12.txt
+@@ -1,3 +1,3 @@
+-你是 swe agent。 工具见下方 tools 字段。
++你是 swe agent, 2026-06-15 更新。 工具见下方 tools 字段。</code></pre>
+<p>
+  一眼看到: 多了一行日期。 排查原因: <code>system-prompt.ts</code>
+  里 <code>const date = new Date().toISOString()</code> — <strong>错</strong>!
+  去掉, 改完 cache 又命中。
+</p>
+<p>
+  <strong>真实 cache hit rate 怎么算 (教学版做不到)</strong>
+</p>
+<p>
+  上面说的都是"期望 cache 怎么命中" (基于 prefix hash), 不是
+  "真实 cache 命中多少" (基于 LLM 后端统计)。 真实 hit rate 要
+  读 LLM 响应头:
+</p>
+<pre class="code-block"><code>// OpenAI 响应示例 (在 response.usage 里)
+{
+  "prompt_tokens": 8000,
+  "completion_tokens": 200,
+  "cached_tokens": 5000,  // ← 这就是真实 cache 命中的 token 数
+}
+
+// 真实 hit rate = cached_tokens / prompt_tokens
+//              = 5000 / 8000 = 62.5%
+
+// 教学版 cache-debug 看不到这个字段, 因为没解析 LLM 响应</code></pre>
+<p>
+  教学版<strong>不能</strong>告诉你真实 hit rate 是多少。 我们只能
+  告诉你"harness 期望命中多少" (prefix 稳定 = 期望 100% 命中)。
+  真实值可能 60% (LLM 自己有 token 块粒度, 教学版简化成整个
+  prefix), 但 60% vs 100% 是同一个数量级, 排查"为什么会变"
+  够用了。
+</p>
+<p>
+  <strong>教学版 cache debug 的能力边界</strong>
+</p>
+<ul>
+<li>
+<strong>能告诉你</strong>: "上一轮 vs 这一轮, prefix hash 变了没,
+    哪段变了 (system prompt / tools / 整体), 何时变的 (轮次),
+    哪个 commit 引起的 (git log 对应)。"
+  </li>
+<li>
+<strong>不能告诉你</strong>: "真实 cache 命中了多少 token,
+    LLM 后端实际走了 cache 还是没走, 哪几个 token 块在 cache
+    里。"
+  </li>
+</ul>
+<p>
+  看到日志后, 重点看 "哪段变了", 知道改了就够了。 真实 hit
+  rate 等生产数据, 教学版负责排查链路, 不负责精度。
 </p>
 <h2 id="changed-actions">prefix changed 的 4 个常见原因</h2>
 <p>
@@ -471,7 +946,7 @@ test("system prompt 改了, 第二轮 changed=true", () =&gt; {
     验证: 单测覆盖 3 个字段乱序的情况。
   </li>
 <li>
-<strong>Hash 大小写敏感</strong>: "Hello" 和 "hello" hash 不同。
+<strong>Hash 大小写敏感</strong>: "Hello"和"hello"hash 不同。
     验证: 基础单测, 防止有人把 hash 改成 <code>.toLowerCase()</code>
     破坏敏感性。
   </li>

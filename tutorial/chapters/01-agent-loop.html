@@ -171,6 +171,12 @@ export async function chat(userInput: string): Promise&lt;string&gt; {
     <code>index.ts</code> 的 <code>main()</code> 里一次性创建, 通过
     依赖注入传给 agent。 模块内部不 import 其他模块的实现。
     这是"控制反转 + 依赖注入" — 让业务模块纯净, 0 改动换测试。
+    <br/><br/>
+    <strong>延伸</strong>: 当两个业务模块要"互通"时 (比如 memory 想
+    把内容发到 LLM), 写<strong>第 3 个桥接文件</strong> import
+    两边, 业务模块互相不 import — 这是 Reference 章 "模式 3.5 ·
+    桥接模式 / 0 循环依赖" 的核心原则。 详细解释见
+    <a href="./reference.html#pattern-3-5">Reference · 模式 3.5</a>。
   </dd>
 </dl>
 <h2 id="why-factory">为什么用工厂模式 (而不是单例)</h2>

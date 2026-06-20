@@ -55,17 +55,83 @@
 </p>
 <h2 id="three-events">三个事件点: SessionStart / PreToolUse / PostToolUse</h2>
 <p>
-  <strong>用途</strong>: 主循环在 3 个固定时机发事件, handler
-  在外部注册监听。 事件点必须<strong>少而精</strong>, 多一个事件点
-  就是多一份主循环耦合。
+  <strong>场景: 团队要挂 3 个不同的扩展</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 团队要"跑完测试后自动 commit", 用
-  PostToolUse 监听 <code>run_bash("npm test")</code> 返回 0, 触发
-  <code>git commit</code>; 用户想"工具调用前打印彩色日志",
-  用 PreToolUse 把 tool name + args 写到 stderr; 团队要"每次启动
-  注入 CLAUDE.md 内容" 用 SessionStart 一次性发出 query。
+  团队 leader 想给 harness 加 3 个扩展, 看着都没问题, 但写起来麻烦:
 </p>
+<ol>
+<li>
+<strong>跑完测试自动 commit</strong>: 用户跑 <code>npm test</code> 之后,
+    看到测试通过, 自动 <code>git add + git commit</code>。 想监听
+    <code>run_bash</code> 跑完事件。
+  </li>
+<li>
+<strong>工具调用前打印日志</strong>: 调试时想看每次工具调用的
+    名字 + 参数, 输出到 stderr。 想监听 "工具执行前" 事件。
+  </li>
+<li>
+<strong>启动时注入 CLAUDE.md</strong>: 团队统一把 <code>CLAUDE.md</code>
+    内容加载到 system prompt, 让 LLM 看到项目规范。 想监听 "启动"
+    事件。
+  </li>
+</ol>
+<p>
+  这 3 个扩展都<strong>不是安全检查</strong> (Permission 不管),
+  都<strong>不是业务核心</strong> (写进 agent.ts 会污染主循环),
+  都<strong>不是单一工具能完成</strong> (跨多个工具或整个 session)。
+  朴素想法 1: "每个用户自己写个 wrapper 套在 tool 外?" 错。
+  5 个团队 5 个 wrapper, 互相不兼容, 维护噩梦。 朴素想法 2:
+  "在 agent.ts 主循环里加 3 个 if?" 错。 业务规则千变万化,
+  agent.ts 会变成"巨型 switch", 谁都不敢动。
+</p>
+<p>
+  <strong>正确做法</strong>: 主循环在<strong>3 个固定时机</strong>发事件,
+  handler 在<strong>外部</strong>注册监听。 事件点必须"少而精"
+  — 多一个事件点就是多一份主循环耦合, 永远不会被添加。 看
+  实际选择的 3 个:
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 1 · 3 个事件点在主循环中的位置</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">1 · SessionStart</div>
+      <div class="flow-stack__body">run() 第一次被调用时, 发一次, 携带 query 文本。 用于"启动时注入项目规范 / 加载 MEMORY"。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">2 · PreToolUse</div>
+      <div class="flow-stack__body">权限检查通过后, 工具执行前, 每次 tool_call 都发。 携带 toolCallId / toolName / args / round。</div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">3 · PostToolUse</div>
+      <div class="flow-stack__body">工具执行后, 每次都有。 携带 output (经 P1 即时压缩) + error 标记。 用于审计 / 自动 commit / Slack 通知。</div>
+    </div>
+  </div>
+</div>
+<p>
+  <strong>设计思想</strong>: 经典<strong>观察者模式</strong> — 主循环是事件
+  源, handler 是观察者, "事件点" 是订阅点。 关键边界: 主循环
+  <strong>只发</strong>事件, <strong>不处理</strong>事件 — 业务规则千变万化,
+  agent 不应该认识所有规则。
+</p>
+<p>
+  <strong>为什么是这 3 个, 不是更多</strong>
+</p>
+<p>
+  用户曾经想加更多: "我想在每个 tool 调用中间 (MidToolUse) 也挂
+  handler", "我想在 LLM 调用结束后 (AfterLLM) 也挂" — 全部被拒绝。
+  理由: 主循环每多一个 emit, 就是多一份未来必须维护的耦合。 3
+  个事件点能覆盖 90% 真实需求 (审计 / 警告 / 自动 commit / 规范
+  注入), 剩下 10% 用户自己在业务代码里写。
+</p>
+<p>
+  <strong>真实场景</strong>:
+</p>
+<ul>
+<li>团队要"跑完测试后自动 commit", 用 PostToolUse 监听 <code>run_bash("npm test")</code> 返回 0, 触发 <code>git commit</code></li>
+<li>用户想"工具调用前打印彩色日志", 用 PreToolUse 把 tool name + args 写到 stderr</li>
+<li>团队要"每次启动注入 CLAUDE.md 内容" 用 SessionStart 一次性发出 query</li>
+</ul>
 <p>
   <strong>设计思想</strong>: 经典<strong>观察者模式</strong> +
   <strong>策略模式</strong> 组合 — 主循环是事件源, handler 是观察者,
@@ -128,27 +194,56 @@
 </p>
 <h2 id="three-codes">三个返回码: 0 / 1 / 2 的语义正交</h2>
 <p>
-  <strong>用途</strong>: handler 返回一个退出码, 主循环根据退出码决定
-  后续动作。 返回码<strong>必须正交</strong> (互不依赖), 任何
-  组合都有明确语义。
+  <strong>场景: handler 要告诉主循环"我干了什么"</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: PreToolUse 监听 <code>run_bash</code>,
-  看到 <code>--no-verify</code> 就返回 1 (block, 阻止执行); 看到
-  <code>curl</code> 就返回 2 (inject, 追加警告消息到对话历史);
-  其他返回 0 (continue, 啥都不做)。
+  handler 跑完之后, 主循环要知道"接下来该怎么办"。 朴素做法:
+  handler 返回一个字符串, 主循环 <code>switch (result.action)</code>
+  判断。 错。 字符串容易拼错 (typo), 编译期不报错, 主循环写
+  错了就静默 fail。
 </p>
 <p>
-  <strong>设计思想</strong>: 数字退出码借鉴 shell 传统 (exit 0/1/2),
-  0 = 成功, 1 = 失败, 2 = 特殊用法。 这里的语义是:
+  朴素做法 2: handler 返回一个对象, 比如
+  <code>{action: "block", message: "..."}</code>。 看起来更好, 但
+  <code>action</code> 字段还是字符串, 而且对象能加任意字段, 没有"必填"
+  约束。 团队 leader 想加第 4 种 action (比如 "retry") 时, 又
+  要改主循环的 switch。
+</p>
+<p>
+  <strong>正确做法</strong>: 用<strong>数字退出码</strong>借鉴 shell 传统
+  (exit 0/1/2), <strong>语义正交</strong> — 3 个码覆盖 3 种独立动作, 任何
+  组合都有明确含义, 编译期就能校验。 PreToolUse 监听
+  <code>run_bash</code> 时, 看到 <code>--no-verify</code> 就返回 1 (block,
+  阻止执行); 看到 <code>curl</code> 就返回 2 (inject, 追加警告消息
+  到对话历史); 其他返回 0 (continue, 啥都不做)。
 </p>
 <div class="figure figure--compare">
   <div class="figure__title">图 2 · 3 个返回码的语义对比</div>
   <div class="flow-compare">
-    <div class="flow-compare__col flow-compare__col--bad">
+    <div class="flow-compare__col flow-compare__col--good">
       <div class="flow-compare__head">exitCode 0 · continue</div>
       <div class="flow-compare__body">啥都不做, 继续当前动作。 用于"我听了, 但没意见"。 大多数 handler 走这条。</div>
     </div>
+    <div class="flow-compare__col flow-compare__col--bad">
+      <div class="flow-compare__head">exitCode 1 · block</div>
+      <div class="flow-compare__body">阻止当前动作。 PreToolUse 上阻止 tool 执行; PostToolUse 上仅记录警告, 不重做。 SessionStart 上几乎不用。</div>
+    </div>
+    <div class="flow-compare__col flow-compare__col--good">
+      <div class="flow-compare__head">exitCode 2 · inject</div>
+      <div class="flow-compare__body">注入一条补充消息后继续。 消息在所有 tool_result 写完后, 统一追加成 user 消息。 用于"提醒 / 警告 / 补充上下文"。</div>
+    </div>
+  </div>
+</div>
+<p>
+  <strong>为什么必须正交</strong>
+</p>
+<p>
+  如果 3 个码有依赖 (比如"block 必须有 message", "continue 不能有
+  message"), 写 handler 时要记一堆约束, 容易写错。 正交设计
+  下, 每个码的 message 字段都是可选的, 互不影响: 0 可以带 message
+  (主循环忽略), 1 可以带 message (写到 tool result), 2 必须带
+  message (要注入), 但格式都一样, 处理逻辑统一。
+</p>
     <div class="flow-compare__col flow-compare__col--warn">
       <div class="flow-compare__head">exitCode 1 · block</div>
       <div class="flow-compare__body">阻止当前动作。 PreToolUse 上阻止 tool 执行; PostToolUse 上仅记录警告, 不重做。 SessionStart 上几乎不用。</div>
@@ -186,22 +281,94 @@ export interface HookResult {
 </p>
 <h2 id="aggregation">多 handler 聚合: 串行 + 短路 + 累积</h2>
 <p>
-  <strong>用途</strong>: 多个 handler 可以注册同一事件, 团队 / 用户
-  / 内置审计可以同时挂。 聚合规则必须<strong>明确</strong>, 不能
-  含糊 (不能说"按注册顺序决定一切")。
+  <strong>场景: 团队同时挂 3 个 handler, 行为怎么定</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 一个团队想挂 3 个 handler — (a) 内置审计
-  记录到 <code>audit.log</code>; (b) 团队规范检查 <code>--no-verify</code>;
-  (c) 安全扫描器检测 <code>rm -rf</code>。 handler (c) 返回 1 应该
-  短路, 跳过 (b); handler (b) 返回 2 累积 message, 不影响 (a) 的
-  审计写入。
+  一个团队想挂 3 个 handler, 看着都合理, 但聚合规则一含糊就出问题:
+</p>
+<ol>
+<li>
+<strong>(a) 内置审计</strong>: 每次工具调用都写 <code>audit.log</code>,
+    永远 continue (返回 0)。
+  </li>
+<li>
+<strong>(b) 团队规范检查</strong>: 看到 <code>--no-verify</code> 返回 2
+    (inject 警告消息), 其他 continue。
+  </li>
+<li>
+<strong>(c) 安全扫描器</strong>: 看到 <code>rm -rf</code> 返回 1
+    (block, 阻止执行)。
+  </li>
+</ol>
+<p>
+  朴素做法 1: "只让挂一个 handler?" 错。 3 个团队 3 个不同需求,
+  每个 handler 解决一个具体问题, 互不冲突。 朴素做法 2: "并行
+  执行 3 个 handler, 看哪个先返回?" 错。 并发行为难调试, 出现
+  block 时谁负责? race condition 难追。 朴素做法 3: "按注册
+  顺序决定一切?" 错。 含糊, 团队 A 说"我先注册就该我说了算",
+  团队 B 说"我后注册覆盖你" — 永远吵不完。
 </p>
 <p>
-  <strong>设计思想</strong>: 串行而非并行 — 简单、可预测、易调试;
-  block 短路而非 "block 排队" — 第一个 block 命中就够了, 后续没必要
-  执行; inject 累积而非 "最后一个赢" — 多条提醒都有意义。 看
-  <a href="https://github.com/pingp76/swoopcode/blob/main/src/hooks.ts#L172"><code>src/hooks.ts</code> 第 172 行的 <code>run()</code> 实现</a>:
+  <strong>正确做法</strong>: 显式定义<strong>3 条聚合规则</strong>:
+</p>
+<ol>
+<li>
+<strong>串行而非并行</strong>: handler 数组按注册顺序一个一个跑,
+    简单可预测, 调试时打日志能看每个 handler 跑没跑。
+  </li>
+<li>
+<strong>block (1) 短路</strong>: 第一个返回 1 的 handler 立即短路,
+    后续 handler 不跑。 既然已经决定 block, 跑更多 handler 没意义。
+  </li>
+<li>
+<strong>inject (2) 累积</strong>: 多个 handler 返回 2 时, message
+    用空行拼起来, 最后一起注入。 "最后一个赢" 会丢信息, 累积更安全。
+  </li>
+</ol>
+<p>
+  <strong>具体走一遍</strong>: 假设 LLM 调 <code>rm -rf /tmp/old</code>:
+</p>
+<ul>
+<li>
+<strong>handler (a) 审计</strong> 跑: 写 <code>audit.log</code>, 返回 0
+    (continue)。 累积数组: <code>[]</code>。
+  </li>
+<li>
+<strong>handler (b) 规范检查</strong> 跑: 命令不含 <code>--no-verify</code>,
+    返回 0。 累积数组: <code>[]</code>。
+  </li>
+<li>
+<strong>handler (c) 安全扫描</strong> 跑: 看到 <code>rm -rf</code>,
+    返回 1 (block)。 <strong>立即短路, 不再跑后续</strong>。
+  </li>
+</ul>
+<p>
+  主循环看到 1, 阻止 tool 执行, 写 "Permission denied by hook" tool
+  message, 跳到下一轮 LLM。 这就是短路的好处 — 安全扫描是
+  最后一道防线, 优先级最高, 看到危险就该立即拦下。
+</p>
+<p>
+  再假设 LLM 调 <code>git commit --no-verify -m "x"</code>:
+</p>
+<ul>
+<li>
+<strong>(a) 审计</strong> 返回 0。
+  </li>
+<li>
+<strong>(b) 规范检查</strong> 看到 <code>--no-verify</code>, 返回 2
+    (inject 警告)。 累积数组: <code>["请用 --verify 而不是 --no-verify"]</code>。
+  </li>
+<li>
+<strong>(c) 安全扫描</strong> 命令不是 <code>rm -rf</code>, 返回 0。
+  </li>
+</ul>
+<p>
+  累积数组非空, 主循环拿到一个聚合结果: <code>{exitCode: 2,
+  message: "请用 --verify 而不是 --no-verify"}</code>, tool 正常
+  执行, 警告消息稍后注入到 history (下一节"延迟注入")。
+</p>
+<p>
+  <strong>实现</strong>:
 </p>
 <pre><code class="language-typescript">async function run(event: HookEvent): Promise&lt;HookResult&gt; {
   const list = handlers[event.name] ?? [];
@@ -224,67 +391,124 @@ export interface HookResult {
   return { exitCode: 0 };
 }</code></pre>
 <p>
-  <strong>实现细节</strong>: handler 数组存在闭包里, 用
-  <code>Partial&lt;Record&lt;HookEventName, HookHandler[]&gt;&gt;</code>
-  类型保证"只注册需要的事件, 不需要的事件不必写空数组"。 这也是
-  Reference 章节 "模式 1 · 工厂 + 闭包" 的应用 — 状态 (handlers +
-  injected) 都在闭包内, 外部只能通过 <code>run()</code> 接口访问。
+  <strong>设计思想</strong>: 串行 + 短路 + 累积 = 简单 + 可预测 + 易调试。
+  handler 数组存在闭包里, 状态 (handlers + injected) 都在闭包内,
+  外部只能通过 <code>run()</code> 接口访问。 这是 Reference 章节
+  "模式 1 · 工厂 + 闭包" 的应用。
 </p>
 <h2 id="delayed-inject">延迟注入: 为什么不能在 tool_call 后立刻写 user message</h2>
 <p>
-  <strong>用途</strong>: exitCode 2 的 message 必须<strong>延迟</strong>到
-  所有 tool_result 写完后才能追加, 不然会破坏 OpenAI API 消息格式。
+  <strong>场景: handler 想在 LLM 调用之间塞一条提醒</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 假设 LLM 一次发了 3 个 tool_call
-  (run_bash + run_read + run_write), PostToolUse 在每个执行完都触发,
-  handler 返回 2 要注入警告。 如果在第一个 tool_result 后立刻追加
-  user message, OpenAI API 会拒绝: 它要求 assistant message 的所有
-  tool_call 必须有对应的 tool_result, 中间不能有 user message。
+  团队 handler 看到 LLM 调 <code>rm -rf /tmp/old</code>, 想发一条
+  警告 "建议用 mv 而不是 rm"。 handler 跑完返回
+  <code>{exitCode: 2, message: "建议用 mv"}</code>, 期望这条消息
+  出现在 history 里, 让 LLM 下一轮看到。
 </p>
 <p>
-  <strong>设计思想</strong>: Hook 系统<strong>不负责写入</strong>,
-  它只返回"应该注入什么"; 主循环负责"什么时候写"。 这就是 Reference
-  章节 "模式 4 · 依赖注入" — HookRunner 是被注入的策略, 主循环是
-  调用方, 双方协议清晰。
+  朴素做法 1: "handler 内部直接 <code>history.add(message)</code>
+  写消息?" 错。 handler 不知道当前是哪个 tool_call, 不知道
+  其他 tool_result 写没写完, 写早了破坏 OpenAI API 消息格式。
+  朴素做法 2: "HookRunner.run() 返回结果后, 主循环立即
+  <code>history.add(message)</code>?" 也错。 LLM 一次可能发 3 个
+  tool_call, 第一个 tool_result 写完后就追加 user message, OpenAI
+  API 直接 400 报错。
+</p>
+<p>
+  <strong>问题根源: OpenAI API 的硬约束</strong>
+</p>
+<p>
+  OpenAI API 要求 <code>assistant</code> 消息里的<strong>所有</strong>
+  <code>tool_call</code> 必须有对应的 <code>tool</code> 消息, 中间不能塞
+  其他 role (包括 user)。 这是消息序列的<strong>协议级</strong>约束,
+  不是 OpenAI 文档里说"建议", 是 SDK 实际会 400 报错的硬规则。
+</p>
+<p>
+  <strong>具体例子: 一次 LLM 调用发 3 个 tool_call</strong>
 </p>
 <div class="figure figure--stack">
   <div class="figure__title">图 3 · exitCode 2 的延迟注入时机</div>
   <div class="flow-stack">
-    <div class="flow-stack__layer flow-stack__layer--stable">
+    <div class="flow-stack__layer flow-stack__layer--bad">
       <div class="flow-stack__label">❌ 错误时机: tool_result 之后立刻追加</div>
-      <div class="flow-stack__body">assistant(tool_call A) → tool_result A → <strong>user(警告消息)</strong> → tool_result B → ... OpenAI 拒绝, 400 error。</div>
+      <div class="flow-stack__body">assistant(tool_call A,B,C) → tool_result A → <strong>user(警告消息)</strong> → tool_result B → tool_result C<br/>
+        <br/>
+        <strong>问题</strong>: assistant 消息有 3 个 tool_call, 但中间夹了 user
+        消息, tool_call B 和 C 的对应 tool_result 还在后面。 OpenAI
+        API 拒绝, 报 400 错误。
+      </div>
     </div>
-    <div class="flow-stack__layer flow-stack__layer--dynamic">
+    <div class="flow-stack__layer flow-stack__layer--good">
       <div class="flow-stack__label">✅ 正确时机: 所有 tool_result 写完后追加</div>
-      <div class="flow-stack__body">assistant(tool_call A,B,C) → tool_result A → tool_result B → tool_result C → <strong>user(警告消息)</strong> → 下一轮 assistant。 协议合法。</div>
+      <div class="flow-stack__body">assistant(tool_call A,B,C) → tool_result A → tool_result B → tool_result C → <strong>user(警告消息)</strong> → 下一轮 assistant<br/>
+        <br/>
+        <strong>好处</strong>: 协议合法, OpenAI API 接受; assistant 消息
+        的所有 tool_call 都有对应 tool_result, user 消息在最后,
+        序列完整。
+      </div>
     </div>
   </div>
 </div>
 <p>
-  <strong>实现细节</strong>: 这条约束写在
+  <strong>正确做法: Hook 系统只返回, 不写入</strong>
+</p>
+<p>
+  HookRunner.run() 永远只<strong>返回</strong> <code>{exitCode: 2,
+  message: "..."}</code>, <strong>不直接调 history.add()</strong>。
+  主循环<strong>缓存</strong>所有 inject 消息, 等本轮所有 tool_result
+  写完, 再<strong>统一追加</strong>为 user message。 这是 Reference
+  章节 "模式 4 · 依赖注入" 的应用 — HookRunner 是被注入的策略,
+  主循环是调用方, 双方协议清晰, 谁写消息由主循环决定。
+</p>
+<p>
+  <strong>实现</strong>: 这条约束写在
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/hooks.ts#L28"><code>src/hooks.ts</code> 第 28 行的"延迟注入" 注释</a>
-  里, 是从 "本阶段限制" 段之后的"关键约束" 部分 — 不写测试也会被
-  后续读者注意到。 agent 主循环在 collect tool result 阶段<strong>缓存</strong>
-  所有 inject 消息, 写完最后一个 tool_result 后再批量追加为 user
-  message。
+  里 — 不写测试也会被后续读者注意到。 agent 主循环在 collect
+  tool result 阶段<strong>缓存</strong>所有 inject 消息, 写完最后
+  一个 tool_result 后再批量追加为 user message。
 </p>
 <h2 id="noop">createNoopHookRunner: 让 agent 主循环保持直线阅读</h2>
 <p>
-  <strong>用途</strong>: 默认没有 hook 时, agent 主循环里每个
-  <code>if (hookRunner)</code> 都会打断阅读。 用 <code>createNoopHookRunner()</code>
-  做一个"啥都不做" 的默认实现, 让主循环保持直线流。
+  <strong>场景: 简单任务用不到 hook, 主循环被 6 个 if 刺满</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 用户没注册任何 hook, 跑最简单的 harness:
-  "读 1 个文件, 改 1 个文件, 结束"。 主循环 6 步里每步都有
-  <code>hookRunner.run(...)</code>, 如果 hookRunner 是 undefined 就
-  要写 6 个 if, 阅读起来像刺猬。
+  用户的 team 还在调研阶段, 跑最简单的 harness: "读 1 个文件,
+  改 1 个文件, 结束"。 根本用不到 hook。 但 agent.ts 主循环 6 步里
+  每步都有 <code>await hookRunner.run(event)</code>, 如果
+  <code>hookRunner</code> 是 undefined, 就要在每步加 if:
+</p>
+<pre class="code-block"><code>// 朴素实现: 6 个 if 判空
+async function run(query) {
+  if (hookRunner) await hookRunner.run({ name: "SessionStart", payload: { query } });
+  // ... 加载 history
+  for (;;) {
+    const response = await llm.chat(messages, tools);
+    if (response.toolCalls.length === 0) return response.content;
+    if (hookRunner) await hookRunner.run({ name: "PreToolUse", payload: { ... } });
+    for (const call of response.toolCalls) {
+      const result = await tools.invoke(call.name, call.args);
+      if (hookRunner) await hookRunner.run({ name: "PostToolUse", payload: { ... } });
+      history.add({ role: "tool", tool_call_id: call.id, content: result.content });
+    }
+  }
+}</code></pre>
+<p>
+  6 个 <code>if (hookRunner)</code> 像刺猬一样插在主循环, 阅读时
+  每次都要"哦这一行是判空"。 错。
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>空对象模式 (Null Object)</strong> —
-  不是简单 <code>hookRunner?.run()</code>, 而是给一个永远返回
-  <code>{ exitCode: 0 }</code> 的对象, 协议完整但行为无副作用。 看
+  朴素做法 2: "用 optional chaining <code>hookRunner?.run()</code>?"
+  也不行。 <code>?.run()</code> 不会 await, 主循环立刻往下走, hook
+  还没跑完 tool 就 invoke 了 — 顺序错乱。 这条不行。
+</p>
+<p>
+  <strong>正确做法: 空对象模式 (Null Object)</strong>
+</p>
+<p>
+  给一个永远返回 <code>{ exitCode: 0 }</code> 的对象, <strong>协议完整</strong>
+  但<strong>行为无副作用</strong>。 主循环永远调 <code>await hookRunner.run(event)</code>,
+  不用判空, 不用 optional chaining, 代码保持直线流。 看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/hooks.ts#L220"><code>src/hooks.ts</code> 第 220 行的 <code>createNoopHookRunner()</code></a>:
 </p>
 <pre><code class="language-typescript">export function createNoopHookRunner(): HookRunner {
@@ -299,22 +523,35 @@ export interface HookResult {
   里, 如果用户没传 <code>hookRunner</code> 就 <code>createNoopHookRunner()</code>
   兜底, 保证 agent.ts 里 <code>await hookRunner.run(event)</code> 永远
   不需要判空。 这是 Reference 章节 "模式 1 · 工厂 + 闭包" 的应用 —
-  闭包返回一个稳定的对象, 行为可预测。
+  闭包返回一个稳定的对象, 行为可预测, 调用方零负担。
 </p>
 <h2 id="register">handler 注册: Partial&lt;Record&gt; 表达"不监听就是空数组"</h2>
 <p>
-  <strong>用途</strong>: 创建 HookRunner 时传入 handlers 配置, 同一
-  事件可注册多个 handler。 没注册的事件 = 空数组 = 啥也不做。
+  <strong>场景: 团队只关心 2 个事件, 不想写空数组</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: <code>index.ts</code> 里
-  <code>createHookRunner({ PreToolUse: [auditHandler, noVerifyHandler], PostToolUse: [slackHandler] }, logger)</code>
-  — 只注册了 2 个事件, SessionStart 默认空数组。
+  团队在 <code>index.ts</code> 里写:
+</p>
+<pre class="code-block"><code>createHookRunner({
+  PreToolUse:  [auditHandler, noVerifyHandler],
+  PostToolUse: [slackHandler],
+}, logger);</code></pre>
+<p>
+  只注册了 2 个事件, 没注册 <code>SessionStart</code>。 朴素做法 1:
+  "强制写完整 3 个键, 没注册的写空数组?" 错。 每次写
+  <code>SessionStart: []</code> 噪音, 团队每次都要重复这个空数组,
+  哪天加第 4 个事件又得改所有 call site。 朴素做法 2: "用可选
+  字段 <code>handlers?: Record&lt;..., ...&gt;</code>?" 错。 缺字段
+  运行时是 undefined, 调 <code>handlers.SessionStart.forEach</code>
+  直接 NPE, 还得加判空。
 </p>
 <p>
-  <strong>设计思想</strong>: 用 <code>Partial&lt;Record&lt;K, V&gt;&gt;</code>
-  类型让"只填需要的事件" 成为类型安全的事实 — 漏填的事件是 undefined,
-  编译期允许, 运行期用 <code>?? []</code> 兜底。 看
+  <strong>正确做法: <code>Partial&lt;Record&gt;</code> + 运行时 <code>?? []</code> 兜底</strong>
+</p>
+<p>
+  编译期允许缺字段 (因为是 <code>Partial</code>), 缺的是
+  <code>undefined</code>; 运行期用 <code>handlers[event.name] ?? []</code>
+  兜底成空数组。 <strong>类型安全 + 调用方零负担</strong>。 看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/hooks.ts#L163"><code>src/hooks.ts</code> 第 163 行的 <code>createHookRunner</code> 工厂</a>:
 </p>
 <pre><code class="language-typescript">export function createHookRunner(
@@ -331,67 +568,129 @@ export interface HookResult {
   章节 "模式 3 · 窄接口" 的应用 — 接口只暴露 <code>run</code>, 不暴露
   handlers 数组, 闭包状态不外泄。
 </p>
+<p>
+  <strong>handler 本身写在哪</strong>: 一般写在一个<strong>桥接文件</strong>里
+  (如 <code>src/hooks/memory-inject.ts</code>), 这个文件同时 import
+  hooks 和具体业务模块 (memory), 把"业务模块的能力" 包成 hook
+  handler。 这是整个项目架构的<strong>核心原则</strong> — 业务模块
+  之间不直接 import, 通过第 3 个桥接文件集成。 详细解释见
+  <a href="./reference.html#pattern-3-5">Reference · 模式 3.5 · 桥接模式 / 0 循环依赖</a>。
+</p>
 <h2 id="loop-integration">主循环集成: 在哪 3 个时机 emit</h2>
 <p>
-  <strong>用途</strong>: Hook 是扩展点, 主循环<strong>必须</strong>
-  按固定时序 emit, 时序错了协议就错。 3 个 emit 时机在 agent.ts 里
-  是:
+  <strong>场景: 主循环怎么知道在哪调 hook</strong>
+</p>
+<p>
+  团队 leader 看 <code>agent.ts</code> 主循环 6 步, 想知道每个
+  hook 事件在第几步 emit。 朴素做法 1: "主循环里加 if-else,
+  每个事件单独一个 if?" 错。 6 步 × 3 个事件 = 18 个 if, 主循环
+  像刺猬, 改一次业务逻辑就要小心不要碰 hook。 朴素做法 2:
+  "主循环外层包一层 'hook dispatcher'?" 也错。 抽象泄漏 —
+  业务逻辑被 dispatcher 隔开, 调试时看 dispatcher 跳来跳去, 反而
+  更难理解。
+</p>
+<p>
+  <strong>正确做法</strong>: 集成点必须<strong>集中</strong>, 不能散在
+  agent.ts 各个角落。 看 3 个事件的具体 emit 时机:
 </p>
 <ol>
 <li>
-<strong>SessionStart</strong>: <code>while</code> 循环开始前, 把 query
-    包装成事件 <code>{ name: "SessionStart", payload: { query } }</code>
+<strong>SessionStart</strong> (step 0, <code>while</code> 循环开始前):
+    把 query 包装成事件 <code>{ name: "SessionStart", payload: { query } }</code>
     发一次。 handler 返回 2 的 message 注入到 system 消息后, 第一轮
     assistant 调用之前。
   </li>
 <li>
-<strong>PreToolUse</strong>: 权限检查通过后, 调
-    <code>toolRegistry.invoke(...)</code> 之前。 handler 返回 1 阻止
-    invoke, 写 "Permission denied by hook" tool message; 返回 2 累积
-    message, 在所有 tool_result 后注入。
+<strong>PreToolUse</strong> (step 3, call tools 前): 权限检查
+    通过后, 调 <code>toolRegistry.invoke(...)</code> 之前。 handler
+    返回 1 阻止 invoke, 写 "Permission denied by hook" tool message;
+    返回 2 累积 message, 在所有 tool_result 后注入。
   </li>
 <li>
-<strong>PostToolUse</strong>: <code>invoke</code> 完成后, 把
-    <code>ToolResult.output</code> 喂给 handler。 handler 返回 1
-    (block) 在 PostToolUse 上<strong>不重做</strong>, 只写警告日志
-    (因为 tool 已经跑完, block 没意义); 返回 2 累积 message。
+<strong>PostToolUse</strong> (step 3.5, call tools 后, compress
+    前): <code>invoke</code> 完成后, 把 <code>ToolResult.output</code>
+    喂给 handler。 handler 返回 1 (block) 在 PostToolUse 上<strong>不重做</strong>,
+    只写警告日志 (因为 tool 已经跑完, block 没意义); 返回 2 累积
+    message。
   </li>
 </ol>
 <p>
-  <strong>设计思想</strong>: 集成点必须<strong>集中</strong>, 不能散
-  在 agent.ts 各个角落。 一般 6 步 loop 里 SessionStart 在 step 0
-  (load history 后), PreToolUse 在 step 3 (call tools 前), PostToolUse
-  在 step 3.5 (call tools 后, before step 4 compress)。
+  <strong>为什么 PostToolUse 上 block 没用</strong>: 朴素想法
+  "PostToolUse 返回 1 应该撤销 tool 跑过的结果?" 错。 tool
+  已经执行, 副作用已经发生 (文件已写 / 命令已跑), 撤销需要
+  复杂的事务回滚, harness 做不到。 PostToolUse 上的 1 只是
+  "下次类似的操作我要拒绝", 不撤销已经发生的事。
 </p>
 <p>
-  <strong>实现细节</strong>: 集成代码写在 agent.ts 里, 调用方式统一是
-  <code>const hookResult = await hookRunner.run(event); if (hookResult.exitCode === 1) ...; if (hookResult.message) pendingInjects.push(hookResult.message);</code>。
+  <strong>实现</strong>: 集成代码写在 agent.ts 里, 调用方式统一是
+</p>
+<pre class="code-block"><code>const hookResult = await hookRunner.run(event);
+if (hookResult.exitCode === 1) {
+  // 阻止 / 写 denied message / 跳过 invoke
+}
+if (hookResult.message) {
+  pendingInjects.push(hookResult.message);   // 缓存, 稍后批量注入
+}</code></pre>
+<p>
   缓存的 inject 消息在 collect tool results 阶段之后批量追加, 这就是
   第 02 章 "message 配对" 协议的具体应用。
 </p>
 <h2 id="cache-implication">对 prompt cache 的影响: SessionStart 注入是 stable prefix 一部分</h2>
 <p>
-  <strong>用途</strong>: SessionStart 的 inject 消息会进入 system 消息,
-  而 system 消息是 stable prefix 的<strong>核心</strong>。 每次启动注入
-  不同内容, 整个对话的 cache 命中会崩。
+  <strong>场景: SessionStart 注入让 cache 命中率跌到 0</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 团队用 SessionStart 注入"项目规范", 但
-  规范每行一个 prompt 改了 10 个字符, 后面 100 轮对话 cache 全部
-  miss, 成本 ×10。 应该把 SessionStart 的注入做成<strong>幂等</strong>:
-  启动时一次写, 后续 100 轮都引用, 不再追加。
+  团队用 SessionStart 注入"项目规范", 看着是合理的扩展, 但跑了
+  一个月后账单翻倍。 排查发现: 每次启动 SessionStart 都重新
+  注入规范, 规范一改 (1 行代码 10 个字符), 后续 100 轮对话
+  的 system prompt 全 miss, 整个对话的 cache prefix 重新算,
+  成本 ×10。
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>幂等性约束</strong> — SessionStart
-  注入必须保证"同一 session 内, 相同 query + 相同 handler 集合"
-  产出相同 message。 handler 应该读配置文件 / MEMORY, 不读外部随机
-  数据 (时间戳 / 随机数)。
+  朴素想法 1: "SessionStart 不注入不就行了?" 错。 团队规范必须
+  注入, LLM 不知道项目规范会乱写。 朴素想法 2: "在 system prompt
+  里写死规范?" 也错。 规范是配置 (git 仓库的 <code>CLAUDE.md</code>),
+  改规范要重发 harness 体验差。 朴素想法 3: "让 SessionStart
+  注入的内容每次都一样?" 思路对, 但实现麻烦 — 规范确实偶尔改,
+  怎么保证"同一 session 内一致"?
 </p>
 <p>
-  <strong>实现细节</strong>: 这是和第 05 章 (Skill 稳定前缀) +
-  第 09 章 (Memory 4 类 tags) 联合的 cache 策略。 SessionStart 的
-  inject 应该在 handler 内部做"内容去重" — 同一 handler 在同一 session
-  只 emit 一次。 这部分实现在第 10 章 (Cache) 详细展开。
+  <strong>正确做法: 幂等性约束</strong>
+</p>
+<p>
+  SessionStart 注入必须保证"<strong>同一 session 内, 相同 query +
+  相同 handler 集合</strong> 产出<strong>相同</strong>message"。 handler
+  应该读<strong>稳定</strong>数据源 (配置文件 / MEMORY / git
+  commit), 不读<strong>动态</strong>数据 (时间戳 / 随机数 /
+  当前时间)。
+</p>
+<p>
+  <strong>具体例子: 什么算"稳定"</strong>
+</p>
+<ul>
+<li>
+<strong>稳定</strong>: 读 <code>CLAUDE.md</code> 文件内容 (一个 session
+    内不变)。 读 MEMORY.md (一个 session 内不变)。 读 git
+    当前 commit hash (一个 session 内不变)。
+  </li>
+<li>
+<strong>不稳定 (不能用)</strong>: 读 <code>new Date().toISOString()</code>
+    (每次 emit 都不同, 注入 → cache miss → 注入 → cache miss
+    死循环)。 读 <code>Math.random()</code> (随机, 同样问题)。
+  </li>
+</ul>
+<p>
+  <strong>设计思想</strong>: SessionStart 是"启动时一次" 的事件, 不是
+  "每轮一次"。 注入的内容应该<strong>只写一次到 system prompt</strong>,
+  后续 100 轮对话引用同一份 system, cache 命中。 这是和第 05 章
+  (Skill 稳定前缀) + 第 09 章 (Memory 4 类 tags) 联合的 cache
+  策略。
+</p>
+<p>
+  <strong>实现</strong>: SessionStart 的 inject 应该在 handler 内部
+  做"内容去重" — 同一 handler 在同一 session 只 emit 一次 (只
+  写一次 system message), 后续轮不再追加。 这部分实现在第 10 章
+  (Cache) 详细展开, 包括 <code>cache-debug.ts</code> 的稳定前缀 hash 工具。
 </p>
 <h2 id="fake-test">fake test: 用 stub handler 验证 block 短路和 inject 累积</h2>
 <p>
@@ -449,6 +748,326 @@ test("handler 抛异常只 warn, 不中断", async () =&gt; {
   <strong>实现细节</strong>: 这 3 个 stub 测试覆盖了 Hook 系统 90% 的
   协议 — 短路、累积、异常隔离。 handler 自身的业务逻辑测试应该放在
   <code>handler-name.test.ts</code>, 不在 <code>hooks.test.ts</code>。
+</p>
+<h2 id="write-your-own-hook">实战: 自己写一个 hook 挂到主循环</h2>
+<p>
+  前面讲的"<strong>主循环</strong>在 3 个时机 emit" 和 "<strong>handler</strong>
+  是外部注册的函数" — 这一节把它们串起来, 走一遍"自己写一个
+  hook" 的完整流程。 例子: 写一个 "<strong>检测危险命令</strong>"
+  的 PreToolUse handler, 看到 <code>rm -rf /</code> / <code>sudo</code> /
+  <code>curl | sh</code> 就 block。
+</p>
+<p>
+  <strong>目标</strong>: 走完后, 你能照葫芦画瓢写任意 hook — 比如
+  "敏感词提醒" / "自动 commit" / "Slack 通知" / "统计工具调用
+  次数", 都是同一个模板。
+</p>
+<h3 id="wyh-step1">步骤 1 · 写 handler 函数</h3>
+<p>
+  handler 是一个<strong>普通 async 函数</strong>, 接 <code>HookEvent</code>,
+  返回 <code>HookResult</code>。 我们写的 "危险命令检测" handler
+  只关心 <code>PreToolUse</code> 事件, 所以用泛型 <code>HookHandler&lt;...&gt;</code>
+  精确声明:
+</p>
+<pre class="code-block"><code>// src/hooks/dangerous-command.ts
+import type { HookHandler } from "../hooks.js";
+
+/**
+ * 危险命令检测: 看到 rm -rf / / sudo / curl | sh 等危险模式就 block (返回 1)。
+ * 其他情况返回 0 continue。
+ */
+export const dangerousCommandHook: HookHandler&lt;{
+  name: "PreToolUse";
+  payload: {
+    toolCallId: string;
+    toolName: string;
+    args: Record&lt;string, unknown&gt;;
+    round: number;
+  };
+}&gt; = (event) =&gt; {
+  // 只关心 run_bash 工具
+  if (event.payload.toolName !== "run_bash") {
+    return { exitCode: 0 };
+  }
+
+  // 取出命令字符串 (args.command 是 unknown, 需要 narrow)
+  const command = typeof event.payload.args.command === "string"
+    ? event.payload.args.command
+    : "";
+
+  // 危险模式黑名单 (教学版只列 3 个, 实战可加更多)
+  const dangerousPatterns = [
+    { regex: /rm\s+-rf\s+\//,        reason: "rm -rf / 会清空根目录" },
+    { regex: /\bsudo\b/,             reason: "sudo 需要管理员权限" },
+    { regex: /curl.*\|\s*(bash|sh)/, reason: "curl | sh 远程执行风险" },
+  ];
+
+  for (const { regex, reason } of dangerousPatterns) {
+    if (regex.test(command)) {
+      return {
+        exitCode: 1,                    // block
+        message: `Dangerous command blocked: ${reason} (command: ${command})`,
+      };
+    }
+  }
+
+  return { exitCode: 0 };               // continue
+};</code></pre>
+<p>
+  4 个要点:
+</p>
+<ol>
+<li>
+<strong>handler 是普通函数</strong>: 可以是 arrow function / async /
+    sync, 没有特殊 wrapper, 直接 <code>(event) =&gt; HookResult</code>。
+  </li>
+<li>
+<strong>用泛型 <code>HookHandler&lt;...&gt;</code> 精确声明</strong>:
+    不关心 SessionStart 的 handler 就用
+    <code>HookHandler&lt;PreToolUse&gt;</code>, TypeScript 帮你窄化
+    <code>event.payload</code> 到 PreToolUse 专用字段, 不用
+    <code>if (event.name === "PreToolUse")</code> 判一次。
+  </li>
+<li>
+<strong>不关心的工具直接 continue</strong>: 这个 handler 只检查
+    <code>run_bash</code>, 看到 <code>run_read</code> / <code>run_write</code> 等直接
+    <code>return { exitCode: 0 }</code>。 不要假设"我应该处理所有工具"。
+  </li>
+<li>
+<strong>block 时 message 必填</strong>: 写给 LLM 看 (写到 tool result),
+    LLM 据此决定下一步。 不写 message = LLM 不知道为啥被拒。
+  </li>
+</ol>
+<h3 id="wyh-step2">步骤 2 · 注册到 HookRunner</h3>
+<p>
+  写完 handler, 下一步<strong>注册</strong>到 HookRunner。 这一步在
+  Composition Root (<code>index.ts</code>) 完成。 3 种注册方式:
+</p>
+<p>
+  <strong>方式 A: 直接在 index.ts 里写 (简单, 1 个 handler)</strong>
+</p>
+<pre class="code-block"><code>// src/index.ts
+import { createHookRunner } from "./hooks.js";
+import { dangerousCommandHook } from "./hooks/dangerous-command.js";
+
+const hookRunner = createHookRunner({
+  // PreToolUse 上可以注册多个 handler, 按数组顺序串行
+  PreToolUse: [
+    dangerousCommandHook,
+    // 还可以加其他: auditLogHook / noVerifyHook / ...
+  ],
+  // PostToolUse: 暂时不挂, 以后想加再写
+  // SessionStart: 暂时不挂
+}, logger);
+
+// 没注册的事件自动是空数组, 啥也不做 (Partial&lt;Record&gt; 兜底)</code></pre>
+<p>
+  <strong>方式 B: 抽到独立文件 (handler 多 / 想分模块)</strong>
+</p>
+<pre class="code-block"><code>// src/hooks/index.ts
+import type { HookHandler } from "../hooks.js";
+import { dangerousCommandHook } from "./dangerous-command.js";
+import { auditLogHook } from "./audit-log.js";
+import { noVerifyHook } from "./no-verify.js";
+
+// 集中导出所有 handler, index.ts 里一次 import
+export const preToolUseHandlers: HookHandler[] = [
+  auditLogHook,
+  dangerousCommandHook,
+  noVerifyHook,
+];
+
+export const postToolUseHandlers: HookHandler[] = [
+  slackNotificationHook,
+  autoCommitHook,
+];
+
+// src/index.ts
+import { preToolUseHandlers, postToolUseHandlers } from "./hooks/index.js";
+const hookRunner = createHookRunner({
+  PreToolUse:  preToolUseHandlers,
+  PostToolUse: postToolUseHandlers,
+}, logger);</code></pre>
+<p>
+  <strong>方式 C: 从配置文件读 (handler 经常变, 不想改代码)</strong>
+</p>
+<pre class="code-block"><code>// config.json
+{
+  "hooks": {
+    "PreToolUse": [
+      "./hooks/dangerous-command.js",
+      "./hooks/audit-log.js"
+    ]
+  }
+}
+
+// src/index.ts
+import config from "./config.json";
+const preToolUseHandlers = await Promise.all(
+  config.hooks.PreToolUse.map(async (path) =&gt; {
+    const mod = await import(path);
+    return mod.default;
+  })
+);
+const hookRunner = createHookRunner({ PreToolUse: preToolUseHandlers }, logger);</code></pre>
+<p>
+  <strong>推荐</strong>: 教学项目用方式 A 或 B (代码可见, 易调试); 工业
+  项目用方式 C (handler 经常变, 不想每次重发代码)。
+</p>
+<h3 id="wyh-step3">步骤 3 · 挂到主循环 (其实不用挂)</h3>
+<p>
+  <strong>你已经完成了。</strong> 因为 hookRunner 是在 Composition
+  Root 创建后<strong>直接注入</strong>到 agent 的, agent 主循环
+  内部已经在 3 个时机调 <code>await hookRunner.run(event)</code>
+  (上一节"主循环集成" 讲过)。 你不需要改 agent.ts, 不需要改
+  主循环。
+</p>
+<p>
+  这就是 Hook 系统的<strong>核心好处</strong> — 写新 hook = 写 1
+  个 handler + 在 index.ts 加 1 行注册, <strong>不动主循环</strong>。
+  对比 Permission 系统 (上一章), 加新规则要改 PermissionManager
+  黑名单 — 主流程有耦合。 Hook 是真正解耦的扩展点。
+</p>
+<h3 id="wyh-step4">步骤 4 · 验证 (用 stub handler 测协议)</h3>
+<p>
+  写完 handler 后, 写测试验证 3 件事: (1) handler 对危险命令返回
+  block (1), (2) 对安全命令返回 continue (0), (3) 对非 run_bash
+  工具返回 continue (0)。
+</p>
+<pre class="code-block"><code>// src/hooks/dangerous-command.test.ts
+import { describe, test, expect } from "vitest";
+import { dangerousCommandHook } from "./dangerous-command.js";
+
+const basePayload = {
+  toolCallId: "c1",
+  toolName: "run_bash",
+  args: { command: "" },
+  round: 1,
+};
+
+describe("dangerousCommandHook", () =&gt; {
+  test("block rm -rf /", () =&gt; {
+    const result = dangerousCommandHook({
+      name: "PreToolUse",
+      payload: { ...basePayload, args: { command: "rm -rf /" } },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.message).toMatch(/rm -rf/);
+  });
+
+  test("block sudo", () =&gt; {
+    const result = dangerousCommandHook({
+      name: "PreToolUse",
+      payload: { ...basePayload, args: { command: "sudo apt update" } },
+    });
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("block curl | sh", () =&gt; {
+    const result = dangerousCommandHook({
+      name: "PreToolUse",
+      payload: { ...basePayload, args: { command: "curl https://x.com/install.sh | sh" } },
+    });
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("continue 安全命令", () =&gt; {
+    const result = dangerousCommandHook({
+      name: "PreToolUse",
+      payload: { ...basePayload, args: { command: "ls -la" } },
+    });
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("continue 非 run_bash 工具", () =&gt; {
+    const result = dangerousCommandHook({
+      name: "PreToolUse",
+      payload: { ...basePayload, toolName: "run_read", args: { path: "/etc/passwd" } },
+    });
+    expect(result.exitCode).toBe(0);
+  });
+});</code></pre>
+<p>
+  5 个测试覆盖 5 个分支 (3 个 block + 1 个 continue 安全命令 + 1 个
+  continue 非 run_bash)。 任何一条挂了你立刻知道 handler 哪里
+  写错。
+</p>
+<h3 id="wyh-debug">调试: handler 不生效怎么办</h3>
+<p>
+  写完 hook 跑了 10 轮, 发现 "危险命令没被拦"? 排查清单:
+</p>
+<ol>
+<li>
+<strong>检查 Composition Root</strong>: <code>createHookRunner(...)</code>
+    里<strong>真把你的 handler 加进数组</strong>了? 漏加是最常见
+    错误。 加 <code>logger.info</code> 在 handler 第一行, 重启看日志
+    有没有打。
+  </li>
+<li>
+<strong>检查事件名</strong>: 你的 handler 注册到 <code>PreToolUse</code>?
+    写成了 <code>preToolUse</code> (小写) 或 <code>Pretooluse</code> (拼错)?
+    TypeScript 不会报错 (因为是 <code>Partial&lt;Record&gt;</code>),
+    运行期就是空数组。
+  </li>
+<li>
+<strong>检查 handler 是不是真返回了</strong>: 你的代码可能在
+    <code>if (event.name === "PreToolUse")</code> 之前就 <code>return { exitCode: 0 }</code>
+    了。 抽到 default 之前。
+  </li>
+<li>
+<strong>检查 short-circuit</strong>: 你前面注册了一个 handler 返回 1
+    (block), 你的 handler 是第 2 个, 永远跑不到。 调换注册顺序
+    或者改第一个 handler。
+  </li>
+<li>
+<strong>检查日志</strong>: hookRunner 跑 handler 抛异常时
+    <code>logger.warn</code>, 看 stderr 找 "Hook PreToolUse failed"。
+  </li>
+</ol>
+<h3 id="wyh-templates">实战模板: 4 个常见 hook 怎么写</h3>
+<p>
+  按这个 4 步模板, 改改就能写各种 hook:
+</p>
+<table class="terms">
+  <thead>
+    <tr>
+      <th>场景</th>
+      <th>事件</th>
+      <th>返回码</th>
+      <th>核心代码</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>敏感词提醒 (看到"密码"加警告)</td>
+      <td>PostToolUse</td>
+      <td>2 (inject)</td>
+      <td><code>if (output.includes("password")) return { exitCode: 2, message: "提醒: 涉及密码" }</code></td>
+    </tr>
+    <tr>
+      <td>跑完测试自动 commit</td>
+      <td>PostToolUse</td>
+      <td>0 (continue)</td>
+      <td><code>if (toolName === "run_bash" &amp;&amp; command.includes("npm test") &amp;&amp; exitCode === 0) execSync("git commit -am 'auto'")</code></td>
+    </tr>
+    <tr>
+      <td>Slack 通知 (关键操作发通知)</td>
+      <td>PostToolUse</td>
+      <td>0 (continue)</td>
+      <td><code>if (toolName === "run_bash" &amp;&amp; command.includes("deploy")) await slack.post(...)</code></td>
+    </tr>
+    <tr>
+      <td>统计工具调用次数</td>
+      <td>PostToolUse</td>
+      <td>0 (continue)</td>
+      <td><code>counter[toolName] = (counter[toolName] ?? 0) + 1</code></td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  关键观察: 4 个 hook 都不改 agent.ts, 都<strong>不动主循环</strong>,
+  都在 Composition Root 加 1 行注册。 这就是 Hook 系统的核心价值 —
+  <strong>扩展不影响核心</strong>。
 </p>
 <h2 id="common-confusion">常见误解: Hook 不是 Permission 替代品</h2>
 <p>
