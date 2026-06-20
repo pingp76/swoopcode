@@ -237,11 +237,16 @@ const STATUS_SYMBOLS: Record&lt;TaskStatus, string&gt; = {
   <strong>真实场景</strong>: 用户迁移 500 个 JS 文件, task_1
   改 <code>src/a.js</code>, task_2 改 <code>src/b.js</code>
   (依赖 task_1 因为 b.js import a.js), task_3 改
-  <code>src/c.js</code> (依赖 task_1)。 LLM 创建 group 后,
-  group.json 含依赖图; LLM 跑 task_1 完成, 系统自动
-  派生 task_2 / task_3 ready; LLM 跑 task_2 完成, 派生 task_3
-  (如果 task_1 也完成) ready。
+  <code>src/c.js</code> (依赖 task_1)。
 </p>
+<p>
+  LLM 创建 group 后, 系统的反应:
+</p>
+<ul>
+<li>group.json 含依赖图</li>
+<li>LLM 跑 task_1 完成, 系统自动派生 task_2 / task_3 ready</li>
+<li>LLM 跑 task_2 完成, 派生 task_3 (如果 task_1 也完成) ready</li>
+</ul>
 <p>
   <strong>设计思想</strong>: <strong>DAG 校验 + 派生状态</strong> —
   Reference 章节 "模式 7 · State Machine 状态机" 的延伸。 看

@@ -11,102 +11,240 @@
 </p>
 <nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
 <hr class="rule"/>
+<h2 id="skill-example">先看一个具体的 skill 长什么样</h2>
+<p>
+  在展开"为什么需要 skill" 之前, 先看一个<strong>真实可运行</strong>
+  的 skill 文件长什么样。 这样你脑子里先有一个"东西", 后面的
+  "为什么要这样做" 才好理解。
+</p>
+<p>
+  Skill 文件本质是一个 <strong>Markdown + frontmatter</strong> 的
+  文本文件, 存在项目根目录的 <code>skills/</code> 目录下 (或者
+  用户的 <code>~/.skills/</code> 目录)。 文件名 = skill 名字。
+</p>
+<pre class="code-block"><code>// 文件路径: skills/code-review/SKILL.md
+// (或者 ~/.skills/code-review/SKILL.md)
+---
+name: code-review
+description: |
+  Code review 工具集。 当用户要求 "review this PR" / "看看这段代码
+  有什么问题" / "帮我审一下这个文件" 时加载。 加载后 LLM 可以:
+  1. 调 run_read_diff 看 PR 的 diff
+  2. 调 run_lint_static 对单个文件跑静态检查
+  3. 调 run_suggest_improvement 给改进建议
+tools:
+  - run_read_diff
+  - run_lint_static
+  - run_suggest_improvement
+---
+
+# Code Review Skill
+
+加载这个 skill 后, 你获得了 3 个新工具:
+
+- `run_read_diff(branch: string)`: 读指定 branch 的 diff
+- `run_lint_static(file: string)`: 对单个文件跑静态检查
+- `run_suggest_improvement(file: string)`: 给出改进建议
+
+## 何时用
+
+- 用户说 "review this PR" / "审一下这个 PR"
+- 用户说 "这段代码有什么问题" / "帮我审一下"
+- 用户说 "lint 一下" / "跑静态检查"
+
+## 何时不用
+
+- 用户只是读文件但没要求 review (用 run_read 即可)
+- 用户想跑测试 (用 run_bash)</code></pre>
+<p>
+  关键观察:
+</p>
+<ol>
+<li>
+<strong>3 段组成</strong>: frontmatter 元数据 + 工具列表 + Markdown 说明。
+  工具列表是声明, Markdown 是给 LLM 读的自然语言。
+  </li>
+<li>
+<strong>文件即 skill</strong>: 一个文件就是一个 skill, 改文件 = 改 skill。
+  git 友好, 团队可以 PR review 改动。
+  </li>
+<li>
+<strong>声明式 vs 命令式</strong>: 工具列表是"声明" skill 含哪些工具,
+  不是"注册"。
+  </li>
+<li>
+<strong>harness 启动时</strong>: 读所有 SKILL.md, 建立映射。
+  </li>
+<li>
+<strong>LLM 调用时</strong>: 调 <code>load_skill("code-review")</code>, 按名字查找, 不需要 import / require。
+  </li>
+</ol>
+<p>
+  外部参考: <a href="https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview" rel="noreferrer" target="_blank">Claude Code Agent Skills 官方文档</a>
+  — Anthropic 的 skill 概念和我们这里实现的是一致的: 一个目录
+  + SKILL.md frontmatter 描述, harness 启动时扫描, LLM 按需激活。
+  教学版的实现简化了一些边界 (如跨平台路径、版本号), 但核心思想
+  相同。 如果你想看生产级 skill 长什么样, 点上面这个链接。
+</p>
 <h2 id="real-failure">真实失败故事: 30 个工具的混乱</h2>
 <p>
-  写代码之前, 先看一个真实场景。 跑你的 harness 已经积累到 30 个工具
-  (<code>run_bash</code> / <code>run_read</code> / <code>run_write</code> / <code>run_edit</code> /
-  <code>run_edit_exact</code> / <code>run_todo_*</code> / <code>run_task_*</code> /
-  <code>run_memory_*</code> / <code>run_skill</code> / <code>run_subagent</code> /
-  <code>run_async_*</code> / <code>run_schedule_*</code> / <code>run_output_*</code> /
-  <code>run_web_*</code> ...)。
-  </p>
+  了解了 skill 长什么样之后, 再看"为什么需要 skill"。
+</p>
 <p>
-  用户让 agent "修改 React 组件"。 观察:
+  写代码之前, 先看一个真实场景。 假设你的 harness 已经积累到
+  <strong>30 个工具</strong>:
+</p>
+<pre class="code-block"><code>// 教学版默认只有 6 个工具, 但生产 harness 跑半年后可能这样:
+run_bash                  // 跑 bash 命令
+run_read                  // 读文件
+run_write                 // 写文件
+run_edit                  // 编辑文件
+run_edit_exact            // 精确匹配编辑
+run_todo_list             // TODO 列表
+run_todo_add              // TODO 添加
+run_todo_update           // TODO 更新
+run_task_create           // 任务创建
+run_task_update           // 任务更新
+run_task_list             // 任务列表
+run_memory_read           // 读 memory
+run_memory_write          // 写 memory
+run_skill                 // 加载 skill (本章重点)
+run_subagent              // 派子 agent
+run_async_run_start       // 启动 async run
+run_async_run_check       // 检查 async run
+run_async_run_list        // 列 async run
+run_async_run_output      // 读 async 输出
+run_schedule_create       // 创建定时任务
+run_schedule_list         // 列定时任务
+run_schedule_cancel       // 取消定时任务
+run_output_read           // 读输出
+run_web_search            // 搜网络
+run_web_fetch             // 抓网页
+run_kubernetes_apply      // k8s apply (运维)
+run_kubernetes_get        // k8s get
+run_terraform_plan        // terraform plan
+run_docker_build          // docker build
+... (共 30 个)</code></pre>
+<p>
+  30 个工具摆在 LLM 面前, 跑用户场景 "修改 React 组件"。 观察:
 </p>
 <ol>
 <li>
 <strong>system prompt 撑到 8000 token</strong>: 30 个工具的 description
     + JSON Schema 占了大半, 真正"用户场景" 的 system prompt 反而被
     挤到边角。
-    </li>
+  </li>
 <li>
 <strong>模型被淹没</strong>: 30 个工具摆在面前, 模型选了
     <code>run_web_search</code> 去搜 React 文档, 而不是用
     <code>run_read</code> 看本地组件代码。 因为工具描述里
     <code>run_web_search</code> 写得很显眼 (描述里说"搜任何信息"),
     <code>run_read</code> 写得很朴素 ("读文件")。
-    </li>
+  </li>
 <li>
 <strong>成本涨 3 倍</strong>: 8000 token 的 system prompt 每轮都重传,
     即使不相关也要付账。 跑 50 轮对话, 仅 system prompt 就 400K token。
-    </li>
+  </li>
 <li>
 <strong>模型选错工具的频率上升</strong>: 10 个工具时模型选对率 95%,
     30 个工具时降到 78%。 模型在长列表中迷失, 工具描述写得"有趣"
     的更容易被选, 但有趣 ≠ 相关。
-    </li>
+  </li>
 </ol>
+<p>
+  这就是 skill 要解决的问题。 思路很简单: <strong>平时只暴露
+  5-10 个核心工具, 场景化工具按需加载</strong>。 用上面的例子
+  来说:
+</p>
+<pre class="code-block"><code>// 默认情况 (skill 加载前): LLM 看到 6 个工具
+- run_bash
+- run_read
+- run_write
+- run_edit
+- run_skill        // ← 关键: 入口工具, 让 LLM 主动加载更多
+- run_subagent
+
+// 用户说"修改 React 组件" 后, LLM 调 load_skill("react")
+// 之后 LLM 看到 6 + 3 = 9 个工具:
+- run_bash, run_read, run_write, run_edit, run_skill, run_subagent
+- use_react_component   // ← react skill 提供的
+- react_props           // ← react skill 提供的
+- react_state           // ← react skill 提供的
+
+// 用户说"apply 一下 k8s 配置" 后, LLM 调 load_skill("kubernetes")
+// 之后 LLM 看到 6 + 3 = 9 个工具 (覆盖之前的 3 个):
+- run_bash, run_read, run_write, run_edit, run_skill, run_subagent
+- run_kubernetes_apply  // ← k8s skill 提供的
+- run_kubernetes_get
+- run_kubectl_logs
+
+// 这样无论 harness 累计 30 个还是 100 个工具, LLM 一次只看到
+// 5-10 个最相关的, 不被淹没</code></pre>
 <p>
   朴素想法 1: "压缩工具描述, 每个只写 1 句?"
   模型看 1 句描述, 跟没看一样, 选错的频率更高。
-  </p>
+</p>
 <p>
   朴素想法 2: "按 mode 切工具集?"
   比如"代码 mode" 只给 run_*, "运维 mode" 只给 schedule_*。 但
   mode 切换是用户的负担, 用户不知道当前 mode。
-  </p>
+</p>
 <p>
-  正确做法: <strong>Skill 机制</strong>。 平时只暴露 5-10 个核心工具,
-  LLM 看到"我需要 React 工具" 时调 <code>load_skill("react")</code>,
-  harness 临时把 React 相关工具加进当前 loop 的工具列表。 loop
-  结束后激活状态丢弃, 不污染父 agent 或后续 loop。
-  </p>
+  正确做法: <strong>Skill 机制</strong>。 平时只暴露 5-10 个核心
+  工具, LLM 看到"我需要 React 工具" 时调
+  <code>load_skill("react")</code>, harness 临时把 React 相关工具
+  加进当前 loop 的工具列表。 loop 结束后激活状态丢弃, 不污染
+  父 agent 或后续 loop。
+</p>
 <h2 id="what-is-skill">Skill 是什么: 不只是工具子集</h2>
 <p>
   <strong>用途</strong>: Skill 是<strong>一组工具 + 一段元信息</strong>的封装。
-  包含 3 个要素: skill 名 / description (给 LLM 看的"何时用") / tools 数组
-  (包含哪些工具)。 Skill 本身也是"按需注入能力" 的元机制 — 后面 hook
-  / memory 章节会复用。
-  </p>
+  包含 3 个要素: skill 名 / description (给 LLM 看的"何时用") /
+  tools 数组 (包含哪些工具)。 Skill 本身也是"按需注入能力" 的
+  元机制 — 后面 hook / memory 章节会复用。
+</p>
 <p>
   <strong>真实场景</strong>: harness 默认只暴露 5-10 个核心工具。
   用户说"帮我做一个 React 组件", LLM 调 <code>load_skill("react")</code>,
-  harness 把 <code>use_react_component</code> / <code>react_props</code> 等 5 个
+  harness 把 <code>use_react_component</code> / <code>react_props</code> 等 3 个
   工具加进当前 loop 的工具列表。 LLM 看到新工具, 调它们。 loop
   结束后激活状态丢弃, 不污染父 agent。
-  </p>
+</p>
 <p>
   <strong>设计思想</strong>: 经典<strong>按需加载</strong>模式 — 平时只暴露
   必要的"地基工具", 场景化工具按需加载。 这跟 npm 的
   <code>import</code> 一个道理: 全局 <code>require</code> 所有包会撑爆
   内存, 按需 import 才省。
-  </p>
+</p>
 <p>
   <strong>实现细节</strong>:
 </p>
-<pre class="code-block"><code>interface SkillMeta {
+<pre class="code-block"><code>// 简化版接口定义, 真实实现见 src/skills.ts
+interface SkillMeta {
   name: string;             // "react" / "kubernetes" / "code-review"
   description: string;       // 给 LLM 看: 什么场景用
-  tools: string[];            // 该 skill 包含的工具名
+  tools: string[];            // 该 skill 包含的工具名, 例如 ["use_react_component", "react_props"]
   // 后续可以加 examples / whenToLoad / 依赖关系等
 }
 
 interface SkillLoader {
+  // 启动时从配置目录 (如 ~/.skills/) 加载所有 skill
+  scan(): SkillMeta[];
+  // 按名字查一个 skill
   get(name: string): SkillMeta | undefined;
-  list(): SkillMeta[];
-  // 返回该 skill 包含的工具实例
+  // 把 skill 名字转成实际的 Tool 实例
   resolve(name: string): Tool[];
 }
 
 interface ActiveSkillSet {
-  // 激活 skill, 返回新增的工具 (供 agent 合并到当前工具列表)
+  // 激活一个 skill, 把它的工具合并进当前集合
   activate(name: string): Tool[];
-  // 当前激活的 skill 名字列表
+  // 当前激活了哪些 skill
   names(): string[];
-  // 当前激活的所有工具 (去重)
+  // 当前激活的所有工具 (去重后)
   tools(): Tool[];
 }</code></pre>
-<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/skills.ts#L1" rel="noreferrer" target="_blank">GitHub · src/skills.ts SkillLoader / ActiveSkillSet 实现 (L1)</a></p>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/skills.ts#L41" rel="noreferrer" target="_blank">GitHub · src/skills.ts SkillMeta 接口 (L41)</a></p>
 <p>
   3 个接口, 3 个职责:
 </p>
@@ -127,13 +265,14 @@ interface ActiveSkillSet {
 </ol>
 <h2 id="three-invariants">3 条不变量</h2>
 <dl class="defs">
-<dt>不变量 1 · skill 激活状态是 loop 内的临时态, loop 结束丢弃</dt>
+<dt>不变量 1 · skill 激活状态是 agent 闭包内的临时态, agent 销毁时清空</dt>
 <dd>
-    ActiveSkillSet 存在 agent 实例的闭包里, 不放 module-level。
-    父 agent 加载的 skill 不出现在子智能体工具列表 (第 04 章
-    父子隔离的延伸)。
+    ActiveSkillSet 存在 <code>createAgent()</code> 的闭包里, 不放
+    module-level (下面"反例" 一节会讲什么叫 module-level)。 父
+    agent 加载的 skill 不出现在子智能体工具列表 (第 04 章父子
+    隔离的延伸)。
   </dd>
-<dt>不变量 2 · 同一个 loop 内可激活多个 skill, 工具集取并集</dt>
+<dt>不变量 2 · 同一个 agent 内可激活多个 skill, 工具集取并集</dt>
 <dd>
     LLM 调 <code>load_skill("react")</code> 后再调
     <code>load_skill("typescript")</code>, 两个 skill 的工具合并
@@ -143,17 +282,50 @@ interface ActiveSkillSet {
 <dd>
     skill 集合一旦确定, 工具描述就稳定 (skill 是稳定集合, 不是动态拼字符串)。
     不会因为 LLM 调用某个工具而触发工具描述变化, 不会破坏 prompt cache
-    (第 10 章的伏笔)。
+    (第 10 章的伏笔)。 "对 prompt cache 的影响" 一节会展开讲。
   </dd>
 </dl>
 <h2 id="naive">朴素反例: 状态写到 module-level 单例</h2>
 <p>
   朴素实现: skill 激活状态写 module-level。
 </p>
+<p>
+  <strong>先解释什么叫 module-level</strong>。 Module-level 指的是
+  写在 <code>.ts</code> 文件最外层 (不在任何函数内) 的变量, 也叫
+  "模块顶层变量"。 比如:
+</p>
+<pre class="code-block"><code>// === module-level 变量 ===
+// 整个文件被 import 一次, 这两个变量就被创建一次。
+// 整个 Node.js 进程里所有引用这个模块的代码, 共享这两个变量。
+let counter = 0;                              // ← module-level
+const CONFIG = { maxRounds: 10 };              // ← module-level
+let activeSkills: string[] = [];              // ← module-level (反例!)
+
+export function loadSkill(name: string) {
+  activeSkills.push(name);                    // 改的是 module-level 变量
+}
+
+// === 反之: 函数内 (闭包内) 变量 ===
+// 每次调用 createAgent() 都会创建一份新的, 多个 agent 不共享。
+export function createAgent() {
+  let activeSkills: string[] = [];            // ← 闭包内变量, 每次 create 新一份
+  return {
+    loadSkill(name: string) {
+      activeSkills.push(name);                // 改的是这次 create 的那份
+    },
+  };
+}</code></pre>
+<p>
+  关键区别: <strong>module-level 变量 = 全进程共享 1 份</strong>,
+  闭包内变量 = <strong>每次 create 新 1 份</strong>。
+</p>
+<p>
+  现在看反例, 把 activeSkills 写 module-level:
+</p>
 <pre class="code-block"><code>// ❌ 反例: module-level 单例
 let activeSkills: string[] = [];
 export function loadSkill(name: string) { activeSkills.push(name); }</code></pre>
-<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/skills.ts#L1" rel="noreferrer" target="_blank">GitHub · src/skills.ts 反例: module-level 单例 (L1)</a></p>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/skills.ts#L41" rel="noreferrer" target="_blank">GitHub · src/skills.ts SkillMeta 接口定义 (L41)</a></p>
 <p>
   立刻坏 3 件事:
 </p>
@@ -161,20 +333,40 @@ export function loadSkill(name: string) { activeSkills.push(name); }</code></pre
 <li>
 <strong>父子污染</strong>: 父 agent 加载 "react" skill, spawn 子智能体,
     子智能体工具列表里出现 react 工具。 第 04 章的父子隔离被破坏。
-    </li>
+  </li>
 <li>
 <strong>多 agent 互相干扰</strong>: 多个 agent 实例共享 activeSkills,
     一个 agent 加载 skill 另一个 agent 也看到, 互不可见性被破坏。
-    </li>
+  </li>
 <li>
 <strong>无法测试隔离</strong>: 跑完一个测试 activeSkills 还有上次
     加载的 skill, 下一个测试看到 "ghost skill", 测试 flaky。
-    </li>
+  </li>
 </ol>
+<div class="figure figure--compare">
+  <div class="figure__title">图 1 · module-level 单例 vs 闭包内状态</div>
+  <div class="flow-compare">
+    <div class="flow-compare__col flow-compare__col--bad">
+      <div class="flow-compare__head">❌ module-level 单例</div>
+      <div class="flow-compare__body">
+        整个 Node 进程共享 1 份 <code>activeSkills</code>。 父 agent 加载
+        "react" → 子 agent 也看到。 两个 agent 之间互相污染。
+      </div>
+    </div>
+    <div class="flow-compare__col flow-compare__col--good">
+      <div class="flow-compare__head">✅ 闭包内状态</div>
+      <div class="flow-compare__body">
+        <code>createAgent()</code> 每次返回新闭包, 各自 1 份
+        <code>activeSkills</code>。 父 agent 加载 "react" → 子
+        agent 看不到, 隔离天然成立。
+      </div>
+    </div>
+  </div>
+</div>
 <p>
   解决方式: <code>ActiveSkillSet</code> 在 <code>createAgent()</code>
   闭包内创建, 父子天然隔离。
-  </p>
+</p>
 <h2 id="naive-2">朴素反例 2: 工具描述按需拼字符串</h2>
 <p>
   朴素实现 2: skill 激活时把工具描述拼到 system prompt 字符串。
@@ -192,33 +384,33 @@ let systemPrompt = basePrompt + skillDescriptions.join("");</code></pre>
 <li>
 <strong>成本涨 5-10 倍</strong>: 100 轮对话, 没用 cache 时 $1.50, 拼
     上去后 $7.50-$15.00。
-    </li>
+  </li>
 <li>
 <strong>cache-debug 无法追踪</strong>: 第 10 章的 stable prefix hash
     算法假设 system prompt 稳定, 一旦拼字符串, hash 永远在变。
-    </li>
+  </li>
 </ol>
 <p>
   正确做法: skill 工具描述<strong>作为独立的 tool definition 数组</strong>
   传给 LLM, 不拼到 system prompt。 LLM 通过 <code>tool_calls</code> 字段
   调工具, 工具描述在 LLM 视角是稳定的 stable prefix。
-  </p>
+</p>
 <h2 id="loop-integration">loop 接入: skill 激活是 loop 内的临时态</h2>
 <p>
   <strong>用途</strong>: 把 SkillLoader 接入 agent.run, 让 LLM 调 load_skill
   后能立刻看到新工具。 这是"按需加载" 在 agent 里的具体应用。
-  </p>
+</p>
 <p>
   <strong>真实场景</strong>: LLM 跑一段对话, 中途调 <code>load_skill("react")</code>,
   下一轮 LLM 看到 <code>use_react_component</code> 工具, 调它。 loop
   结束后激活状态自动丢弃, 不会影响下一个 run。
-  </p>
+</p>
 <p>
   <strong>设计思想</strong>: 经典<strong>按需加载 + 状态机</strong> 组合 — skill 加载
   是异步的, 加载后下一轮 chat() 才看到新 tools, 同一个 run() 的
   tools 数组稳定, 不破坏 prompt cache。 这跟第 10 章的 cache 布局
   思想完全一致。
-  </p>
+</p>
 <p>
   <strong>实现细节</strong>:
 </p>
@@ -267,10 +459,148 @@ export function createAgent(deps: { llm: LLMClient; history: History; tools: Too
   <code>role: "tool"</code> 消息告诉 LLM "已加载 X, 可用工具: Y, Z"。
   下一轮 LLM 调用时, 这些工具就在 availableTools 里, LLM 看到
   schema 后可以直接调。
-  </p>
-<h2 id="cache-implication">对 prompt cache 的影响: stable vs 动态</h2>
+</p>
+<h2 id="cache-implication">对 prompt cache 的影响: 加 / 减工具时, 缓存怎么变</h2>
 <p>
-  本章是第 10 章 cache-friendly 布局的关键伏笔。 原则是:
+  这一节直接看"加 / 减一个工具" 时, LLM 看到的 prompt 结构
+  怎么变。 变 = cache miss, 不变 = cache 命中。 一次 cache miss
+  = 整段 prompt 重新计费, 很贵。
+</p>
+<p>
+  <strong>前提</strong>: LLM 收到的请求大致分两部分 — <strong>system + tools</strong>
+  (放在请求顶部, 每次一样) 和 <strong>messages</strong> (对话历史, 每轮累加)。
+  顶部这两块就是 LLM 厂的 prompt cache 命中的对象。 所以我们只
+  看"加 / 减工具" 时, 这两块有没有变。
+</p>
+<p>
+  <strong>❌ 拼字符串 (反例): 加 react skill 后, 顶部变了</strong>
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 2-A · 拼字符串时, prompt 顶部在第 5 轮变化</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">第 1-4 轮 · 还没加载 react</div>
+      <div class="flow-stack__body">
+        <strong>[顶部 · 3000 token]</strong><br/>
+        system: "你是 swe agent。 工具: run_bash / run_read / run_write / run_edit / run_skill / run_subagent。"<br/>
+        <br/>
+        <strong>[messages]</strong> user / assistant / tool 消息
+      </div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">第 5 轮 · LLM 调 load_skill("react")</div>
+      <div class="flow-compare__body" style="font-family: monospace; font-size: 90%;">
+        <strong>[顶部 · 3500 token · 变了!]</strong><br/>
+        system: "你是 swe agent。 工具: run_bash / run_read / run_write / run_edit / run_skill / run_subagent。<strong>React 工具: use_react_component, react_props, react_state。</strong>"<br/>
+        <br/>
+        <strong>[messages]</strong> user / assistant / tool 消息
+      </div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">第 30 轮 · 又加载 typescript</div>
+      <div class="flow-stack__body" style="font-family: monospace; font-size: 90%;">
+        <strong>[顶部 · 4000 token · 又变了!]</strong><br/>
+        system: "... React 工具: ...<strong>TypeScript 工具: ts_compile, ts_lint。</strong>"<br/>
+        <br/>
+        <strong>→ 每次拼新段, 顶部 hash 重新算, cache miss 一次。</strong>
+      </div>
+    </div>
+  </div>
+</div>
+<p>
+  50 轮对话, 拼 3 次新段 = <strong>3 次 cache miss</strong>。 miss
+  那次, 3500-4000 token 按全价算, 而不是 10% 折扣。 50 轮总
+  成本 $7.50-$15.00。
+</p>
+<p>
+  <strong>✅ tools 字段 (正确): 加 react 后, 顶部只动 tools 部分, system 不变</strong>
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 2-B · tools 字段时, system 部分 50 轮全稳定</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--good">
+      <div class="flow-stack__label">第 1-4 轮 · 还没加载 react</div>
+      <div class="flow-stack__body" style="font-family: monospace; font-size: 90%;">
+        <strong>[顶部 · system 部分 · 2000 token · 不变]</strong><br/>
+        system: "你是 swe agent。 工具见下方 tools 字段。"<br/>
+        <br/>
+        <strong>[顶部 · tools 部分 · 1000 token]</strong><br/>
+        tools: [run_bash, run_read, run_write, run_edit, run_skill, run_subagent]<br/>
+        <br/>
+        <strong>[messages]</strong>
+      </div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--good">
+      <div class="flow-stack__label">第 5 轮 · LLM 调 load_skill("react")</div>
+      <div class="flow-stack__body" style="font-family: monospace; font-size: 90%;">
+        <strong>[顶部 · system 部分 · 2000 token · 不变 ✅]</strong><br/>
+        system: "你是 swe agent。 工具见下方 tools 字段。"<br/>
+        <br/>
+        <strong>[顶部 · tools 部分 · 1300 token · 变了]</strong><br/>
+        tools: [run_bash, run_read, run_write, run_edit, run_skill, run_subagent,<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;<strong>use_react_component, react_props, react_state</strong>]<br/>
+        <br/>
+        <strong>[messages]</strong>
+      </div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--good">
+      <div class="flow-stack__label">第 30 轮 · 又加载 typescript</div>
+      <div class="flow-stack__body" style="font-family: monospace; font-size: 90%;">
+        <strong>[顶部 · system 部分 · 2000 token · 还是不变 ✅]</strong><br/>
+        <br/>
+        <strong>[顶部 · tools 部分 · 1500 token · 变了]</strong><br/>
+        tools: [..., use_react_component, react_props, react_state, <strong>ts_compile, ts_lint</strong>]<br/>
+        <br/>
+        <strong>→ system 永远不动, cache 100% 命中。 tools 在 provider 视角按"激活了什么" 稳定, 大概率也命中。</strong>
+      </div>
+    </div>
+  </div>
+</div>
+<p>
+  50 轮对话, system 部分 50 轮全命中 = <strong>0 次 miss</strong>。
+  50 轮总成本 $1.50 (5-10 倍差距)。
+</p>
+<p>
+  <strong>关键对比</strong>
+</p>
+<div class="figure figure--compare">
+  <div class="figure__title">图 2-C · 50 轮 cache 命中对比</div>
+  <div class="flow-compare">
+    <div class="flow-compare__col flow-compare__col--bad">
+      <div class="flow-compare__head">❌ 拼字符串 (方案 A)</div>
+      <div class="flow-compare__body">
+        第 1 轮 system = "base"<br/>
+        第 5 轮 system = "base + react 段"<br/>
+        第 30 轮 system = "base + react + ts 段"<br/>
+        <br/>
+        → <strong>3 次 miss</strong><br/>
+        成本: <strong>$7.50-$15.00</strong>
+      </div>
+    </div>
+    <div class="flow-compare__col flow-compare__col--good">
+      <div class="flow-compare__head">✅ tools 字段 (方案 B)</div>
+      <div class="flow-compare__body">
+        第 1 轮 system = "base", tools = [6]<br/>
+        第 5 轮 system = "base", tools = [9]<br/>
+        第 30 轮 system = "base", tools = [11]<br/>
+        <br/>
+        → <strong>0 次 miss (system 部分)</strong><br/>
+        成本: <strong>$1.50</strong>
+      </div>
+    </div>
+  </div>
+</div>
+<p>
+  实际差距: <strong>5-10 倍成本</strong>, 这就是为什么 skill 设计
+  强调"工具描述走 tools 字段, 不拼 system prompt 字符串"。
+</p>
+<p>
+  详细 cache 调试工具 (systemPromptHash / toolsHash / stable prefix
+  观察) 在第 10 章展开。 本章只建立"工具描述不进 system prompt"
+  的肌肉记忆。
+</p>
+<p>
+  <strong>先记住两件事</strong>:
 </p>
 <ol>
 <li>
@@ -283,36 +613,105 @@ export function createAgent(deps: { llm: LLMClient; history: History; tools: Too
   </li>
 </ol>
 <p>
-  ❌ / ✅: 错误做法是把 skill 工具描述拼到 system prompt 字符串里
-  (朴素反例 2), 那会让 system prompt 每次都变, cache 失效。
-  正确做法: 工具描述作为 LLM.chat() 的 tools 字段, system prompt
-  保持稳定。
-  </p>
+  <strong>具体例子: 跑 1 个 50 轮对话的 React 组件任务</strong>
+</p>
 <p>
-  LLM 视角: LLM 看到 system prompt (稳定) + tools (稳定, 因为 skill
-  集合不变) + messages (动态, 含 tool_call / tool_result / reminder)。
-  真正变的是 messages, 但 LLM provider 通常也缓存 messages 前缀
-  (Anthropic 支持 4 个 breakpoint, 详见第 10 章)。
-  </p>
-<figure class="figure">
-<div class="flow-compare" role="img" aria-label="skill 工具描述作为稳定前缀">
-<div class="flow-compare__col flow-compare__col--bad">
-<div class="flow-compare__label">❌ 拼字符串</div>
-<span class="flow-node">systemPrompt =<br/>base + skillDesc.join</span>
-<span class="flow-node">每轮 system prompt 变</span>
-<span class="flow-node">cache 命中率归零</span>
-<span class="flow-node" style="font-weight: 600;">成本涨 5-10 倍</span>
+  <strong>方案 A · 拼字符串 (反例)</strong>
+</p>
+<pre class="code-block"><code>// 教学版反例: 每次激活 skill 都拼到 system prompt
+let systemPrompt = basePrompt;
+if (activeSkills.includes("react")) {
+  systemPrompt += "\n\nReact 工具:\n- use_react_component\n- react_props\n- react_state";
+}
+
+// 第 1 轮 (没加载 react): systemPrompt = "basePrompt"
+// 第 5 轮 (LLM 调 load_skill("react")): systemPrompt = "basePrompt + react 段"
+// 第 30 轮 (LLM 调 load_skill("typescript")): systemPrompt = "basePrompt + react 段 + typescript 段"
+// 第 31 轮: 跟第 30 轮一样, cache 命中
+
+// 50 轮对话, cache 命中情况:
+// - 第 1-4 轮: 第 1 次 cache miss, 第 2-4 轮命中 (前 4 轮 systemPrompt 相同)
+// - 第 5-29 轮: 第 5 次 cache miss, 第 6-29 轮命中 (加了 react 后 25 轮都相同)
+// - 第 30 轮: cache miss
+// - 第 31-50 轮: 命中 (加了 typescript 后 20 轮都相同)
+
+// 50 轮中 cache miss 3 次, 其余 47 次命中。 还行, 但不是最优。</code></pre>
+<p>
+  <strong>方案 B · tools 字段 (正确做法)</strong>
+</p>
+<pre class="code-block"><code>// systemPrompt 永远只是 basePrompt, 不变
+const systemPrompt = basePrompt;
+
+// tools 数组按当前激活的 skill 动态拼, 但作为独立参数传给 LLM
+const tools = [
+  ...baseTools,                                  // 6 个核心工具
+  ...activeSkills.includes("react") ? reactTools : [],   // 0 或 3 个
+  ...activeSkills.includes("typescript") ? typescriptTools : [],  // 0 或 N 个
+];
+
+// LLM 收到: { system: "basePrompt", tools: [...] }
+// LLM 视角看, system 部分 50 轮都一样, tools 部分也按"激活了什么" 稳定。
+// OpenAI / Anthropic 各自有 cache 算法, 但 system 部分 50 轮全命中是确定的。
+
+// 50 轮对话, cache 命中情况:
+// - 50 轮全部命中 system 部分 (100% 命中)
+// - tools 部分看 provider 算法, 大概率也命中 (Anthropic 4 个 breakpoint 可覆盖)</code></pre>
+<p>
+  <strong>为什么方案 B 更好</strong>
+</p>
+<ol>
+<li>
+<strong>方案 A 的 3 次 miss 全部避免</strong>: 方案 A 每次加载新 skill
+    就触发 system prompt 字符串变化, 即使 basePrompt 没动。 方案
+    B 的 system prompt 永远只是 basePrompt, 一字不变。
+  </li>
+<li>
+<strong>方案 A 的字符串拼接是隐式的</strong>: 开发者写
+    <code>systemPrompt += skillDesc</code> 时不知道这会破坏 cache,
+    第 10 章加 cache debug 时才"哦原来 30 个工具时 cache 全 miss
+    是这个原因"。 方案 B 把工具描述和 system prompt 在代码层面
+    物理隔离, 拼字符串 = 编译期就明显的反模式。
+  </li>
+<li>
+<strong>方案 B 的 tools 是 LLM 视角的稳定集合</strong>: 同一 agent 同一
+    run 内, "激活了哪些 skill" 是不变的, 工具描述在 LLM 视角
+    是"固定长度的工具列表", 不是"动态拼的字符串"。 LLM 推理
+    时看工具描述的 token 块也稳定, cache 命中率高。
+  </li>
+</ol>
+<p>
+  <strong>反例对比图</strong>:
+</p>
+<div class="figure figure--compare">
+  <div class="figure__title">图 2 · 拼字符串 vs tools 字段, 50 轮 cache 命中对比</div>
+  <div class="flow-compare">
+    <div class="flow-compare__col flow-compare__col--bad">
+      <div class="flow-compare__head">❌ 拼字符串 (方案 A)</div>
+      <div class="flow-compare__body">
+        加载 1 个 skill → systemPrompt 变化 1 次 → 1 次 cache miss。<br/>
+        50 轮加载 3 个 skill → 3 次 cache miss → 47/50 命中。<br/>
+        <strong>成本: $7.50-$15.00 / 50 轮</strong>
+      </div>
+    </div>
+    <div class="flow-compare__col flow-compare__col--good">
+      <div class="flow-compare__head">✅ tools 字段 (方案 B)</div>
+      <div class="flow-compare__body">
+        systemPrompt 永远不变, 50 轮全命中。<br/>
+        tools 按 skill 集合稳定, 加载后稳定。<br/>
+        <strong>成本: $1.50 / 50 轮</strong>
+      </div>
+    </div>
+  </div>
 </div>
-<div class="flow-compare__col flow-compare__col--good">
-<div class="flow-compare__label">✅ tools 字段</div>
-<span class="flow-node">systemPrompt = base</span>
-<span class="flow-node">skill 集合稳定 → tools 稳定</span>
-<span class="flow-node">cache 命中率高</span>
-<span class="flow-node" style="font-weight: 600;">成本降 5-10 倍</span>
-</div>
-</div>
-<figcaption>图 05-1 · skill 工具描述作为稳定前缀. 拼字符串破坏 cache, tools 字段保持 cache 命中。</figcaption>
-</figure>
+<p>
+  实际差距: <strong>5-10 倍成本</strong>, 这就是为什么 skill 设计
+  强调"工具描述走 tools 字段, 不拼 system prompt 字符串"。
+</p>
+<p>
+  详细 cache 调试工具 (systemPromptHash / toolsHash / stable prefix
+  观察) 在第 10 章展开。 本章只建立"工具描述不进 system prompt"
+  的肌肉记忆。
+</p>
 <h2 id="active-skills-closure">ActiveSkillSet 闭包化</h2>
 <p>
   ActiveSkillSet 必须在 createAgent() 闭包内, 不写 module-level:
@@ -341,11 +740,11 @@ export function createActiveSkillSet(skillLoader: SkillLoader): ActiveSkillSet {
     tools(): Tool[] { return [...toolIndex.values()]; },
   };
 }</code></pre>
-<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/skills.ts#L1" rel="noreferrer" target="_blank">GitHub · src/skills.ts createActiveSkillSet 完整实现 (L1)</a></p>
+<p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/skills.ts#L262" rel="noreferrer" target="_blank">GitHub · src/skills.ts createSkillManager 完整实现 (L262)</a></p>
 <p>
   关键: <code>toolIndex</code> 用 Map 而不是 Array, 天然去重。 同名工具
   在两个 skill 出现时, 先注册的优先 (而不是报错或覆盖)。
-  </p>
+</p>
 <p>
   ❌ / ✅ 写法:
 </p>
@@ -367,55 +766,105 @@ function activate(name) {
   功能上等价, 但 10 个 skill 30 个工具时, O(n²) 的 includes 跑
   1000 次循环, O(1) 的 Map 只跑 30 次。 测试上看不出, 但 LLM
   调 100 个 skill 加载时, 性能差异明显。
-  </p>
-<h2 id="loop-boundary">loop 边界: 不变量 1 的实际意义</h2>
-<p>
-  "skill 激活状态是 loop 内的临时态" 翻译成代码:
 </p>
-<pre class="code-block"><code>// 教学简化版
-export function createAgent(deps) {
-  // 闭包内 activeSkills, 父子隔离天然成立
-  const activeSkills = createActiveSkillSet(deps.skillLoader);
-
-  return {
-    async run(query) {
-      // ... run 内可调 load_skill, 状态保留
-      // run 跑完, activeSkills 仍存在 (下次 run() 复用)
-      // agent 实例被销毁时, activeSkills 自然消失
-    },
-  };
-}</code></pre>
+<h2 id="loop-boundary">skill 激活状态: 存在哪, 谁改, 啥时候清</h2>
 <p>
-  注意: <strong>不是"每次 run() 重置 activeSkills"</strong>。 同一个
-  agent 实例的多次 run() 共享 activeSkills — 这是合理的, 用户
-  在 run 1 加载了 "react" skill, run 2 想继续用, 不需要重新加载。
-  状态仅在 agent 实例被销毁时清空, 而 agent 实例通常在用户退出
-  REPL 时销毁。
-  </p>
-<figure class="figure">
-<div class="flow-map" role="img" aria-label="skill 激活生命周期">
-<div class="flow-row--center">
-<span class="flow-node">agent.run() 1</span>
-<span class="flow-arrow">→</span>
-<span class="flow-node flow-node--accent">load_skill("react")</span>
-<span class="flow-arrow">→</span>
-<span class="flow-node">用 react 工具</span>
+  上一节说 activeSkills 在 <code>createAgent()</code> 闭包内。 但闭包
+  太抽象, 我们用 3 个具体问题讲清"skill 激活状态" 到底是个什么
+  东西:
+</p>
+<ol>
+<li>
+<strong>存在哪?</strong> 一个 Map, key 是 skill 名字, value 是该 skill
+    的工具列表。 物理位置: <code>createAgent()</code> 闭包内的内存。
+  </li>
+<li>
+<strong>谁改它?</strong> 3 个地方: <code>load_skill</code> tool 调用时加,
+    <code>deactivate_skill</code> tool 调用时减, REPL 关闭时整个
+    清空。
+  </li>
+<li>
+<strong>啥时候清空?</strong> <strong>只有 1 个时机清空: REPL 关闭 / agent
+    实例销毁</strong>。 其他时机 (run 结束 / turn 结束 / 任务完成)
+    都不清。
+  </li>
+</ol>
+<p>
+  这 3 条回答了"skill 激活状态" 是什么。 下面用具体场景验证:
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 3 · skill 激活状态的具体行为</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">场景 A · 同一个 run 内的多轮对话</div>
+      <div class="flow-stack__body">
+        轮 1: LLM 调 load_skill("react") → activeSkills = <code>{react}</code><br/>
+        轮 2: LLM 看到 react 工具, 调 use_react_component → activeSkills 仍然 <code>{react}</code><br/>
+        轮 3: LLM 调 react_props → activeSkills 仍然 <code>{react}</code><br/>
+        <br/>
+        <strong>→ 多轮共享同一份 activeSkills, 因为都在同一个 run 内。</strong>
+      </div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">场景 B · 同一个 agent 实例的多个 run</div>
+      <div class="flow-stack__body">
+        run 1: LLM 调 load_skill("react") → activeSkills = <code>{react}</code><br/>
+        run 1 结束: <strong>不清空</strong>, activeSkills 仍然是 <code>{react}</code><br/>
+        run 2: 用户输 "再帮我做个 Vue 组件", LLM 调 load_skill("vue")<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;→ activeSkills = <code>{react, vue}</code><br/>
+        <br/>
+        <strong>→ 跨 run 共享, 累积式。 这是反直觉点: 不清空。</strong>
+      </div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--bad">
+      <div class="flow-stack__label">场景 C · REPL 关闭 / 实例销毁</div>
+      <div class="flow-stack__body">
+        关闭 REPL → agent 实例销毁 → 闭包释放 → activeSkills 被<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;GC 回收, 数据消失。<br/>
+        下次开 REPL → 新建 agent 实例 → 新空 Map。<br/>
+        <br/>
+        <strong>→ 这才是"清空" 唯一发生的时机。</strong>
+      </div>
+    </div>
+  </div>
 </div>
-<div class="flow-row--center" style="margin-top: var(--space-3)">
-<span class="flow-node">agent.run() 2</span>
-<span class="flow-arrow">→</span>
-<span class="flow-node flow-node--accent">react 工具仍可用</span>
-<span class="flow-arrow">→</span>
-<span class="flow-node">用 react 工具</span>
+<p>
+  <strong>为什么不在 run 结束清空?</strong>
+</p>
+<p>
+  因为用户在 run 1 加载了 "react" skill, run 2 很可能继续做 React
+  相关的事。 如果 run 1 结束就清, run 2 一开始 LLM 又看不到 react
+  工具, 又得调一次 load_skill, 多一轮对话。 体验差。 所以 run
+  结束不清, 跨 run 累积, 直到 REPL 关闭才整体清空。
+</p>
+<p>
+  <strong>和"父子隔离" 怎么配合?</strong>
+</p>
+<p>
+  父 agent 加载的 skill, 子 agent <strong>看不到</strong>。 原因是
+  父子各是独立的 <code>createAgent()</code> 调用, 各自闭包内
+  activeSkills。 父 agent 的 activeSkills 在父闭包, 子 agent
+  闭包内是新建的空 Map。 所以不会污染。
+</p>
+<div class="figure figure--stack">
+  <div class="figure__title">图 4 · 父子 agent 的 skill 状态完全独立</div>
+  <div class="flow-stack">
+    <div class="flow-stack__layer flow-stack__layer--stable">
+      <div class="flow-stack__label">父 agent 闭包内 activeSkills</div>
+      <div class="flow-stack__body">
+        <code>{react, typescript}</code> (父 LLM 自己加载的)<br/>
+        父销毁前一直保留。
+      </div>
+    </div>
+    <div class="flow-stack__layer flow-stack__layer--dynamic">
+      <div class="flow-stack__label">子 agent 闭包内 activeSkills (run_subagent 时创建)</div>
+      <div class="flow-stack__body">
+        <code>{}</code> (新建, 空 Map)<br/>
+        子 agent 看不到父的 skill, 父子隔离天然成立。
+      </div>
+    </div>
+  </div>
 </div>
-<div class="flow-row--center" style="margin-top: var(--space-3)">
-<span class="flow-node">REPL 退出 / agent 销毁</span>
-<span class="flow-arrow">→</span>
-<span class="flow-node">activeSkills 闭包销毁</span>
-</div>
-</div>
-<figcaption>图 05-2 · skill 激活生命周期. 同一 agent 实例跨 run() 共享 activeSkills, agent 销毁时彻底清空。</figcaption>
-</figure>
 <h2 id="load-skill-tool">load_skill 工具的特殊设计</h2>
 <p>
   <code>load_skill</code> 是特殊 tool, 它不在 ToolRegistry 里, 而是
@@ -459,12 +908,12 @@ if (call.name === "load_skill") {
 <p>
   <strong>用途</strong>: 验证 skill 加载和去重逻辑的 fake 测试。 不依赖
   真实 skill loader, 跑得快, 跑得稳。
-  </p>
+</p>
 <p>
   <strong>设计思想</strong>: 经典<strong>fake LLM + fake loader</strong> 双 fake 套路 —
   模拟 LLM 调 load_skill, 验证 activeSkills 状态正确, 验证下一轮
   chat() 的 tools 字段含新工具。
-  </p>
+</p>
 <p>
   <strong>实现细节</strong>:
 </p>
@@ -510,14 +959,15 @@ test("同 skill 多次加载去重", async () =&gt; {
 <p class="source-link"><a href="https://github.com/pingp76/swoopcode/blob/main/src/skills.test.ts#L1" rel="noreferrer" target="_blank">GitHub · src/skills.test.ts skill 加载 + 去重测试 (L1)</a></p>
 <p>
   这两条测试如果挂, 你立刻知道 skill 加载或去重逻辑坏了。
-  </p>
+</p>
 <h2 id="common-confusion">3 个常见误解</h2>
 <dl class="defs">
 <dt>误解 1 · "Skill 应该进 system prompt 才有保证"</dt>
 <dd>
     错。 Skill 工具描述走 <code>LLM.chat()</code> 的 tools 字段,
     不进 system prompt。 跟 TODO 走 reminder 一样的原理:
-    功能上等价, 性能上 (prompt cache) 不同。
+    功能上等价, 性能上 (prompt cache) 不同。 详细对比看
+    本章"对 prompt cache 的影响" 一节。
   </dd>
 <dt>误解 2 · "Skill 之间互斥"</dt>
 <dd>
@@ -535,125 +985,125 @@ test("同 skill 多次加载去重", async () =&gt; {
 </dl>
 <h2 id="trap">反例梯度</h2>
 <div class="card card--trap">
-<div class="card__head">
-<span class="card__tag">新手错法 · A</span>
-</div>
-<div class="card__body">
-<p>
+  <div class="card__head">
+  <span class="card__tag">新手错法 · A</span>
+  </div>
+  <div class="card__body">
+  <p>
 <strong>常见错误:</strong> skill 激活状态写到 module-level 单例。
     </p>
-<p>
+  <p>
 <strong>为什么错:</strong> 第 04 章父子隔离被破坏, 子智能体看到父
       agent 加载的 skill。
     </p>
-<p>
+  <p>
 <strong>正确做法:</strong> activeSkills 在 <code>createAgent()</code> 闭包内,
       工厂模式。
     </p>
-</div>
+  </div>
 </div>
 <div class="card card--trap">
-<div class="card__head">
-<span class="card__tag">中级错法 · B</span>
-</div>
-<div class="card__body">
-<p>
+  <div class="card__head">
+  <span class="card__tag">中级错法 · B</span>
+  </div>
+  <div class="card__body">
+  <p>
 <strong>常见错误:</strong> 工具描述拼到 system prompt 字符串。
     </p>
-<p>
+  <p>
 <strong>为什么错:</strong> 破坏第 10 章 cache-friendly 布局, 每次调 LLM
       都要重传所有 skill 工具描述。
     </p>
-<p>
+  <p>
 <strong>正确做法:</strong> 工具描述作为 LLM.chat() 的 tools 字段, system
       prompt 保持稳定。
     </p>
-</div>
+  </div>
 </div>
 <div class="card card--trap">
-<div class="card__head">
-<span class="card__tag">高级错法 · C</span>
-</div>
-<div class="card__body">
-<p>
+  <div class="card__head">
+  <span class="card__tag">高级错法 · C</span>
+  </div>
+  <div class="card__body">
+  <p>
 <strong>常见错误:</strong> load_skill 工具调成功但没写 tool message。
     </p>
-<p>
+  <p>
 <strong>为什么错:</strong> 第 02 章的 tool_call_id 配对约束, 不写 tool
       message 会让 messages 序列断裂。
     </p>
-<p>
+  <p>
 <strong>正确做法:</strong> load_skill 激活后, 必写一条 role: "tool" 消息,
       content 描述已加载的工具列表。
     </p>
-</div>
+  </div>
 </div>
 <div class="card card--trap">
-<div class="card__head">
-<span class="card__tag">边界错法 · D</span>
-</div>
-<div class="card__body">
-<p>
+  <div class="card__head">
+  <span class="card__tag">边界错法 · D</span>
+  </div>
+  <div class="card__body">
+  <p>
 <strong>常见错误:</strong> 同一个 skill 加载多次, 工具集出现重复。
     </p>
-<p>
+  <p>
 <strong>为什么错:</strong> availableTools 出现重复项, LLM 看到两个相同 name
       的工具, 困惑。
     </p>
-<p>
+  <p>
 <strong>正确做法:</strong> activeSkills.tools() 用 Map 去重,
       同名工具取先注册的版本。
     </p>
-</div>
+  </div>
 </div>
 <h2 id="validate">如何验证 (本章 Validation 卡片)</h2>
 <div class="card card--validation">
-<div class="card__head">
-<span class="card__tag">Validation · 第 05 章</span>
-</div>
-<div class="card__body">
-<p>
+  <div class="card__head">
+  <span class="card__tag">Validation · 第 05 章</span>
+  </div>
+  <div class="card__body">
+  <p>
 <strong>load_skill 激活工具:</strong> fake LLM 第一轮调
       <code>load_skill("react")</code>, 跑完后第二轮 LLM 收到的 tools 字段
       含 react skill 的工具 (例如 "use_react_component")。
     </p>
-<p>
+  <p>
 <strong>tool message 必写:</strong> load_skill 调用后, history 末尾
       出现 role: "tool" 消息, content 描述已加载的工具列表。
     </p>
-<p>
+  <p>
 <strong>同 skill 多次加载去重:</strong> fake LLM 连续调 load_skill("react")
       两次, availableTools 不出现重复项。
     </p>
-<p>
+  <p>
 <strong>loop 结束不污染父:</strong> 父 agent 调 load_skill 后 spawn
       子智能体, 子智能体的 availableTools 不含 react skill 工具 (第 04
       章父子隔离, 本章沿用)。
     </p>
-<p>
+  <p>
 <strong>未知 skill 不崩:</strong> load_skill("不存在"), 写 error tool
       message, 继续 loop。
     </p>
-</div>
+  </div>
 </div>
 <h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
 <ul>
 <li>
 <strong>工厂模式再次回报:</strong> activeSkills 在 <code>createAgent()</code> 闭包内,
-      父子隔离自然成立。
-    </li>
+    父子隔离自然成立。
+  </li>
 <li>
 <strong>tool call 协议沿用:</strong> load_skill 是普通工具, 复用 Tool
-      interface, 激活后写 tool message 满足协议。
-    </li>
+    interface, 激活后写 tool message 满足协议。
+  </li>
 <li>
 <strong>稳定前缀原则:</strong> 工具描述作为 LLM.chat() 的 tools 字段, 不污染
-      system prompt 字符串, 为第 10 章做准备。
-    </li>
+    system prompt 字符串, 为第 10 章做准备。
+  </li>
 <li>
 <strong>不污染 history 的稳定结构:</strong> skill 状态本身不进
-      history.getMessages(), 只在 loop 闭包内。
-    </li>
+    history.getMessages(), 只在 loop 闭包内。
+  </li>
 </ul>
 <h2 id="forward">前瞻张力: 留给后续章节</h2>
 <dl class="defs">
@@ -661,65 +1111,65 @@ test("同 skill 多次加载去重", async () =&gt; {
 <dd>
     第 06 章 compress 会处理"skill 工具返回内容太长" 的情况, 例如 read_skill
     工具一次返回整个 README, 需要 P1 即时压缩。
-    </dd>
+  </dd>
 <dt>skill 跨会话保留</dt>
 <dd>
     第 09 章 memory 区分"会话内 skill" (本章的) 和"用户级偏好 skill"
     (例如"用户偏好 React 不用 Vue"), 后者需要持久化。
-    </dd>
+  </dd>
 <dt>工具描述前缀稳定性</dt>
 <dd>
     第 10 章 cache-friendly 布局会展开, skill 集合一旦在 run() 内确定就稳定,
       工具描述作为稳定前缀。
-    </dd>
+  </dd>
 <dt>skill 加载权限</dt>
 <dd>
     第 07 章 permission 会扩展, load_skill 本身可能需要权限 (例如 "deploy" skill
     是受限的)。
-    </dd>
+  </dd>
 </dl>
 <h2 id="prompt-card">Prompt Card (本章任务)</h2>
 <div class="card card--prompt">
-<div class="card__head">
-<span class="card__tag">Prompt Card · 第 05 章</span>
-<button class="card__copy" data-copy-card="" type="button">复制</button>
-</div>
-<div class="card__body">
-<p>
+  <div class="card__head">
+    <span class="card__tag">Prompt Card · 第 05 章</span>
+    <button class="card__copy" data-copy-card="" type="button">复制</button>
+  </div>
+  <div class="card__body">
+    <p>
 <strong>目标:</strong> 实现 Skill 加载机制, agent 可按需激活工具子集,
-      激活状态在 loop 闭包内临时保留。
+      激活状态在 instance 闭包内临时保留。
     </p>
-<p>
+    <p>
 <strong>场景:</strong> 用户输入 "帮我做一个 React 组件", agent 调
       load_skill("react"), 第二轮 LLM 看到 react 工具 (例如
       use_react_component), 之后在该 run 内持续可用。
     </p>
-<p>
+    <p>
 <strong>模块:</strong> <code>src/skills.ts</code> (新) 暴露
-      <code>createSkillLoader()</code> 和 <code>createActiveSkillSet()</code>;
+      <code>createSkillManager()</code>;
       <code>src/tools/load_skill.ts</code> (新) 实现工具;
       <code>src/agent.ts</code> createAgent() 维护 activeSkills 闭包;
       <code>src/index.ts</code> 接线 skillLoader。
     </p>
-<p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
-<ul>
-<li>activeSkills 是 createAgent() 闭包内状态, 不是 module-level</li>
-<li>load_skill 必写 role: "tool" 消息, content 描述已加载工具列表</li>
-<li>工具描述不拼到 system prompt 字符串 (走 LLM.chat() 的 tools 字段)</li>
-<li>同名工具去重 (用 Map 而非 Array.includes)</li>
-<li>子智能体拿不到父 agent 的 skill 状态 (第 04 章隔离沿用)</li>
-</ul>
-<p><strong>验证 (用 fake LLM + fake loader, 逐条落到 vitest):</strong></p>
-<ul>
-<li>load_skill("react") 后, 第二轮 LLM 收到的 tools 字段含 react 工具</li>
-<li>load_skill 调用后, history 末尾出现 role: "tool" 消息</li>
-<li>连续两次 load_skill("react"), availableTools 不重复</li>
-<li>
+    <p><strong>边界 (LLM 必须遵守的 checklist):</strong></p>
+    <ul>
+      <li>activeSkills 是 createAgent() 闭包内状态, 不是 module-level</li>
+      <li>load_skill 必写 role: "tool" 消息, content 描述已加载工具列表</li>
+      <li>工具描述不拼到 system prompt 字符串 (走 LLM.chat() 的 tools 字段)</li>
+      <li>同名工具去重 (用 Map 而非 Array.includes)</li>
+      <li>子智能体拿不到父 agent 的 skill 状态 (第 04 章隔离沿用)</li>
+    </ul>
+    <p><strong>验证 (用 fake LLM + fake loader, 逐条落到 vitest):</strong></p>
+    <ul>
+      <li>load_skill("react") 后, 第二轮 LLM 收到的 tools 字段含 react 工具</li>
+      <li>load_skill 调用后, history 末尾出现 role: "tool" 消息</li>
+      <li>连续两次 load_skill("react"), availableTools 不重复</li>
+      <li>
         父 agent 调 load_skill 后 spawn 子智能体, 子智能体 tools 不含 react 工具
       </li>
-<li>load_skill("不存在"), 写 error tool message, agent 不抛</li>
-</ul>
-</div>
+      <li>load_skill("不存在"), 写 error tool message, agent 不抛</li>
+    </ul>
+  </div>
 </div>
 <h2 id="practice">本章练习</h2>
 <ol>
@@ -745,4 +1195,3 @@ test("同 skill 多次加载去重", async () =&gt; {
   "context 撑爆" 的问题——Normalize / Block / Compress, 让 harness
   在长任务下保持稳定。
 </p>
-</content>

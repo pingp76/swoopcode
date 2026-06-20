@@ -215,6 +215,14 @@ mark {
   border-bottom: 0;
 }
 
+.site-title__home {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--color-text);
+  border-bottom: 0;
+}
+
 .site-title__logo {
   width: 34px;
   height: 34px;
@@ -235,6 +243,32 @@ mark {
 .site-title__sub {
   margin-top: 2px;
   color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+}
+
+.site-title__sub--github {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-muted);
+  border-bottom: 0;
+  transition: color 120ms ease;
+}
+
+.site-title__sub--github:hover,
+.site-title__sub--github:focus-visible {
+  color: var(--color-accent, currentColor);
+  border-bottom: 0;
+}
+
+.site-github__icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.site-github__label {
   font-size: var(--text-xs);
   letter-spacing: 0.04em;
 }
