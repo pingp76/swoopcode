@@ -90,8 +90,8 @@ src/
 ├── recovery.ts         # LLM 错误分类与恢复决策：backoff/compact/continue/fail
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
 ├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
-├── foundation-models.test.ts # Profile 注册表、匹配、fallback 测试（14 个测试用例）
-├── runtime-policy.test.ts # Policy 解析、env 覆盖、非法值报错测试（19 个测试用例）
+├── foundation-models.test.ts # Profile 注册表、匹配、fallback 测试（17 个测试用例）
+├── runtime-policy.test.ts # Policy 解析、env 覆盖、非法值报错测试（20 个测试用例）
 ├── runtime-policy-store.test.ts # Override 合并、reset、snapshot 测试（15 个测试用例）
 ├── context-budget.test.ts # 预算分配公式、总和约束、override 裁剪测试（9 个测试用例）
 ├── llm-adapter.test.ts # Adapter 请求构建、reasoning 回放、streaming 聚合测试（15 个测试用例）
@@ -437,7 +437,7 @@ skills/
 ### Foundation Model Profile 基座模型画像 (`foundation-models.ts`)
 
 - **能力驱动而非模型名驱动**：`agent.ts` 不出现 `kimi`/`deepseek` 等具体模型分支，业务层只看 `RuntimePolicy` 中的策略字段
-- **Profile Registry**：含 `generic-openai-compatible`、`kimi-k2.6`、`kimi-code`、`deepseek-v4`、`minimax-m2.7`、`minimax-m3`、`mimo-v2.5-pro`、`qwen3.7-max`、`glm-5.1` 等画像
+- **Profile Registry**：含 `generic-openai-compatible`、`kimi-k2.6`、`kimi-code`、`deepseek-v4`、`minimax-m2.7`、`minimax-m3`、`mimo-v2.5-pro`、`qwen3.7-max`、`glm-5.2`、`glm-5.1` 等画像
 - **匹配优先级**：`LLM_MODEL_PROFILE` 显式指定 > exact model id > prefix > provider default > generic fallback
 - **硬协议字段 vs 优化提示分离**：maxTokensField、thinking requestShape、reasoning responseFields 等硬字段必须保守；context budget、compression mode 等优化提示允许合理默认
 - **Profile 分级**：`verified` / `experimental` / `needs_review`，stale/high-risk profile 启动时产生 warning 但不阻断
@@ -508,7 +508,7 @@ skills/
 
 ### LLM Provider Profile 抽象层 (`llm-providers.ts`)
 
-- **集中 profile 表**：声明 4 个 provider（`openai_compatible`、`minimax_cn`、`kimi_platform_cn`、`kimi_code_cn`）的默认 endpoint、默认模型、key 环境变量和能力标记
+- **集中 profile 表**：声明 5 个 provider（`openai_compatible`、`minimax_cn`、`kimi_platform_cn`、`kimi_code_cn`、`zhipuai_cn`）的默认 endpoint、默认模型、key 环境变量和能力标记
 - **解析优先级**：`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` 优先于 provider 默认值，兼容现有使用方式
 - **启动时解析**：`resolveLLMProviderConfig()` 只读 env，不做网络请求，返回 `ResolvedLLMConfig`
 - **厂商差异不泄漏到 Agent 循环**：Agent、SubAgent、Async Run 只依赖 `LLMClient.chat()`
@@ -725,6 +725,8 @@ skills/
 | `KIMI_CODE_API_KEY`        | Kimi Code CN 专用 key               | `sk-kimi-...`                 |
 | `MOONSHOT_API_KEY`         | Kimi Platform CN 专用 key           | `sk-moonshot-...`             |
 | `MINIMAX_CN_API_KEY`       | MiniMax CN 专用 key                 | `sk-minimax-...`              |
+| `ZHIPUAI_API_KEY`          | ZhipuAI CN 专用 key                 | `sk-zhipu-...`                |
+| `BIGMODEL_API_KEY`         | ZhipuAI CN 备用 key                 | `sk-bigmodel-...`             |
 | `LOG_LEVEL`                | 日志级别                            | `info`                        |
 | `COMPRESS_TOOL_OUTPUT`     | 即时压缩 token 阈值                 | `2000`                        |
 | `COMPRESS_DECAY_THRESHOLD` | 衰减压缩轮次阈值                    | `3`                           |
@@ -789,11 +791,11 @@ skills/
 | `src/session-events.test.ts`                                   | 5                             | drain 清空、peek 不清空、顺序保持                                                                                                                                                                                          |
 | `src/transcript.test.ts`                                       | 6                             | 消息分类、事件 sequence、historySequence、timing 元信息、搜索                                                                                                                                                              |
 | `src/cache-debug.test.ts`                                      | 7                             | inspect 变化检测、system prompt 不变性、formatCacheDebugLog                                                                                                                                                                |
-| `src/llm-providers.test.ts`                                    | 26                            | provider 解析、默认值、覆盖优先级、错误提示、能力标记                                                                                                                                                                      |
+| `src/llm-providers.test.ts`                                    | 31                            | provider 解析、默认值、覆盖优先级、错误提示、能力标记                                                                                                                                                                      |
 | `src/config.test.ts`                                           | 5                             | loadConfig 解析 provider 字段、compression/logLevel 默认值、错误信息不泄漏 key                                                                                                                                             |
 | `src/llm.test.ts`                                              | 10                            | non-streaming 路径、streaming content/tool_calls 聚合、llmLogger 调用                                                                                                                                                      |
-| `src/foundation-models.test.ts`                                | 14                            | Profile 注册表、exact/prefix/fallback 匹配、provider 兼容校验、显式 profile、stale warning                                                                                                                                 |
-| `src/runtime-policy.test.ts`                                   | 19                            | Policy 默认值、env 覆盖、非法覆盖报错、协议 fallback、compression 派生                                                                                                                                                     |
+| `src/foundation-models.test.ts`                                | 17                            | Profile 注册表、exact/prefix/fallback 匹配、provider 兼容校验、显式 profile、stale warning                                                                                                                                 |
+| `src/runtime-policy.test.ts`                                   | 20                            | Policy 默认值、env 覆盖、非法覆盖报错、协议 fallback、compression 派生                                                                                                                                                     |
 | `src/context-budget.test.ts`                                   | 9                             | 三种模式预算分配、总和约束、override 处理、裁剪优先级、极小预算边界                                                                                                                                                        |
 | `src/runtime-policy-store.test.ts`                             | 15                            | Override 合并、reset、snapshot、非法更新报错                                                                                                                                                                               |
 | `src/llm-adapter.test.ts`                                      | 15                            | 请求构建、reasoning 占位、streaming 聚合、max token 字段、usage 解析                                                                                                                                                       |

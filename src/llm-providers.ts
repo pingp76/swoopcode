@@ -23,7 +23,8 @@ export type LLMProviderId =
   | "openai_compatible"
   | "minimax_cn"
   | "kimi_platform_cn"
-  | "kimi_code_cn";
+  | "kimi_code_cn"
+  | "zhipuai_cn";
 
 /**
  * Provider 能力标记
@@ -134,6 +135,22 @@ const providerProfiles: Record<LLMProviderId, LLMProviderProfile> = {
       // 注：官方文档曾提到 legacy OpenAI format，但当前 OpenAI SDK
       // tools/tool_calls 路径已实测可用（普通聊天 + tool call 闭环成功）。
       supportsThinking: false,
+    },
+  },
+  zhipuai_cn: {
+    id: "zhipuai_cn",
+    displayName: "ZhipuAI CN",
+    protocol: "openai-chat-completions",
+    // 智谱官方 SDK 文档使用 open.bigmodel.cn 的 v4 基础路径。
+    // 这里作为可运行默认值；企业代理或自建网关仍通过 LLM_BASE_URL 覆盖。
+    defaultBaseURL: "https://open.bigmodel.cn/api/paas/v4/",
+    defaultModel: "glm-5.2",
+    apiKeyEnvNames: ["ZHIPUAI_API_KEY", "BIGMODEL_API_KEY"],
+    capabilities: {
+      supportsTools: true,
+      supportsToolChoiceRequired: false,
+      prefersStreaming: true,
+      supportsThinking: true,
     },
   },
 };
