@@ -74,6 +74,34 @@ describe("resolveFoundationModelProfile", () => {
     expect(result.id).toBe("deepseek-v4");
   });
 
+  it("matches exact model id for glm-5.2", () => {
+    const result = resolveFoundationModelProfile({
+      provider: "zhipuai_cn",
+      model: "glm-5.2",
+    });
+    expect(result.id).toBe("glm-5.2");
+    expect(result.provider).toBe("zhipuai_cn");
+    expect(result.limits.contextWindowTokens).toBe(1000000);
+    expect(result.limits.effectiveContextBudgetTokens).toBe(750000);
+    expect(result.thinking.defaultMode).toBe("adaptive");
+    expect(result.reasoning.responseFields).toEqual(["reasoning_content"]);
+    expect(result.cache.supported).toBe(false);
+  });
+
+  it("matches GLM-5.2 aliases and prefixes conservatively", () => {
+    const exactAlias = resolveFoundationModelProfile({
+      provider: "zhipuai_cn",
+      model: "GLM5.2",
+    });
+    const prefixAlias = resolveFoundationModelProfile({
+      provider: "zhipuai_cn",
+      model: "glm-5.2-long-context",
+    });
+
+    expect(exactAlias.id).toBe("glm-5.2");
+    expect(prefixAlias.id).toBe("glm-5.2");
+  });
+
   it("uses explicit profile id when provided", () => {
     const result = resolveFoundationModelProfile({
       provider: "kimi_platform_cn",
@@ -81,6 +109,15 @@ describe("resolveFoundationModelProfile", () => {
       explicitProfileId: "kimi-k2.6",
     });
     expect(result.id).toBe("kimi-k2.6");
+  });
+
+  it("returns zhipuai default profile before generic for unknown zhipu model", () => {
+    const result = resolveFoundationModelProfile({
+      provider: "zhipuai_cn",
+      model: "glm-custom-alias",
+    });
+    expect(result.id).toBe("glm-5.2");
+    expect(result.provider).toBe("zhipuai_cn");
   });
 
   it("throws for unknown explicit profile id", () => {
@@ -147,6 +184,7 @@ describe("getRegisteredModelProfileIds", () => {
     expect(ids).toContain("minimax-m3");
     expect(ids).toContain("mimo-v2.5-pro");
     expect(ids).toContain("qwen3.7-max");
+    expect(ids).toContain("glm-5.2");
     expect(ids).toContain("glm-5.1");
   });
 });

@@ -181,6 +181,49 @@ describe("minimax_cn provider", () => {
 });
 
 // ============================================================
+// zhipuai_cn 解析
+// ============================================================
+
+describe("zhipuai_cn provider", () => {
+  it("只设置 ZHIPUAI_API_KEY 时可解析成功", () => {
+    const config = resolveLLMProviderConfig({
+      LLM_PROVIDER: "zhipuai_cn",
+      ZHIPUAI_API_KEY: "sk-zhipu-test",
+    });
+    expect(config.provider).toBe("zhipuai_cn");
+    expect(config.apiKey).toBe("sk-zhipu-test");
+    expect(config.baseURL).toBe("https://open.bigmodel.cn/api/paas/v4/");
+    expect(config.model).toBe("glm-5.2");
+  });
+
+  it("BIGMODEL_API_KEY 也可作为 fallback", () => {
+    const config = resolveLLMProviderConfig({
+      LLM_PROVIDER: "zhipuai_cn",
+      BIGMODEL_API_KEY: "sk-bigmodel-fallback",
+    });
+    expect(config.apiKey).toBe("sk-bigmodel-fallback");
+  });
+
+  it("LLM_MODEL 优先于 GLM-5.2 默认模型", () => {
+    const config = resolveLLMProviderConfig({
+      LLM_PROVIDER: "zhipuai_cn",
+      ZHIPUAI_API_KEY: "sk-zhipu-test",
+      LLM_MODEL: "glm-5.2-proxy",
+    });
+    expect(config.model).toBe("glm-5.2-proxy");
+  });
+
+  it("声明 supportsThinking 和 prefersStreaming 能力", () => {
+    const config = resolveLLMProviderConfig({
+      LLM_PROVIDER: "zhipuai_cn",
+      ZHIPUAI_API_KEY: "sk-zhipu-test",
+    });
+    expect(config.capabilities.supportsThinking).toBe(true);
+    expect(config.capabilities.prefersStreaming).toBe(true);
+  });
+});
+
+// ============================================================
 // 启发式推断
 // ============================================================
 
@@ -211,6 +254,16 @@ describe("baseURL 启发式推断", () => {
       LLM_MODEL: "kimi-k2.6",
     });
     expect(config.provider).toBe("kimi_platform_cn");
+  });
+
+  it("未设置 LLM_PROVIDER 时，从 LLM_BASE_URL 推断为 zhipuai_cn", () => {
+    const config = resolveLLMProviderConfig({
+      LLM_API_KEY: "sk-test",
+      LLM_BASE_URL: "https://open.bigmodel.cn/api/paas/v4/",
+      LLM_MODEL: "glm-5.2",
+    });
+    expect(config.provider).toBe("zhipuai_cn");
+    expect(config.capabilities.supportsThinking).toBe(true);
   });
 
   it("不匹配的 baseURL 回退到 openai_compatible", () => {
@@ -261,15 +314,15 @@ describe("错误提示", () => {
   it("apiKey 缺失错误提示包含 provider id 和候选 key env", () => {
     expect(() =>
       resolveLLMProviderConfig({
-        LLM_PROVIDER: "kimi_code_cn",
+        LLM_PROVIDER: "zhipuai_cn",
       }),
-    ).toThrow('provider "kimi_code_cn"');
+    ).toThrow('provider "zhipuai_cn"');
 
     expect(() =>
       resolveLLMProviderConfig({
-        LLM_PROVIDER: "kimi_code_cn",
+        LLM_PROVIDER: "zhipuai_cn",
       }),
-    ).toThrow("LLM_API_KEY, KIMI_CODE_API_KEY");
+    ).toThrow("LLM_API_KEY, ZHIPUAI_API_KEY, BIGMODEL_API_KEY");
   });
 
   it("错误信息不泄漏已有 key 值", () => {

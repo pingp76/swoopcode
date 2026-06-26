@@ -782,6 +782,85 @@ const modelProfiles: FoundationModelProfile[] = [
   },
 
   // -------------------------------------------------------------------------
+  // GLM-5.2
+  // -------------------------------------------------------------------------
+  {
+    id: "glm-5.2",
+    displayName: "GLM-5.2",
+    provider: "zhipuai_cn",
+    match: {
+      exactModelIds: ["glm-5.2", "GLM-5.2", "glm5.2", "GLM5.2"],
+      modelIdPrefixes: ["glm-5.2", "GLM-5.2"],
+    },
+    protocol: {
+      preferred: "openai-chat-completions",
+      fallbacks: [],
+      implemented: ["openai-chat-completions"],
+    },
+    limits: {
+      contextWindowTokens: 1000000,
+      effectiveContextBudgetTokens: 750000,
+      longContextThresholdTokens: 512000,
+      maxOutputTokens: 65536,
+      maxTokensField: "max_tokens",
+    },
+    thinking: {
+      supported: true,
+      defaultMode: "adaptive",
+      efforts: ["default"],
+      enableForAgenticTasks: true,
+      disableForSimpleChat: true,
+      requestShape: "extra_body_thinking",
+    },
+    reasoning: {
+      returned: true,
+      mustReplayWithToolCalls: false,
+      preserveRawAssistantMessage: true,
+      responseFields: ["reasoning_content"],
+      streamingDeltaFields: ["reasoning_content"],
+    },
+    tools: {
+      supported: true,
+      supportsToolChoiceRequired: false,
+      allowedToolChoiceModes: ["auto", "none"],
+      streamingArguments: true,
+      multimodalToolResults: false,
+    },
+    cache: {
+      supported: false,
+      automatic: false,
+      exposesUsage: false,
+      usageFields: {},
+    },
+    modalities: {
+      text: true,
+      image: false,
+      video: false,
+      audio: false,
+    },
+    optimizationHints: {
+      bestFor: ["coding", "long_horizon_agent", "large_context"],
+      defaultCompressionMode: "long_context",
+      prefersStreaming: true,
+      goodForSubagents: false,
+    },
+    knownQuirks: [
+      "官方资料确认 1M context 与 reasoning_content，但本仓尚未做 live smoke test",
+      "max output 和 cache usage 字段未在当前资料中核实，先使用保守上限并关闭 cache telemetry",
+      "thinking effort 的具体枚举未核实，暂不暴露 low/medium/high 等非 default 覆盖",
+    ],
+    documentation: {
+      sourceUrls: [
+        "https://github.com/zai-org/glm-5/blob/main/README.md",
+        "https://github.com/metaglm/zhipuai-sdk-python-v4",
+      ],
+      verifiedAt: "2026-06-26",
+      updateRisk: "high",
+      status: "experimental",
+    },
+  },
+
+  // -------------------------------------------------------------------------
   // GLM-5.1
   // -------------------------------------------------------------------------
   {

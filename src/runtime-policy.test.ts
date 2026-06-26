@@ -73,6 +73,29 @@ describe("resolveRuntimePolicy defaults", () => {
     expect(policy.context.compressionMode).toBe("balanced");
   });
 
+  it("derives correct defaults for glm-5.2", () => {
+    const profile = resolveFoundationModelProfile({
+      provider: "zhipuai_cn",
+      model: "glm-5.2",
+    });
+    const policy = resolveRuntimePolicy(profile, "glm-5.2");
+
+    expect(policy.modelProfileId).toBe("glm-5.2");
+    expect(policy.context.contextWindowTokens).toBe(1000000);
+    expect(policy.context.effectiveBudgetTokens).toBe(750000);
+    expect(policy.context.longContextThresholdTokens).toBe(512000);
+    expect(policy.context.compressionMode).toBe("long_context");
+    expect(policy.request.prefersStreaming).toBe(true);
+    expect(policy.request.thinkingMode).toBe("adaptive");
+    expect(policy.request.extraBody).toEqual({
+      thinking: { type: "auto" },
+    });
+    expect(policy.reasoning.responseFields).toEqual(["reasoning_content"]);
+    expect(policy.tools.streamingArguments).toBe(true);
+    expect(policy.cache.supported).toBe(false);
+    expect(policy.telemetry.recordCacheTokens).toBe(false);
+  });
+
   it("derives long_context compression with relaxed thresholds", () => {
     const profile = getProfile("deepseek-v4");
     const policy = resolveRuntimePolicy(profile, "deepseek-v4");
