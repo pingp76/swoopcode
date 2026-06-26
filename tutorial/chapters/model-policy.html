@@ -1,18 +1,27 @@
 <p class="article__eyebrow">专题 A · LLM 选型策略层</p>
 <h1 class="article__title">Model Policy: 任务类型 → Model 推荐的策略层</h1>
 <p class="article__lede">
-  第 15 章提过 3 个 LLM provider (OpenAI / Anthropic / 自部署 vLLM)
-  + 5 个常见 model, 但 harness 怎么知道"这个任务该用哪个 model"?
-  用户让 LLM 跑"5 天迁移" 该用 GPT-4o (质量) 还是 Qwen2.5-7B
-  (成本)? 跑"5 分钟 git status" 该用 Claude Haiku (快) 还是
-  Claude Opus (贵)? 选错就是几倍账单浪费或质量崩盘。 这一专题
-  加 <strong>Model Policy 策略层</strong>: 5 种<strong>任务分类</strong>
-  (long_running / short_interactive / bulk_summarize / complex_reasoning
-  / experimental) → 5 种<strong>推荐 model</strong>, 配
-  <code>--model-policy auto|fast|quality|budget</code> 4 种<strong>策略</strong>
-  切换, 用户在质量 / 速度 / 成本间选边。 读完后, 你能讲清"为什么
-  不能 1 个 model 跑所有任务" + "auto 策略怎么工作" + "怎么扩展
-  第 6 个 model"。
+  第 15 章提过 LLM provider 概念 (OpenAI / Anthropic / 自部署
+  vLLM) + 5 个常见 model, 但 harness 怎么知道"这个任务该用
+  哪个 model"? 用户让 LLM 跑"5 天迁移" 该用 GPT-4o (质量)
+  还是 Qwen2.5-7B (成本)? 跑"5 分钟 git status" 该用 Claude
+  Haiku (快) 还是 Claude Opus (贵)? 选错就是几倍账单浪费或
+  质量崩盘。 这一专题加 <strong>Model Policy 策略层</strong>:
+  5 种<strong>任务分类</strong> (long_running / short_interactive
+  / bulk_summarize / complex_reasoning / experimental) → 5 种
+  <strong>推荐 model</strong>, 配 <code>--model-policy
+  auto|fast|quality|budget</code> 4 种<strong>策略</strong>切换,
+  用户在质量 / 速度 / 成本间选边。 <strong>v2 更新</strong>:
+  Anthropic Messages 协议已经实现 (<code>src/llm-adapter.ts</code>
+  新增 <code>createAnthropicMessagesAdapter</code>), 5 个 model
+  画像里 GLM-5.2 / Claude Sonnet 4.5 / Claude Opus 4.5 等
+  3 个声明 <code>preferred: "anthropic-messages"</code>, 走
+  Anthropic 协议; GPT-4o / Qwen 等走 OpenAI Chat Completions 协议。
+  同一份 history 同时支持 2 套协议, 协议差异<strong>全部收敛在
+  LLM 边界</strong>, agent.ts / 压缩 / 权限 / 工具执行不知道协议
+  存在。 读完后, 你能讲清"为什么不能 1 个 model 跑所有任务" +
+  "auto 策略怎么工作" + "OpenAI 和 Anthropic 协议怎么共存" +
+  "怎么扩展第 6 个 model"。
 </p>
 <nav aria-label="页内小节" class="article__meta" id="article-inline-toc"></nav>
 <hr class="rule"/>
@@ -63,6 +72,389 @@
   quality / budget) 切偏好, 临时改变单次任务的 model。 这是
   Reference 章节 "模式 8 · Strategy 策略模式" + "模式 4 ·
   依赖注入" 的联合应用。
+</p>
+<h2 id="vocabulary">先梳理语言: 8 个核心概念是什么</h2>
+<p>
+  上面看到痛点和朴素方案, 这一节<strong>先给词表</strong>。
+  Model Policy 这一专题用了 8 个核心概念, 后面 14 个小节会
+  反复出现, 第一次看容易混 (provider / protocol / adapter /
+  model profile / task type / strategy / fallback chain /
+  compatible provider ...)。 v2 加了 Anthropic 协议后概念
+  数从 5 个涨到 8 个, 这一节<strong>先梳理</strong>一遍, 后面
+  读各小节脑子里有锚点。
+</p>
+<p>
+  <strong>8 个概念分 3 组</strong>:
+</p>
+<h3>1. provider 层 (3 个, 决定连哪个 endpoint)</h3>
+<ul>
+<li>
+<strong>LLMProviderId</strong>: provider 的<strong>枚举类型</strong>,
+  v2 加了 <code>anthropic_compatible</code>, 现有 6 个:
+  <code>openai_compatible</code> / <code>anthropic_compatible</code> /
+  <code>minimax_cn</code> / <code>kimi_platform_cn</code> /
+  <code>kimi_code_cn</code> / <code>zhipuai_cn</code>。 每个
+  providerId 对应 1 个 endpoint 配置 (apiKey + baseURL + 模型名)。
+</li>
+<li>
+<strong>LLMProviderProtocol</strong>: provider 的<strong>原生传输
+  协议</strong>, 2 种: <code>openai-chat-completions</code> (OpenAI
+  兼容) / <code>anthropic-messages</code> (Anthropic Messages)。
+  决定 LLM 调哪个 adapter: OpenAI 协议走
+  <code>createOpenAIChatCompletionsAdapter</code>, Anthropic 协议
+  走 <code>createAnthropicMessagesAdapter</code>。 这 2 个 adapter
+  接口对称, 暴露同样的 <code>buildRequest / parseNonStreamingResponse
+  / parseStreamingEvent / finishStreaming</code> 4 个方法。
+</li>
+<li>
+<strong>FoundationModelProfile</strong>: 1 个 model 的<strong>完整
+  画像</strong>, 包含 id / displayName / provider / 协议偏好
+  (preferred + fallbacks + implemented) / 上下文窗口 / 思考 /
+  推理 / 工具 / 缓存 / 模态 / 优化提示 / 已知怪癖。 1 个 model
+  = 1 个 profile, 存 <code>src/foundation-models.ts</code> 的
+  <code>modelProfiles</code> 数组, 启动时加载。
+</li>
+</ul>
+<h3>2. 任务 / 策略层 (3 个, 决定用哪个 model)</h3>
+<ul>
+<li>
+<strong>TaskType</strong>: 5 种<strong>任务特征</strong>枚举:
+  <code>long_running</code> (1 小时+) / <code>short_interactive</code>
+  (1-10 分钟) / <code>bulk_summarize</code> (大批量) /
+  <code>complex_reasoning</code> (10-60 分钟高难度) /
+  <code>experimental</code> (新功能试错)。 LLM 调
+  <code>agent.run(taskType: TaskType)</code> 显式声明, harness
+  不启发式猜。
+</li>
+<li>
+<strong>Strategy</strong>: 4 种<strong>用户偏好</strong>枚举:
+  <code>auto</code> (按任务类型查表) / <code>fast</code> (无脑
+  Haiku) / <code>quality</code> (无脑 Opus/o1) / <code>budget</code>
+  (无脑 Qwen/Llama 本地)。 CLI 用 <code>--model-policy auto|fast|quality|budget</code>
+  切换, 也可以 REPL 里 <code>/m fast</code> 临时改。
+</li>
+<li>
+<strong>FallbackChain</strong>: model 不可用时 (rate limit /
+  服务挂) 的<strong>降级链</strong>, 静态枚举:
+  <code>{gpt-4o: [claude-sonnet-4-5, claude-haiku-4-5],
+  claude-opus-4-5: [gpt-4o, claude-sonnet-4-5], ...}</code>。 链
+  可以跨协议 (OpenAI 失败 → 试 Anthropic 协议跑 Claude), 因为
+  fallback 试的是 <code>adapter.call()</code>, 不绑协议。
+</li>
+</ul>
+<h3>3. 协议细节 (2 个, v2 新加)</h3>
+<ul>
+<li>
+<strong>compatibleProviders</strong>: 1 个 model 画像可以
+  <strong>被多种 provider 复用</strong>。 典型场景: GLM-5.2
+  原生 provider 是 <code>minimax_cn</code> 走 OpenAI 协议, 但
+  用户可以显式配 <code>LLM_PROVIDER=anthropic_compatible</code>
+  让 GLM-5.2 走 Anthropic 协议 (因为 minimax 起了 Anthropic 兼容
+  网关)。 字段存在 <code>FoundationModelProfile.compatibleProviders</code>,
+  <code>resolveFoundationModelProfile</code> 校验时用
+  <code>profileSupportsProvider</code> 检查 primary + compatible 列表。
+</li>
+<li>
+<strong>AnthropicMessagesAdapter</strong>: v2 新加的<strong>协议
+  适配器</strong>, 把内部 OpenAI-shaped history 翻译成 Anthropic
+  Messages 协议 (system 是顶层字段, 不在 messages 里; tool use
+  块独立 type, 不用 function_call; usage 字段 cache_read /
+  cache_creation 分开; max_tokens 固定, 不用 max_completion_tokens
+  兼容逻辑)。 4 个方法: <code>buildRequest</code> /
+  <code>parseNonStreamingResponse</code> / <code>parseStreamingEvent</code>
+  / <code>finishStreaming</code>, 跟 OpenAI adapter 对称。
+</li>
+</ul>
+<p>
+  <strong>8 个概念的关系</strong>:
+</p>
+<pre class="code-block"><code>  ┌────────────────────────────────────────────────────────────┐
+  │  协议细节层                                                  │
+  │  ┌──────────────────┐    ┌──────────────────┐              │
+  │  │ OpenAI Adapter    │    │ Anthropic Adapter │              │
+  │  │ 4 个方法对称       │    │ 4 个方法对称       │              │
+  │  │ - buildRequest    │    │ - buildRequest    │              │
+  │  │ - parseResponse   │    │ - parseResponse   │              │
+  │  │ - parseEvent      │    │ - parseEvent      │              │
+  │  │ - finishStream    │    │ - finishStream    │              │
+  │  └──────────────────┘    └──────────────────┘              │
+  │            │                          │                      │
+  └────────────┼──────────────────────────┼──────────────────────┘
+               │                          │
+               ▼                          ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  provider 层                                                │
+  │  ┌──────────────────────────────────────────────────────┐ │
+  │  │  LLMProviderProfile (6 个)                            │ │
+  │  │  openai_compatible / anthropic_compatible /           │ │
+  │  │  minimax_cn / kimi_platform_cn /                     │ │
+  │  │  kimi_code_cn / zhipuai_cn                           │ │
+  │  │                                                       │ │
+  │  │  每个含 protocol 字段: openai-chat-completions /     │ │
+  │  │  anthropic-messages                                  │ │
+  │  └──────────────────────────────────────────────────────┘ │
+  │            │                                                │
+  │            ▼                                                │
+  │  ┌──────────────────────────────────────────────────────┐ │
+  │  │  FoundationModelProfile (5 个)                        │ │
+  │  │  - id / displayName / provider (primary)             │ │
+  │  │  - compatibleProviders (可选)                         │ │
+  │  │  - protocol: { preferred, fallbacks, implemented }    │ │
+  │  │  - limits / thinking / reasoning / tools / cache /    │ │
+  │  │    modalities / optimizationHints / knownQuirks        │ │
+  │  └──────────────────────────────────────────────────────┘ │
+  └────────────────────────────────────────────────────────────┘
+               │
+               ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  任务 / 策略层                                               │
+  │  ┌──────────────────┐    ┌──────────────────┐              │
+  │  │  TaskType (5 种)  │    │ Strategy (4 种)  │              │
+  │  │  long_running     │    │  auto            │              │
+  │  │  short_interactive│    │  fast            │              │
+  │  │  bulk_summarize   │    │  quality         │              │
+  │  │  complex_reasoning│    │  budget          │              │
+  │  │  experimental     │    │                  │              │
+  │  └──────────────────┘    └──────────────────┘              │
+  │            │                          │                      │
+  │            ▼                          ▼                      │
+  │  ┌──────────────────────────────────────────────────────┐ │
+  │  │  ModelResolver: 查表 + 应用策略                       │ │
+  │  │  TaskType × Strategy → ModelName                      │ │
+  │  └──────────────────────────────────────────────────────┘ │
+  │            │                                                │
+  │            │ 失败时                                         │
+  │            ▼                                                │
+  │  ┌──────────────────────────────────────────────────────┐ │
+  │  │  FallbackChain (静态枚举)                              │ │
+  │  │  跨协议降级: OpenAI 失败 → 试 Anthropic adapter        │ │
+  │  └──────────────────────────────────────────────────────┘ │
+  └────────────────────────────────────────────────────────────┘</code></pre>
+<p>
+  <strong>具体例子: "team 想从 OpenAI 切到 Anthropic 跑 GLM-5.2" 的完整流程</strong>
+</p>
+<ol>
+<li>
+<strong>看 model 画像</strong>: 看 <code>src/foundation-models.ts</code>
+   里 GLM-5.2 画像, 发现 <code>provider: "minimax_cn"</code> +
+   <code>compatibleProviders: ["anthropic_compatible"]</code> +
+   <code>protocol.preferred: "anthropic-messages"</code> +
+   <code>protocol.implemented: ["anthropic-messages",
+   "openai-chat-completions"]</code>。 意味着用户可以选
+  anthropic 协议跑 GLM-5.2, 也保留了 OpenAI fallback。
+  </li>
+<li>
+<strong>用户改环境变量</strong>: <code>export LLM_PROVIDER=anthropic_compatible</code>
+   + <code>export LLM_BASE_URL=https://minimax-anthropic-gateway.com</code>
+   + <code>export LLM_MODEL=GLM-5.2</code> + <code>export ANTHROPIC_API_KEY=sk-...</code>。
+  </li>
+<li>
+<strong>resolveLLMProviderConfig 解析</strong>: 看到 provider=anthropic_compatible,
+   返回 <code>ResolvedLLMConfig</code>, <code>protocol="anthropic-messages"</code>。
+  </li>
+<li>
+<strong>resolveFoundationModelProfile 校验</strong>: 用
+   <code>profileSupportsProvider(profile, "anthropic_compatible")</code>
+   检查 GLM-5.2 允许 anthropic_compatible (在 compatibleProviders
+  列表里), 校验通过, 拿到完整 profile。
+  </li>
+<li>
+<strong>RuntimePolicy 选定 adapter</strong>: 看 profile.protocol.preferred
+   = "anthropic-messages", 创 <code>createAnthropicMessagesAdapter(policy)</code>。
+  </li>
+<li>
+<strong>LLM 调时</strong>: agent.run() 调 <code>llmClient.chat(...)</code>,
+   看到 <code>policy.protocol.selected === "anthropic-messages"</code>,
+   走 <code>chatAnthropicMessages</code> 路径, 用
+   <code>anthropicClient.messages.create(...)</code> 发请求。
+  </li>
+<li>
+<strong>Anthropic 协议适配</strong>: adapter 把内部 OpenAI-shaped
+   history 翻译成 <code>{system, messages, tools, max_tokens}</code>,
+   tool use 块独立 <code>type: "tool_use"</code>, 不用
+  function_call。
+  </li>
+<li>
+<strong>响应回流</strong>: Anthropic 返回 content blocks (text /
+   tool_use), adapter 解析回 LLMResponse, agent 继续。 全程 agent.ts
+  / 压缩 / 权限不知道协议存在。
+  </li>
+</ol>
+<p>
+  <strong>关键观察</strong>: 用户<strong>只改 3 个环境变量</strong>
+  (provider + baseURL + apiKey), 不改任何业务代码, 就能从
+  OpenAI 协议切到 Anthropic 协议。 这就是为什么协议差异
+  "全部收敛在 LLM 边界" — 上层永远只看 OpenAI-shaped history。
+</p>
+<p>
+  看完这 8 个概念和具体例子, 后面 14 个小节 (5 种任务类型 /
+  4 种策略 / 默认映射表 / auto 策略 / 3 个 override / execution
+  profile / 优雅降级 / cost 估算 / 主循环集成 / fake test /
+  常见误解 / 反例梯度 / Validation) 都在讲这 8 个概念的某个
+  细节。 看到陌生名字, 翻回这节找锚点。
+</p>
+<h2 id="anthropic-protocol">v2 新增: Anthropic Messages 协议怎么共存</h2>
+<p>
+  <strong>场景</strong>: v1 之前 harness 只支持 OpenAI Chat
+  Completions 协议, 想接 Anthropic Claude 只能让用户跑
+  "Anthropic 兼容 OpenAI 的网关" (afoo / one-api), 多一层
+  转发。 v2 直接在 <code>src/llm-adapter.ts</code> 实现
+  <strong>Anthropic Messages 协议</strong>, 用官方
+  <code>@anthropic-ai/sdk</code> 客户端, 不再需要第三方网关。
+</p>
+<p>
+  <strong>朴素想法 1: "在每个调 LLM 的地方加 if provider === 'anthropic' ?</strong>
+  错。 agent.ts / 压缩 / 权限 / 工具执行 <strong>几十个</strong>
+  调 LLM 的地方, 每个都加 if = 协议逻辑污染业务, 换 provider
+  改一片。 正确做法是<strong>协议差异全部收敛在 LLM 边界</strong>
+  — agent.ts 只看 OpenAI-shaped history, 翻译交给 adapter。
+</p>
+<p>
+  <strong>朴素想法 2: "把内部 history 改成 Anthropic 格式?</strong>
+  错。 改 1 处意味着改所有用 history 的地方 (agent / compressor /
+  memory / tools / permission ...), 范围更大, 风险更高。 应该
+  <strong>保留内部 OpenAI-shaped history</strong>, 翻译只发生在
+  "调 LLM 那一刻"。
+</p>
+<p>
+  <strong>正确做法</strong>: 加 1 个 <code>AnthropicMessagesAdapter</code>,
+  跟 <code>OpenAIChatCompletionsAdapter</code> 接口对称, 暴露
+  同样的 4 个方法 (<code>buildRequest / parseNonStreamingResponse
+  / parseStreamingEvent / finishStreaming</code>), LLM 客户端
+  根据 <code>policy.protocol.selected</code> 选一个。 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/llm-adapter.ts#L414"><code>src/llm-adapter.ts</code> 第 414-455 行 Anthropic adapter</a>:
+</p>
+<pre><code class="language-typescript">export function createAnthropicMessagesAdapter(
+  policy: RuntimePolicy,
+): AnthropicMessagesAdapter {
+  return {
+    buildRequest(input) {
+      const converted = convertMessagesToAnthropic(input.messages);
+      const request: AnthropicPreparedLLMRequest = {
+        model: policy.model,
+        messages: converted.messages,
+        stream: policy.request.prefersStreaming,
+        maxOutputTokens: policy.request.maxOutputTokens,
+      };
+      if (converted.system !== undefined) {
+        request.system = converted.system;  // 关键差异: system 是顶层字段
+      }
+      if (input.tools !== undefined && input.tools.length > 0) {
+        request.tools = input.tools.map(convertToolToAnthropic);
+      }
+      return request;
+    },
+    // ... 4 个方法对称, parseResponse / parseEvent / finishStream
+    // 区别只是协议细节
+  };
+}</code></pre>
+<p>
+  <strong>2 套协议的核心差异</strong> (翻译时处理的 5 个点):
+</p>
+<div class="figure figure--compare">
+  <div class="figure__title">图 1 · OpenAI Chat Completions vs Anthropic Messages 关键差异</div>
+  <div class="flow-compare">
+    <div class="flow-compare__col flow-compare__col--bad">
+      <div class="flow-compare__head">OpenAI Chat Completions</div>
+      <ul>
+        <li><strong>system 在 messages 里</strong>: <code>messages: [{role: "system", content: "..."}]</code></li>
+        <li><strong>tool_call 在 assistant message 里</strong>: <code>assistant.tool_calls: [{id, type, function: {name, arguments}}]</code></li>
+        <li><strong>tool 响应是独立 role</strong>: <code>{role: "tool", tool_call_id, content}</code></li>
+        <li><strong>max_tokens 字段名</strong>: <code>max_completion_tokens</code> (新) / <code>max_tokens</code> (旧)</li>
+        <li><strong>usage 字段</strong>: <code>prompt_tokens / completion_tokens</code></li>
+      </ul>
+    </div>
+    <div class="flow-compare__col flow-compare__col--good">
+      <div class="flow-compare__head">Anthropic Messages</div>
+      <ul>
+        <li><strong>system 是顶层字段</strong>: 不在 messages 数组, 单独 <code>system: "..."</code></li>
+        <li><strong>tool_use 是 content block</strong>: <code>content: [{type: "tool_use", id, name, input}]</code></li>
+        <li><strong>tool 响应是 user 消息的 content block</strong>: <code>{role: "user", content: [{type: "tool_result", tool_use_id, content}]}</code></li>
+        <li><strong>max_tokens 字段固定</strong>: <code>max_tokens</code>, 不需要兼容</li>
+        <li><strong>usage 字段</strong>: <code>input_tokens / output_tokens</code> + 缓存字段 <code>cache_read_input_tokens / cache_creation_input_tokens</code></li>
+      </ul>
+    </div>
+  </div>
+</div>
+<p>
+  <strong>真实场景: user 把 model 从 gpt-4o 切到 claude-sonnet-4-5</strong>
+</p>
+<ol>
+<li>
+<strong>改配置</strong>: <code>export LLM_PROVIDER=anthropic_compatible</code>
+   + <code>export LLM_MODEL=claude-sonnet-4-5</code> + <code>export
+   ANTHROPIC_API_KEY=sk-ant-...</code>。 3 个环境变量, <strong>不改任何
+   TypeScript 代码</strong>。
+  </li>
+<li>
+<strong>resolveLLMProviderConfig 解析</strong>: 拿到
+   <code>ResolvedLLMConfig { provider: "anthropic_compatible",
+   protocol: "anthropic-messages", apiKey, baseURL, model:
+   "claude-sonnet-4-5" }</code>。
+  </li>
+<li>
+<strong>resolveFoundationModelProfile 校验</strong>: 拿到
+   Claude Sonnet 4.5 画像, <code>protocol.preferred =
+   "anthropic-messages"</code> + <code>protocol.implemented =
+   ["anthropic-messages", "openai-chat-completions"]</code>。
+  </li>
+<li>
+<strong>创 adapter</strong>: LLM 客户端看到
+   <code>policy.protocol.selected === "anthropic-messages"</code>,
+   创 <code>createAnthropicMessagesAdapter(policy)</code>, 调
+   <code>anthropicClient.messages.create(...)</code> 走 Anthropic
+  SDK。
+  </li>
+<li>
+<strong>history 翻译</strong>: <code>convertMessagesToAnthropic</code>
+   把内部 OpenAI-shaped history 翻译: system 消息从 messages
+  数组移到顶层 <code>system</code> 字段; assistant 的 tool_calls
+  拆成 content blocks (text + tool_use); tool 消息聚成 user 消息
+  的 tool_result blocks; 整个流发生在 LLM 边界, agent.ts 完全
+  不知道。
+  </li>
+<li>
+<strong>响应回流</strong>: Anthropic 返回 content blocks, adapter
+  解析回 LLMResponse (含 content / tool_calls / usage / cache
+  字段), agent 继续下一轮。 usage 字段把
+  <code>cache_read_input_tokens</code> 映射到内部
+  <code>cache_hit_tokens</code>, cache debug 模块正常工作。
+  </li>
+</ol>
+<p>
+  <strong>关键不变量 (4 条)</strong>:
+</p>
+<ul>
+<li>
+<strong>内部 history 永远是 OpenAI-shaped</strong>: agent /
+   压缩 / 权限 / 工具 / memory 只接触 1 套消息格式, 协议差异不
+  泄漏到上层。
+  </li>
+<li>
+<strong>adapter 接口对称</strong>: 2 个 adapter 都暴露
+   <code>buildRequest / parseNonStreamingResponse /
+  parseStreamingEvent / finishStreaming</code> 4 个方法, LLM
+  客户端能用同一套代码路径调 2 个 adapter。
+  </li>
+<li>
+<strong>fallback 跨协议</strong>: FallbackChain 不绑协议, 试
+   <code>adapter.call()</code> 不绑具体 adapter, OpenAI 失败可以
+  fallback 到 Anthropic 协议跑 Claude。
+  </li>
+<li>
+<strong>cache debug 字段映射</strong>: OpenAI 的
+   <code>prompt_tokens_details.cached_tokens</code> ↔ Anthropic 的
+   <code>cache_read_input_tokens</code>, adapter 翻译时统一映射到
+  内部 <code>cache_hit_tokens</code>, 上层 cache debug 模块只看
+  1 个字段名。
+  </li>
+</ul>
+<p>
+  <strong>v1 → v2 不变的事</strong>: 5 种任务类型 / 4 种策略 /
+  默认映射表 / auto 策略 / execution profile / 优雅降级 / cost
+  估算 / 主循环集成 / fake test 都不变, 这些是<strong>业务层
+  概念</strong>。 v2 只在 LLM 边界 (provider + adapter + protocol
+  字段) 加新东西, 业务层 0 改动。
 </p>
 <h2 id="five-task-types">5 种任务类型: 决定 model 推荐</h2>
 <p>
@@ -327,6 +719,36 @@ async function callWithFallback(model: ModelName, args): Promise&lt;Response&gt;
   链长 2-3, 教学版够用。 链必须是<strong>有限</strong>的 (不能
   无限循环, 也不能跳到自身), 用 TypeScript 类型 + 单元测试保证。
 </p>
+<p>
+  <strong>v2 增强: fallback 跨协议</strong>。 v1 之前 fallback 链
+  都绑同一个 provider, GPT-4o 失败只能试 GPT-4o-mini (同 OpenAI
+  协议), 选 model 受协议限制。 v2 加了 Anthropic 协议后, fallback
+  链<strong>可以跨协议</strong>: GPT-4o (OpenAI 协议) 失败 →
+  试 Claude Sonnet (Anthropic 协议) → 试 Claude Haiku (Anthropic
+  协议)。 看 v2 增强后的 fallback 链:
+</p>
+<pre><code class="language-typescript">const FALLBACK_CHAIN: Record&lt;ModelName, ModelName[]&gt; = {
+  // v1: 同协议 fallback
+  "gpt-4o": ["claude-sonnet-4-5", "claude-haiku-4-5"],  // OpenAI → Anthropic
+  "claude-opus-4-5": ["gpt-4o", "claude-sonnet-4-5"],   // Anthropic → OpenAI
+  "qwen2.5-7b": ["claude-haiku-4-5", "gpt-4o-mini"],     // OpenAI → Anthropic → OpenAI
+  // ...
+};
+
+// 跨协议 fallback 关键: FallbackChain 试的是 model name,
+// 不是 adapter。 adapter 是 model profile 解析时根据 protocol
+// 字段自动选的, fallback 链不需要知道协议存在。
+// 换句话说: 协议细节在 model 画像层消化, fallback 链只看
+// model name → 拿 model profile → 选 adapter → 调 LLM。</code></pre>
+<p>
+  <strong>为什么能跨协议</strong>: 关键是 <code>callWithFallback</code>
+  试的是 <code>model</code> (model name), 不是 <code>adapter</code>。
+  每个 model name 在 <code>modelProfiles</code> 数组里有 1 个画像,
+  画像含 <code>protocol.preferred</code> 字段, 选哪个 adapter
+  是<strong>画像解析时</strong>决定的, fallback 循环不知道也不
+  关心协议存在。 协议细节在 LLM 边界内部消化, 业务层只看到
+  "试下一个 model name"。
+</p>
 <h2 id="cost-estimate">cost 估算: 让用户知道"这次大概多少钱"</h2>
 <p>
   <strong>用途</strong>: 用户跑任务前, harness 估算"这次大概花
@@ -368,9 +790,9 @@ function estimateCost(model: ModelName, inputTokens: number, outputTokens: numbe
   精准, 但够参考。 这是 Reference 章节 "模式 19 · Idempotent"
   的应用 — 估算可重复, 同一任务多次跑估算一致。
 </p>
-<h2 id="loop-integration">主循环集成: 在哪 2 个时机选 model</h2>
+<h2 id="loop-integration">主循环集成: 在哪 3 个时机选 model</h2>
 <p>
-  <strong>用途</strong>: Model Policy 集成到 agent 主循环有 2 个
+  <strong>用途</strong>: Model Policy 集成到 agent 主循环有 3 个
   时机:
 </p>
 <ol>
@@ -382,21 +804,33 @@ function estimateCost(model: ModelName, inputTokens: number, outputTokens: numbe
   </li>
 <li>
 <strong>每次 LLM 调用前</strong>: 拿 model 调 llmClient.call(),
-    失败时走 fallback 链。
+    失败时走 fallback 链 (v2 跨协议: OpenAI 失败 → 试 Anthropic)。
+  </li>
+<li>
+<strong>v2 新加: REPL /m 命令切换 model</strong>: 用户跑着跑着
+    想换 model (比如发现当前 task 比预想复杂, 切到 quality),
+    在 REPL 敲 <code>/m claude-opus-4-5</code>, runtime policy
+    即时更新, 下一轮 LLM 调用就用新 model。 关键: 切换不重
+    启 agent.run(), history 保留, 继续干活。 协议也随 model
+    自动切 (claude-opus-4-5 走 Anthropic, gpt-4o 走 OpenAI)。
   </li>
 </ol>
 <p>
-  <strong>设计思想</strong>: <strong>显式选择 + 启动一次</strong> —
-  agent.run() 一次选 model, 之后整个 run 期间都用同 model (不
-  切换)。 切换 model = 重新 agent.run()。 这是 Reference 章节
-  "模式 1 · 工厂 + 闭包" 的应用 — model 选完在闭包内, 整个
-  run 期间不变。
+  <strong>设计思想</strong>: <strong>显式选择 + 启动一次, 但支持
+  中途切</strong> — agent.run() 启动时选 model (时机 1), 整个
+  run 期间默认不变, 但允许中途切 (时机 3)。 切换 model = 改
+   <code>RuntimePolicy</code>, 不重启 agent.run(), history 保留。
+  这是 Reference 章节 "模式 1 · 工厂 + 闭包" 的延伸 — model
+  选完在闭包内, 但闭包能接收外部 update。
 </p>
 <p>
   <strong>实现细节</strong>: 集成代码在 <code>src/agent.ts</code> 第
   0 步 (setup) — 接收 taskType → 调 modelResolver → 拿 model
   → 调 estimateCost → 注入到 run() 闭包。 之后所有 LLM 调用都
-  用这个 model, 失败走 fallback。
+  用这个 model, 失败走 fallback。 时机 3 的切换通过
+   <code>runtimePolicy()</code> 函数 (不是值) 拿, 每次 LLM 调用
+  重新 <code>runtimePolicy()</code>, 拿到的是<strong>最新</strong>
+  policy, 支持 <code>/m</code> 即时切换。
 </p>
 <h2 id="fake-test">fake test: 用 fake model 测 fallback 链</h2>
 <p>
@@ -438,12 +872,45 @@ test("fast 策略: 任意任务都返回 Haiku", () =&gt; {
   expect(resolver("long_running")).toBe("claude-haiku-4-5");
   expect(resolver("short_interactive")).toBe("claude-haiku-4-5");
   expect(resolver("complex_reasoning")).toBe("claude-haiku-4-5");
+});
+
+test("v2: Anthropic adapter 翻译 history (system 移出 messages)", () =&gt; {
+  // 内部 history 用 OpenAI 格式: system 在 messages[0]
+  const internalHistory = [
+    { role: "system", content: "You are helpful" },
+    { role: "user", content: "hi" },
+  ];
+
+  // 创 Anthropic adapter, buildRequest 翻译
+  const policy = buildPolicy({ provider: "anthropic_compatible", model: "claude-sonnet-4-5" });
+  const adapter = createAnthropicMessagesAdapter(policy);
+  const prepared = adapter.buildRequest({ messages: internalHistory });
+
+  // Anthropic 协议: system 是顶层字段, messages 只有 user/assistant
+  expect(prepared.system).toBe("You are helpful");
+  expect(prepared.messages).toEqual([{ role: "user", content: "hi" }]);
+  expect(prepared.maxOutputTokens).toBeGreaterThan(0);
+});
+
+test("v2: fallback 跨协议 (OpenAI 失败 → Anthropic 成功)", async () =&gt; {
+  // 模拟: GPT-4o 走 OpenAI 协议 rate_limit, fallback 到 Claude Sonnet
+  // 走 Anthropic 协议返回 ok
+  const fakeLlm = createFakeLlmClient({
+    "gpt-4o": () =&gt; ({ error: "rate_limit" }),  // OpenAI 协议失败
+    "claude-sonnet-4-5": () =&gt; ({ content: "ok" }),  // Anthropic 协议 ok
+  });
+  const result = await callWithFallback("gpt-4o", fakeLlm, args);
+  expect(result.content).toBe("ok");
+  expect(fakeLlm.callHistory).toEqual(["gpt-4o", "claude-sonnet-4-5"]);
+  // 关键: 第二步是 Anthropic 协议 (协议差异由 adapter 内部消化, 业务层看不到)
 });</code></pre>
 <p>
   <strong>实现细节</strong>: 4 个测试覆盖 (a) fallback 链走通;
   (b) cost 估算正确; (c) auto 策略查表; (d) fast 策略返回常量。
-  fake LLM client 不连真 API, 用 stub map 返回固定结果, 测试
-  0 成本。
+  <strong>v2 新增 2 个测试</strong>: (e) Anthropic adapter 翻译
+  history (验证 system 移出 messages 数组); (f) fallback 跨协议
+  (验证 OpenAI 失败 → 走 Anthropic 协议)。 fake LLM client 不连
+  真 API, 用 stub map 返回固定结果, 测试 0 成本。
 </p>
 <h2 id="common-confusion">常见误解: 1 个 model 不能跑所有</h2>
 <p>
@@ -506,7 +973,7 @@ test("fast 策略: 任意任务都返回 Haiku", () =&gt; {
     </div>
   </div>
 </div>
-<h2 id="validate">Validation: 4 条不变量检验</h2>
+<h2 id="validate">Validation: 8 条不变量检验 (4 v1 + 4 v2)</h2>
 <ol>
 <li>
 <strong>default 表完整</strong>: 5 种任务类型都有推荐 model, 缺
@@ -526,6 +993,34 @@ test("fast 策略: 任意任务都返回 Haiku", () =&gt; {
 <strong>cost 估算合理</strong>: 价目表 × token 估算 = cost, 不靠
     LLM 自己估。 验证: 3 个测试覆盖 (a) 输入 token 算; (b) 输出
     token 算; (c) 本地 model cost = 0。
+  </li>
+<li>
+<strong>v2: 内部 history 协议无关</strong>: agent / 压缩 / 权限 /
+    工具执行只接触 OpenAI-shaped history, 协议差异在 LLM 边界
+    翻译。 验证: <code>rg "anthropic|claude" src/agent.ts src/compressor.ts
+    src/permission.ts src/tools/</code> 0 匹配, 业务层不知道
+    Anthropic 存在。
+  </li>
+<li>
+<strong>v2: adapter 接口对称</strong>: OpenAI 和 Anthropic adapter
+    都暴露同样的 4 个方法, LLM 客户端能用同一套代码路径调。
+    验证: <code>interface OpenAIChatCompletionsAdapter</code>
+    和 <code>interface AnthropicMessagesAdapter</code> 字段完全
+    对称, TypeScript 类型检查通过。
+  </li>
+<li>
+<strong>v2: fallback 跨协议</strong>: <code>callWithFallback</code>
+    试 model name 不试 adapter, OpenAI 失败 → 试 Anthropic 协议
+    跑 Claude。 验证: 单测覆盖 "GPT-4o rate_limit + Claude
+    Sonnet ok → 链用 2 步, 最终返回 ok"。
+  </li>
+<li>
+<strong>v2: cache 字段统一</strong>: OpenAI 的
+    <code>cached_tokens</code> 和 Anthropic 的
+    <code>cache_read_input_tokens</code> 都映射到内部
+    <code>cache_hit_tokens</code>, cache debug 模块只看 1 个
+    字段。 验证: 单测覆盖 "OpenAI 响应 cache_hit=X, Anthropic
+    响应 cache_read=Y, 都映射成 cache_hit_tokens=Z"。
   </li>
 </ol>
 <h2 id="lookback">回望: 哪些原则在本章兑现了</h2>
@@ -600,7 +1095,12 @@ test("fast 策略: 任意任务都返回 Haiku", () =&gt; {
       <li>任务类型由调用方显式声明, harness 不启发式猜</li>
       <li>fallback 链有限, 长度 ≤ 3, 不跳自身, 不无限循环</li>
       <li>cost 估算可重复, 同一任务多次跑一致, 不靠 LLM 自己估</li>
-      <li>整个 agent.run() 用同 model, 中途不切换 (切换 = 重新 run)</li>
+      <li>v1: 整个 agent.run() 用同 model, 中途不切换 (切换 = 重新 run)</li>
+      <li>v2: REPL /m 命令可中途切 model, 不重启 agent.run(), history 保留; 协议随 model 自动切 (claude-opus-4-5 走 Anthropic, gpt-4o 走 OpenAI)</li>
+      <li>v2: 内部 history 永远是 OpenAI-shaped, 协议差异全部收敛在 LLM 边界, agent.ts / 压缩 / 权限 / 工具执行不知道协议存在</li>
+      <li>v2: Anthropic adapter 接口对称 (buildRequest / parseNonStreamingResponse / parseStreamingEvent / finishStreaming), 跟 OpenAI adapter 同 4 个方法</li>
+      <li>v2: fallback 链跨协议 (OpenAI 失败 → 试 Anthropic), 关键是 callWithFallback 试 model name 不试 adapter</li>
+      <li>v2: cache debug 字段统一 (OpenAI 的 cached_tokens ↔ Anthropic 的 cache_read_input_tokens), adapter 翻译时映射到内部 cache_hit_tokens</li>
       <li>execution profile 3 种 readonly / ci / workspace_write 与 model 选择正交, 独立维度</li>
     </ul>
     <p><strong>验证 (用 fake LLM client + fake 价目表 + vitest, 逐条断言):</strong></p>
