@@ -65,6 +65,207 @@
 // - Schedule 到点后创建 Async Run, 不直接执行命令或运行 LLM
 // - occurrence 的 stable id 防止重复触发
 // - 启动时检测 missed occurrence, 只记录最近一次, 不补跑</code></pre>
+<h2 id="vocabulary">先梳理语言: 12 个核心概念是什么</h2>
+<p>
+  上面看到痛点和朴素方案, 这一节<strong>先给词表</strong>。
+  Schedule 模块用了 12 个核心概念, 后面 14 个小节会反复出现,
+  第一次看容易混 (Schedule / Schedule Occurrence / Schedule File /
+  Schedule Timing / Recurrence Rule / Overlap Policy / Permission
+  Profile / Schedule Resources / Schedule Execution / Linked
+  Task ...)。 这一节<strong>先梳理</strong>一遍, 后面读各小节
+  脑子里有锚点。
+</p>
+<p>
+  <strong>12 个概念分 4 组</strong>:
+</p>
+<h3>1. entity (3 个, 持久或临时数据)</h3>
+<ul>
+<li>
+<strong>ScheduleFile</strong>: 1 个 schedule 的<strong>完整定义</strong>,
+  包含 id / title / status (active/cancelled/completed/archived) /
+  intent (prompt) / timing (runAt 或 startsAt+endsAt+rule) / execution
+  (mode/executor/command/timeoutSeconds/overlapPolicy/permissionProfile) /
+  resources (readPaths/writePaths) / linkedTask / outputPolicy。 1 个
+  schedule = 1 个 ScheduleFile, 存到 <code>ScheduleStore</code> 的
+  index.json。
+</li>
+<li>
+<strong>ScheduleOccurrenceFile</strong>: 1 个 schedule 某次<strong>到点
+  触发的实例</strong>, 包含 id / scheduleId / scheduledAt / status /
+  firedAt / asyncRunId / outputId / reason。 1 次到点 = 1 个
+  occurrence, 也存到 <code>ScheduleStore</code>。 跟 ScheduleFile 的
+  区别: ScheduleFile 是"规矩定义", OccurrenceFile 是"执行档案"。
+</li>
+<li>
+<strong>ScheduleIndexFile</strong>: 调度器启动时<strong>扫一次</strong>
+  的索引, 列出所有 active schedule 的 id + title, 内存中保存
+  Array。 5 秒 tick 一次就扫这个 index, 不每次都读 disk。
+</li>
+</ul>
+<h3>2. timing (3 个, 决定什么时候触发)</h3>
+<ul>
+<li>
+<strong>OneTimeTiming</strong>: 1 次性 schedule, 只有
+  <code>runAt</code> 字段, 触发完 status 变 completed。 适合 "9 点
+  跑一次备份"。
+</li>
+<li>
+<strong>RecurringTiming</strong>: 周期 schedule, 有
+  <code>startsAt</code> + <code>endsAt</code> + <code>rule</code>。
+  持续触发到 endsAt (可省略) 才停。 适合 "每天 9 点跑测试"。
+</li>
+<li>
+<strong>RecurrenceRule</strong>: 6 种周期规则, union type:
+  <code>every_seconds</code> (N 秒一次) / <code>hourly</code> (N 小时) /
+  <code>daily</code> (N 天 + timeOfDay) / <code>weekly</code> (N 周 + 星期
+  数组) / <code>monthly</code> (N 月 + dayOfMonth) / <code>yearly</code>
+  (N 年 + month + dayOfMonth)。 每种 rule 算 <code>nextRunAt</code> 的
+  公式不一样, 但 tick 用同一套入口。
+</li>
+</ul>
+<h3>3. execution policy (4 个, 触发后怎么跑)</h3>
+<ul>
+<li>
+<strong>OverlapPolicy</strong>: 上次还没跑完, 这次到点了怎么办:
+  <code>allow</code> (并发跑, 适合不冲突的 e2e) / <code>skip</code>
+  (跳过本次, 适合会冲突的 deploy)。 默认 skip, 安全。
+</li>
+<li>
+<strong>PermissionProfile</strong>: 触发时给 async run 配的权限:
+  <code>readonly</code> (只读 fs) / <code>ci</code> (CI 标准权限) /
+  <code>workspace_write</code> (允许写工作区)。 防止 schedule 跑出
+  越界。
+</li>
+<li>
+<strong>ScheduleResources</strong>: 触发时限制能读 / 写的路径:
+  <code>readPaths</code> / <code>writePaths</code>。 配合 permission
+  profile 用, 后者是 "level", 前者是 "scope"。
+</li>
+<li>
+<strong>LinkedPersistentTask</strong>: 可选, 触发后<strong>同步更新
+  TaskManager 的 task 状态</strong> (created → completed/failed)。
+  适合 "跑 e2e 顺便更新一个 task 表示 e2e 状态" 的场景。 不想关联
+  可以不填。
+</li>
+</ul>
+<h3>4. lifecycle (2 个, 状态机)</h3>
+<ul>
+<li>
+<strong>ScheduleStatus</strong>: schedule 本身状态: <code>active</code>
+  (等触发) / <code>completed</code> (runAt 已到 / 周期结束) /
+  <code>cancelled</code> (用户取消) / <code>archived</code> (久远归档)。
+  LLM 调 <code>schedule_cancel</code> 把 active → cancelled, 后续
+  tick 跳过。
+</li>
+<li>
+<strong>OccurrenceStatus</strong>: 1 次 occurrence 的状态, 9 个:
+  <code>due</code> (到点未触发) / <code>triggered</code> (已派
+  async run) / <code>running</code> (async run 在跑) /
+  <code>completed</code> / <code>failed</code> / <code>timeout</code> /
+  <code>orphaned</code> (schedule 已删, occurrence 留下) /
+  <code>missed</code> (错过未补) / <code>skipped_overlap</code>
+  (overlap 跳过)。 看状态就知道这次发生啥了。
+</li>
+</ul>
+<p>
+  <strong>12 个概念的关系</strong>:
+</p>
+<pre class="code-block"><code>  LLM 调 schedule_create(...)
+      │
+      ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  ScheduleStore (disk)                                       │
+  │  ┌─────────────────────────┐   ┌────────────────────────┐ │
+  │  │  index.json              │   │  schedule_*.json       │ │
+  │  │  [ {id, title, status} ]│   │  ScheduleFile:         │ │
+  │  │  ScheduleIndexFile       │   │  - id, title, status   │ │
+  │  └─────────────────────────┘   │  - intent, timing      │ │
+  │            │                   │  - execution            │ │
+  │            │ 5 秒 tick 一次   │  - resources, link      │ │
+  │            │ 扫 active         │  - outputPolicy         │ │
+  │            ▼                   └────────────────────────┘ │
+  │  ┌─────────────────────────────────────────┐               │
+  │  │  ScheduleManager (闭包, 内存)             │               │
+  │  │  - activeSchedules: ScheduleFile[]       │               │
+  │  │  - tickInterval: 5000ms                  │               │
+  │  │  - 5 秒调一次 tick(now)                   │               │
+  │  └─────────────────────────────────────────┘               │
+  │            │                                                │
+  │            │ 到点了, 算 nextRunAt                          │
+  │            ▼                                                │
+  │  ┌─────────────────────────────────────────┐               │
+  │  │  ScheduleOccurrenceFile (disk)           │               │
+  │  │  - id, scheduleId, scheduledAt           │               │
+  │  │  - status: due → triggered → running     │               │
+  │  │  - asyncRunId, outputId, finishedAt      │               │
+  │  └─────────────────────────────────────────┘               │
+  │            │                                                │
+  │            │ 调 asyncRunManager.start(...), 拿到 run_id    │
+  │            ▼                                                │
+  │  ┌─────────────────────────────────────────┐               │
+  │  │  AsyncRunManager (第 13 章)               │               │
+  │  │  - 跑 executor (command / subagent)       │               │
+  │  │  - 完成回调 → ScheduleManager 收敛         │               │
+  │  │  - 写回 occurrence 终态                    │               │
+  │  └─────────────────────────────────────────┘               │
+  └────────────────────────────────────────────────────────────┘
+                  │
+                  │ finishRun, onAsyncRunFinish 回调
+                  ▼
+        occurrence.status = completed / failed / timeout
+        ScheduleManager 推 notification, LLM 下一轮 drain 看到</code></pre>
+<p>
+  <strong>具体例子: "每天 9 点跑全项目 e2e" 的完整生命周期</strong>
+</p>
+<ol>
+<li>
+<strong>创建</strong>: LLM 调 <code>schedule_create({title: "daily e2e",
+   timing: {type: "recurring", startsAt: "2026-06-16T09:00:00Z",
+   rule: {kind: "daily", intervalDays: 1, timeOfDay: "09:00"}},
+   execution: {executor: "command", command: "npm test:e2e",
+   timeoutSeconds: 3600, overlapPolicy: "skip", permissionProfile:
+   "ci"}, resources: {readPaths: ["/src"], writePaths: ["/logs/e2e"]},
+   outputPolicy: {save: true, notify: true, summary: "e2e 报告"}})</code>,
+  ScheduleStore 存 ScheduleFile, index.json 加一条, ScheduleManager
+  5 秒 tick 时扫到 active schedule #5。
+  </li>
+<li>
+<strong>Tick 到点</strong>: 9:00:00 时 5 秒 tick 触发, 算
+   <code>nextRunAt=2026-06-16T09:00:00Z</code>, 跟 now 比较, 到点了,
+   创建 occurrence #occ_1 (status=triggered), 调
+   <code>asyncRunManager.start({trigger: {kind: "schedule",
+   scheduleId, occurrenceId}})</code>, 拿 run_id="ar_xyz"。
+  </li>
+<li>
+<strong>Async Run 跑中</strong>: 1 小时里 occurrence.status 变
+   <code>running</code>, async run 跑 npm test:e2e, 跑完
+   finishRun, onAsyncRunFinish 回调。
+  </li>
+<li>
+<strong>Schedule 收敛</strong>: onAsyncRunFinish 找到 occ_1,
+   status=completed, 写 finishedAt + outputRef, notification 入队
+   "schedule #5 daily e2e completed at 9:55 (55min, outputId=out_xyz)"。
+  </li>
+<li>
+<strong>下一轮 tick</strong>: 9:00:05 + 5 秒 = 9:00:05, 下次 9:00:10
+   tick 时算 nextRunAt=2026-06-17T09:00:00Z (明天 9 点), 不触发。
+  每天 9 点循环。
+  </li>
+<li>
+<strong>LLM 取消</strong>: team 想停 schedule, LLM 调
+   <code>schedule_cancel({id: 5})</code>, ScheduleFile.status
+   active → cancelled, 后续 tick 跳过 #5, 不再触发, occurrence
+   留档 (status=orphaned 或 cancelled)。
+  </li>
+</ol>
+<p>
+  看完这 12 个概念和具体例子, 后面 14 个小节 (触发器 vs
+  执行器 / 6 种 recurrence / occurrence stable id / missed 不补
+  / overlap policy / linked task / output policy / permission
+  profile / start-stop / 主循环集成 / fake test / 常见误解 /
+  反例梯度 / Validation) 都<strong>是在讲这 12 个概念</strong>
+  的某个细节。 看到陌生名字, 翻回这节找锚点。
+</p>
 <h2 id="trigger-not-executor">Schedule 是触发器, 不是执行器</h2>
 <p>
   <strong>用途</strong>: Schedule 自己<strong>不跑命令 / 不调

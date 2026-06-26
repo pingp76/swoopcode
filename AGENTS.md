@@ -15,6 +15,7 @@ Before working in this repository:
 1. Read `AGENTS.md` (and `CLAUDE.md`, which is a mirror of this file for Claude Code compatibility).
 2. Read `doc/summary.md` to understand the current implemented state.
 3. If the task references a design document, read that document before changing code.
+4. If the task is to write or rewrite a tutorial chapter (`tutorial/chapters/*.html`), read `doc/tutorial_guide.md` first and follow its workflow and checklist.
 
 Do not read `TODO.md`, `doc/todo.md`. It contains future feature ideas and should not influence current work.
 
@@ -97,6 +98,29 @@ When implementing from a design document:
 
 Common failure mode: reading a design document once, then implementing from memory. Do not do that.
 
+## Tutorial Writing Workflow
+
+When writing or rewriting a tutorial chapter (`tutorial/chapters/*.html`), follow `doc/tutorial_guide.md` as the authoritative style guide. The guide encodes conventions built up over many chapter rewrites and is updated when new anti-patterns are discovered.
+
+The guide covers:
+
+- 4-section structure per chapter (5-piece opening, real-failure story, N technical sections, closing).
+- Per-section 4-segment pattern: scenario → naive ideas (with why each fails) → correct approach → design / implementation.
+- 3-figure system (`flow-stack`, `flow-compare`, `flow-tree`) with consistent color semantics.
+- Chinese/English spacing, bullet-vs-paragraph decision rules, block vs 块 consistency.
+- GitHub permanent link format for every code snippet.
+- 10 common anti-patterns (e.g. abstract purpose/scenario/design pile-up, multi-item paragraphs joined by semicolons, 块 vs block mixing, factually wrong "calls LLM" claims).
+- Validation checklist including the 0-PDD-residue rule and the `node --check` JS syntax gate.
+
+Common failure modes the guide addresses:
+
+- Starting a section with `<strong>用途</strong>` before establishing the problem. The student has no motivation to read.
+- Listing N items in one paragraph separated by semicolons. Unreadable. Use `<ul>` instead.
+- Claiming a layer "调 LLM" / "调用 LLM" when the code actually does string concatenation. Always verify against the source with `rg` before writing.
+- Mixing 块 and block in the same chapter. Pick one and stick to it.
+
+When in doubt, run the guide's validation checklist before committing.
+
 ## Cache-Friendly Design Constraints
 
 When adding new features, prioritize prompt cache prefix stability:
@@ -136,5 +160,12 @@ For code changes, run the smallest useful verification first, then broaden:
 4. `npx eslint <changed-files>` or `npm run lint`
 
 Do not mark a changed file as done while it still has eslint errors introduced by the change.
+
+For tutorial chapter changes (`tutorial/chapters/*.html`):
+
+1. `rg "PDD-\d+" tutorial/chapters/<file>.html` returns 0 matches (no internal design-doc references leak into the tutorial).
+2. `node --check tutorial/assets/content.js && node --check tutorial/assets/app.js` exits 0.
+3. Spot-check that any code example still matches current source via `rg` (descriptions like "调 LLM 总结" or "throw 异常" must match the actual code).
+4. Spot-check that all `tutorial/chapters/XX.html#yy` cross-references point to anchors that actually exist.
 
 If repository-wide lint has pre-existing failures, report them separately and make clear whether the changed files are clean.

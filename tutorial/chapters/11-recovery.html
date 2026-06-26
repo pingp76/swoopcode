@@ -62,22 +62,48 @@
 </p>
 <h2 id="seven-kinds">7 类错误: 不可恢复的先识别</h2>
 <p>
-  <strong>用途</strong>: 实际 LLM 调用失败的原因可能几十种 (HTTP
-  401/403/413/429/500/502/503/504, SDK 异常, 网络 timeout, DNS
-  失败, 协议错误, 余额耗尽...), 但 agent 主循环不应该认识所有。
-  应该先<strong>归并</strong>成少数几类, 每类对应一种恢复策略。
+  <strong>场景: 错误几十种, 主循环该怎么处理</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: user 看到 "Error: Request failed with
-  status code 429", harness 应该知道这是 rate_limit, 走 backoff;
-  看到 "Error: Invalid API key", harness 知道这是 credential,
-  直接 fail 不 retry。 不同错误对应不同动作, 决策不能错。
+  实际 LLM 调用失败的原因可能几十种:
+</p>
+<ul>
+<li>HTTP 401 / 403 / 413 / 429 / 500 / 502 / 503 / 504</li>
+<li>SDK 异常 (OpenAI.APIError / Anthropic.AnthropicError)</li>
+<li>网络 timeout / ECONNRESET / DNS 失败</li>
+<li>协议错误 (JSON 解析失败 / 响应截断)</li>
+<li>余额耗尽 / 配额超限</li>
+</ul>
+<p>
+  朴素想法: "agent 主循环写 50 个 if-else 处理?" 错。 agent
+  主循环<strong>不该</strong>认识所有这些异常, 一旦 SDK 升级
+  新增 error 类, 就要改主循环。
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>收敛 + 顺序</strong> — 把
-  几十种 provider 方言收敛成 7 种领域类型; 分类顺序很重要
-  (credential / quota 这种"不可恢复" 必须先识别, 不然浪费
-  重试 budget)。 看
+  <strong>正确做法: 收敛 + 顺序</strong>
+</p>
+<p>
+  先把所有错误<strong>归并</strong>成 7 种领域类型, 每类对应一种
+  恢复策略:
+</p>
+<ul>
+<li>user 看到 "Error: Request failed with status code 429", 归
+  <code>rate_limit</code> → backoff</li>
+<li>看到 "Error: Invalid API key", 归 <code>credential</code> → 直接 fail</li>
+<li>看到 "Error: 413 Request Entity Too Large", 归 <code>context_length</code>
+  → compact</li>
+</ul>
+<p>
+  agent 主循环<strong>只认识 7 类</strong>, 不认识具体异常类。 换
+  provider, 加 SDK, 改异常类, 都不用动主循环 — 只动
+  classifyLLMError 即可。
+</p>
+<p>
+  <strong>分类顺序很重要</strong>: credential / quota 这种
+  <strong>不可恢复</strong> 必须先识别, 不然浪费重试 budget。 顺序写
+  错了 credential 会被误判为 rate_limit, retry 5 次后 fail,
+  提示 "LLM 服务暂时不可用", 但真实是 "余额不足", 用户
+  充值后下次才正常。 看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L22"><code>src/recovery.ts</code> 第 22 行的 <code>LLMErrorKind</code> union</a>:
 </p>
 <pre><code class="language-typescript">export type LLMErrorKind =
@@ -130,25 +156,49 @@
 </p>
 <h2 id="classify">classifyLLMError: 不依赖 OpenAI SDK 类型</h2>
 <p>
-  <strong>用途</strong>: 分类函数必须<strong>不依赖</strong>具体
-  LLM SDK 的类型, 只通过宽松结构 (<code>error.status</code> /
-  <code>error.code</code> / <code>error.message</code>) 读取。
-  这样换 provider (OpenAI / Anthropic / 自部署 / Kimi) 都不用
-  改分类函数。
+  <strong>场景: 团队想换 LLM provider, 分类函数要不要改</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: team 原本用 OpenAI SDK, 后来加
-  Anthropic SDK, 又加自部署 vLLM。 三个 SDK 的 error 类型不同
-  (OpenAI 是 <code>APIError</code>, Anthropic 是
-  <code>AnthropicError</code>, vLLM 直接抛 <code>Error</code>)。
-  如果 classifyLLMError 用 <code>instanceof OpenAI.APIError</code>,
-  换 provider 就崩。 应该用 duck typing, 读
-  <code>error.status</code> 这种宽松字段。
+  团队原本用 OpenAI SDK, 跑得很顺。 后来想"试试 Anthropic Claude
+  看看长上下文表现好不好", 加了 Anthropic SDK。 再后来想
+  "用自部署 vLLM 节省成本", 又加 vLLM。 三个 SDK 的 error
+  <strong>类型</strong>不同:
+</p>
+<ul>
+<li><strong>OpenAI</strong>: <code>new OpenAI.APIError(status, body)</code></li>
+<li><strong>Anthropic</strong>: <code>new Anthropic.AnthropicError(status, body)</code></li>
+<li><strong>vLLM</strong>: 直接抛 <code>new Error("HTTP 500: ...")</code>
+  (没有专门的 error 类)</li>
+</ul>
+<p>
+  朴素想法 1: "<code>if (error instanceof OpenAI.APIError) ... else if (error instanceof Anthropic.AnthropicError) ... else if (error instanceof Error) ...</code>"
+  错。 加 1 个 provider 改 1 处, 加 3 个 provider 改 3 处,
+  classifyLLMError 变巨型 if-else 链。 这就是
+  <strong>强耦合 SDK 类型</strong> 的代价。
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>鸭子类型 + 启发式</strong> —
-  不强求特定 SDK 类型, 只读常见字段; 不是完美真理, 启发式分类
-  已经覆盖 99% 场景。 看
+  朴素想法 2: "SDK 适配器, 每个 provider 自己转 error 成统一格式?"
+  接近正解, 但工程量大 (3 个 provider 各写一个适配器, 维护
+  3 个文件)。 教学版想要更轻的方案。
+</p>
+<p>
+  <strong>正确做法: 鸭子类型 + 启发式</strong>
+</p>
+<p>
+  不依赖任何 SDK 类型, 只通过宽松结构 <code>error.status</code> /
+  <code>error.code</code> / <code>error.message</code> 读。 三个 SDK 都有
+  这 3 个字段 (vLLM 的 <code>Error</code> 也带 status 在 message
+  里), <strong>duck typing</strong> 自然兼容所有 provider。 换
+  provider 0 改动。
+</p>
+<p>
+  <strong>启发式分类</strong>: 不是完美真理, 是"看 status + message
+  关键字" 分类。 99% 场景覆盖, 剩下 1% 罕见 case 走
+  <code>unknown</code> 兜底。 比"识别所有 SDK 异常类" 简单 10 倍,
+  错分类的概率低 (1% unknown 比"识别错" 危害小)。
+</p>
+<p>
+  <strong>实现</strong>: 看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L109"><code>src/recovery.ts</code> 第 109 行的 <code>classifyLLMError</code></a>:
 </p>
 <pre><code class="language-typescript">export function classifyLLMError(error: unknown): LLMErrorKind {
@@ -187,24 +237,30 @@
 </p>
 <h2 id="four-actions">4 种恢复动作: continue / compact / backoff / fail</h2>
 <p>
-  <strong>用途</strong>: 7 类错误 → 4 种动作, 一一映射, 决策不能
-  含糊。 continue = 输出续; compact = 压缩重试; backoff = 等
-  重试; fail = 停止。 4 种动作覆盖<strong>所有</strong>可恢复 +
-  不可恢复场景。
+  <strong>场景: LLM 报错, 接下来该怎么办</strong>
 </p>
 <p>
-  <strong>真实场景</strong>:
+  上一节讲了"7 类错误怎么识别", 这一节讲"识别之后, 干什么"。
+  朴素想法: "所有错误都 retry 5 次不就行了?" 错。
+  <strong>不同错误需要不同的动作</strong>, 不是"retry N 次" 能盖的。
+  看具体场景:
 </p>
 <ul>
-<li>LLM 流式输出跑到 8k token 时网络抖断了, 错误是 output_interrupted, 动作 = continue (从 8k 断点续, 不从头来)</li>
-<li>LLM 返回 413, 动作 = compact (压缩历史后重试, 同等长度仍太长才 fail)</li>
-<li>LLM 返回 401, 动作 = fail (config 错误, 永远不重试)</li>
+<li>LLM 流式输出跑到 8k token 时网络抖断了 (错误是 output_interrupted),
+  应该<strong>从断点续</strong>, 不是从头跑</li>
+<li>LLM 返回 413 (上下文超限), 应该<strong>压缩历史后重试</strong>,
+  同样请求再发一遍还是 413</li>
+<li>LLM 返回 401 (config 错), 应该<strong>立刻 fail</strong>,
+  retry 100 次还是 401</li>
+<li>LLM 返回 429 (限流), 应该<strong>等几秒重试</strong> (网络可能恢复)</li>
 </ul>
 <p>
-  <strong>设计思想</strong>: <strong>动作类型枚举</strong> — 看
-  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L39"><code>src/recovery.ts</code> 第 39 行的 <code>RecoveryAction</code> union</a>:
+  朴素想法: "每种错误一个 handler 写 if-else?" 错。 7 类错
+  if-else 越写越长, 决策逻辑散在 agent.ts 各个角落。
+  正确做法: 7 类错 → <strong>4 种动作枚举</strong> (continue / compact /
+  backoff / fail), <strong>一一映射</strong>。 决策不能含糊,
+  每种错只对应一种动作。
 </p>
-<pre><code class="language-typescript">export type RecoveryAction = "continue" | "compact" | "backoff" | "fail";</code></pre>
 <div class="figure figure--compare">
   <div class="figure__title">图 2 · 4 种恢复动作的语义对比</div>
   <div class="flow-compare">
@@ -227,28 +283,70 @@
   </div>
 </div>
 <p>
-  <strong>实现细节</strong>: 4 种动作的<strong>协议</strong> —
-  continue / compact 在 agent.ts 调 LLM 之前, 由调用方负责执行
-  动作; backoff 在 LLM 调用之间, 调用 sleep(); fail 在最外层
-  try/catch 里 throw 或 return, 由 repl.ts 渲染中文提示。
+  4 种动作的<strong>协议</strong> (主循环怎么调):
 </p>
+<ul>
+<li><strong>continue / compact</strong>: 在 agent.ts 调 LLM 之前,
+  由调用方负责执行动作</li>
+<li><strong>backoff</strong>: 在 LLM 调用之间, 调用 <code>sleep()</code></li>
+<li><strong>fail</strong>: 在最外层 try/catch 里 throw 或 return,
+  由 repl.ts 渲染中文提示</li>
+</ul>
+<p>
+  <strong>实现</strong>: 4 种动作用 union 表达, 看
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L39"><code>src/recovery.ts</code> 第 39 行的 <code>RecoveryAction</code> union</a>:
+</p>
+<pre><code class="language-typescript">export type RecoveryAction = "continue" | "compact" | "backoff" | "fail";</code></pre>
 <h2 id="decide">decideRecovery 纯函数: 不在内部修改 state</h2>
 <p>
-  <strong>用途</strong>: 决策函数必须<strong>纯</strong> — 同样
-  输入永远同样输出, 不修改 state, 不调外部 API, 不读时间。
-  这才能单元测试覆盖。
+  <strong>场景: 决策函数该纯还是不纯</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 测试想验证"network + retry 5/5
-  → fail", 但如果 decideRecovery 内部 <code>state.apiRetryCount++</code>,
-  测一次后 state 变了, 第二次跑同样的输入, 期望 fail 但实际
-  backoff, 测试 flaky。 纯函数没这个问题, 同样的输入两次
-  都返回同样的动作。
+  上一节讲完 4 种动作, 接下来要实现 <code>decideRecovery(kind, state)</code>
+  决定该返回哪个动作。 朴素想法: "在 decideRecovery 内部
+  <code>state.apiRetryCount++</code> 省事, 不用调用方手动 ++。" 错。
+  看测试场景:
+</p>
+<pre class="code-block"><code>test("network + retry 5/5 -&gt; fail", () =&gt; {
+  // 第一次跑, state = {apiRetryCount: 5, ...}
+  expect(decideRecovery("network", state)).toBe("fail");
+  // ↑ 期望 fail
+});
+
+test("network + retry 5/5 -&gt; fail (再跑一次)", () =&gt; {
+  // 第二次跑, 同一份代码同一份 state, 期望也是 fail
+  expect(decideRecovery("network", state)).toBe("fail");
+});</code></pre>
+<p>
+  如果 decideRecovery 内部 <code>state.apiRetryCount++</code>, 第一次跑
+  完之后 state 变成 <code>{apiRetryCount: 6}</code>, 第二次跑同样的输入
+  期望 fail 但<strong>实际仍然 fail (因为 6 &gt; 5 也满足 fail 条件)</strong>,
+  好像没事? 但更复杂的 case (比如 retry counter 跨过 5/5 边界)
+  会出 flaky。 朴素想法 "内置 ++" 的本质问题是
+  <strong>函数不纯, 同样输入两次返回不一样</strong>。
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>决策 vs 执行分离</strong> —
-  decideRecovery 只<strong>算</strong>"应该做什么", 调方负责
-  "做"和"state++"。 看
+  <strong>正确做法: 决策和执行分离</strong>
+</p>
+<p>
+  <code>decideRecovery</code> 只<strong>算</strong>"应该做什么", <strong>不修改</strong>
+  state。 调用方负责"做" 和 "<code>state++</code>"。 这样:
+</p>
+<ul>
+<li>
+<strong>纯函数</strong>: 同样输入永远同样输出, <code>apiRetryCount: 5</code>
+  第一次跑返回 fail, 第二次跑还是 fail
+</li>
+<li>
+<strong>测试好写</strong>: 不用 setup 状态机, 直接传 state 值就能测
+</li>
+<li>
+<strong>日志清晰</strong>: 日志显示的次数和真实次数不会错位
+  (因为是调用方自己 ++, 不会有"决策算一次, 执行算一次" 的双计)
+</li>
+</ul>
+<p>
+  <strong>实现</strong>: 看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L198"><code>src/recovery.ts</code> 第 198 行的 <code>decideRecovery</code></a>:
 </p>
 <pre><code class="language-typescript">export function decideRecovery(
@@ -274,33 +372,57 @@
   }
 }</code></pre>
 <p>
-  <strong>实现细节</strong>: <strong>故意不在内部 ++</strong> —
-  注释里明确说"decideRecovery 是纯函数, 故意不在内部递增
-  state, 这样调用方能清楚控制什么时候消耗一次重试预算, 测试
-  也更容易覆盖。 常见坑: 在决策函数里顺手修改计数, 导致日志
-  显示次数和真实次数错位。"
-</p>
-<p>
-  默认参数 <code>config = DEFAULT_RECOVERY_CONFIG</code> 让调用方
-  不传 config 也能用 (用默认值), 但测试时显式传 small config
+  关键观察: 函数内<strong>不出现</strong> <code>state++</code> 或任何修改
+  state 的代码, 只读 state 算动作。 注释里明确说"decideRecovery
+  是纯函数, 故意不在内部递增 state"。 默认参数
+  <code>config = DEFAULT_RECOVERY_CONFIG</code> 让调用方不传 config
+  也能用 (用默认值), 但测试时显式传 small config
   (maxApiRetries: 0) 验证"立即 fail" 边界。
 </p>
 <h2 id="state-scope">RecoveryState 作用域: per-request, 不全局</h2>
 <p>
-  <strong>用途</strong>: 重试 budget 必须<strong>每次 agent.run()</strong>
-  重建, 不持久化, 不全局共享。 1 个 user 的 rate_limit 不应该
-  消耗下一个 user 的 budget。
+  <strong>场景: 重试 budget 该多大, 跨 request 共享吗</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 30 个 user 同时用 harness, user A
-  触发 rate_limit 重试 5 次后 fail, 但 user B 的 budget 也耗尽了
-  (因为全局共享), user B 第一次 LLM 调用就 fail。 这就是
-  "重试 budget 全局" 的惨案。
+  用户让 LLM 跑 5 分钟任务, 触发 rate_limit, 重试 5 次后 fail。
+  这个 "5 次 budget" 是这个用户的, 还是所有 user 共享的?
+  朴素想法 1: "全局变量, 简单。" 错。 30 个 user 同时用 harness,
+  user A 触发 rate_limit 重试 5 次后 fail, <strong>但 user B 的
+  budget 也耗尽了</strong> (因为全局共享), user B 第一次 LLM 调用
+  就直接 fail。 "重试 budget 全局" 的惨案。
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>作用域清晰</strong> — RecoveryState
-  的注释里明确写"单次 agent.run() 的恢复计数器, 不应该跨
-  user turn 复用"。 看
+  朴素想法 2: "持久化到磁盘, user 间不共享。" 也错。 持久化
+  意味着 user A 上次重试 4 次没 fail, 下次他请求过来,
+  budget 继承剩 1 次, 行为难预测。
+</p>
+<p>
+  <strong>正确做法</strong>: RecoveryState <strong>每次 agent.run() 重建</strong>,
+  不持久化, 不全局共享。 1 个 user 的 rate_limit 不消耗下一个
+  user 的 budget。 看具体:
+</p>
+<ul>
+<li><strong>user A 请求</strong>: <code>agent.run(query)</code> 第一行
+  <code>const recovery = createRecoveryState()</code>, 整个 run()
+  期间所有 retry 共享这一个 instance。</li>
+<li><strong>user A run() 返回</strong>: recovery 销毁, user A
+  的 budget 归零。</li>
+<li><strong>user B 请求</strong>: <strong>全新的</strong> RecoveryState,
+  5 次 budget 全在, 不受 user A 影响。</li>
+</ul>
+<p>
+  <strong>关键反直觉点</strong>: "run() 内部 retry 共享" vs
+  "跨 run 各自独立" 是两件事:
+</p>
+<ul>
+<li><strong>同 1 个 run() 内部</strong>: 5 次 budget <strong>共享</strong>
+  (不然 retry 4 次就 fail 太苛刻)</li>
+<li><strong>跨 run()</strong>: 5 次 budget <strong>各自独立</strong>
+  (不然 user A 拖垮 user B)</li>
+</ul>
+<p>
+  <strong>实现</strong>: 工厂函数而非全局变量, 强制"每次新建"。
+  看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L86"><code>src/recovery.ts</code> 第 86 行的 <code>createRecoveryState</code></a>:
 </p>
 <pre><code class="language-typescript">export function createRecoveryState(): RecoveryState {
@@ -308,27 +430,26 @@
   // 如果把它做成全局状态, 一个用户请求触发的 rate limit 可能导致下一个请求直接 fail。
   return { apiRetryCount: 0, compactRetryCount: 0, continueRetryCount: 0 };
 }</code></pre>
-<p>
-  <strong>实现细节</strong>: 工厂函数而非全局变量, 强制"每次
-  新建"。 agent.run(query) 第一行 <code>const recovery = createRecoveryState()</code>,
-  整个 run() 期间所有 retry 共享这一个 instance, run() 返回时
-  销毁。 这是 Reference 章节 "模式 1 · 工厂 + 闭包" 的应用 —
-  状态在闭包内, 外部不能 "误改全局"。
-</p>
 <h2 id="config">DEFAULT_RECOVERY_CONFIG: 5/1/2/3 秒的经验值</h2>
 <p>
-  <strong>用途</strong>: 给 4 个数字合理的默认值, 用户不传也能用。
-  教学项目优先<strong>直观</strong>而非<strong>通用</strong>, 把
-  经验值写死, 不开放配置中心。
+  <strong>场景: retry 数字定多少合理</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 默认 maxApiRetries=5, retryDelayMs=3000。
-  user 跑 5 次 retry × 3 秒 = 15 秒后 fail, 给用户"现在过载" 提示,
+  harness 没配, 用默认值。 朴素想法 1: "retry 100 次, 总能
+  成功吧?" 错。 100 × 3 秒 = 5 分钟, 用户卡 5 分钟, 体验
+  灾难。 朴素想法 2: "retry 0 次, 立刻 fail?" 也不行, 临时
+  网络抖 1 次就放弃, 太敏感。
+</p>
+<p>
+  <strong>正解: 经验值</strong>。 教学项目优先<strong>直观</strong>而非
+  <strong>通用</strong>, 把经验值写死, 不开放配置中心 (避免
+  "我的 retry 该设多少" 这种没答案的问题)。 默认
+  <code>maxApiRetries=5</code>, <code>retryDelayMs=3000</code>。 user 跑
+  5 次 retry × 3 秒 = 15 秒后 fail, 给用户"现在过载" 提示,
   不傻等 1 小时。
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>经验值 + 教学优先</strong> —
-  看
+  <strong>实现</strong>: 看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L75"><code>src/recovery.ts</code> 第 75 行的 <code>DEFAULT_RECOVERY_CONFIG</code></a>:
 </p>
 <pre><code class="language-typescript">export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
@@ -361,9 +482,42 @@
 </ul>
 <h2 id="prompt">3 段提示文案: notice / failure / reason</h2>
 <p>
-  <strong>用途</strong>: 用户在 REPL 看到的中文提示必须<strong>人话</strong>,
-  不能"Error: 429"。 3 段不同用途的提示:
+  <strong>场景: 用户在 REPL 看到 "Error: 429", 该怎么办</strong>
 </p>
+<p>
+  harness 触发 backoff 重试, 在 REPL 输 "Error: Request
+  failed with status code 429"。 用户看到一脸懵 —
+  "我什么都没干, 怎么 429 了? 等多久? 还是去充值?"
+</p>
+<p>
+  朴素想法 1: "复用 SDK 原始错误信息, 简单。" 错。 用户
+  看不懂英文 + HTTP 状态码, 不知道"现在该做啥"。
+  朴素想法 2: "统一用 'LLM 调用失败' 这一句?" 错。 不同
+  错误用户该做的<strong>动作</strong>不同:
+</p>
+<ul>
+<li>rate_limit → 等几秒 (网络可能恢复)</li>
+<li>quota → 去充值 (等 1 小时也是耗尽)</li>
+<li>credential → 检查 API key 配置 (retry 没用)</li>
+</ul>
+<p>
+  <strong>正确做法: 3 段不同用途的提示</strong>
+</p>
+<ol>
+<li>
+<strong>formatRecoveryNotice</strong> (恢复中): 告诉用户"系统
+  在等, 别急", 走 logger.warn。
+</li>
+<li>
+<strong>formatFailureMessage</strong> (最终失败): 告诉用户
+  <strong>具体该做什么</strong> ("去充值" / "改 config" / "等
+  几分钟"), 走 repl.ts 渲染。
+</li>
+<li>
+<strong>error.message</strong> (原始 SDK 错误): 附加在括号里
+  给开发者看, 用户看不懂但开发调试要。
+</li>
+</ol>
 <div class="figure figure--stack">
   <div class="figure__title">图 3 · 3 段提示文案的边界</div>
   <div class="flow-stack">
@@ -390,19 +544,28 @@
 </p>
 <h2 id="sleep">sleep: 单独导出, 测试可 mock</h2>
 <p>
-  <strong>用途</strong>: backoff 动作需要 sleep, 但单测不应该
-  真等 3 秒。 把 sleep 单独导出, 测试用 <code>vi.useFakeTimers()</code>
-  mock, 跑 1000 个 retry 测试也不会真等。
+  <strong>场景: 测试 backoff 要等多久</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 测试"network 重试 5 次, 第 6 次
-  succeed", 不 mock sleep 就要等 5×3=15 秒, vitest 跑 100 个
-  recovery 测试要 25 分钟。 mock 之后瞬时跑完。
+  测试想验证 "network 重试 5 次, 第 6 次 succeed" 的行为。
+  朴素写法: 跑测试, 真的 <code>await sleep(3000)</code> 5 次, 测试
+  本身要 15 秒。 写 100 个 recovery 测试, vitest 跑 25 分钟。
+  写 1 个测试改一下, 25 分钟, 改完再跑 25 分钟, 一天就
+  过去了。
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>副作用提出来</strong> — sleep
-  是副作用, 应该<strong>可替换</strong>, 不内联在 backoff
-  流程里。 看
+  <strong>朴素想法 1: "把 sleep 直接 mock 掉?"</strong>
+  错。 <code>sleep</code> 在 agent.ts 内部 <code>setTimeout</code>
+  调用, 测试没法 mock 内部调用, 只能等真时间。
+</p>
+<p>
+  <strong>正解: 副作用提出来</strong> — sleep 是<strong>副作用</strong>,
+  应该<strong>可替换</strong>, 不内联在 backoff 流程里。 单独
+  导出, 测试用 <code>vi.useFakeTimers()</code> mock, 跑 1000 个
+  retry 测试也不会真等。 mock 之后瞬时跑完, 100 个测试 5 秒。
+</p>
+<p>
+  <strong>实现</strong>: 看
   <a href="https://github.com/pingp76/swoopcode/blob/main/src/recovery.ts#L318"><code>src/recovery.ts</code> 第 318 行的 <code>sleep</code></a>:
 </p>
 <pre><code class="language-typescript">export function sleep(ms: number): Promise&lt;void&gt; {
@@ -416,7 +579,24 @@
 </p>
 <h2 id="loop-integration">主循环集成: 4 个恢复点</h2>
 <p>
-  <strong>用途</strong>: recovery 模块在 agent.ts 集成有 4 个点:
+  <strong>场景: agent 主循环怎么调 recovery</strong>
+</p>
+<p>
+  前面讲了 classifyLLMError / decideRecovery / sleep /
+  formatFailureMessage 各自怎么实现, 接下来是"<strong>怎么
+  拼到主循环</strong>"。 朴素想法 1: "agent.ts 调一次
+  classifyLLMError, 调一次 decideRecovery, 调一次 sleep,
+  调一次 formatFailureMessage, 散在 4 个地方?" 错。 散在
+  4 个地方意味着: 想改 recovery 行为, 要去 4 个地方改,
+  容易漏。
+</p>
+<p>
+  <strong>正确做法: 4 个恢复点</strong>
+</p>
+<p>
+  集中在 agent.ts 第 3 步 (call LLM) 内部, 用 <code>switch</code>
+  走 4 个分支。 公共部分 (state 递增 + 日志) 提到 switch
+  之前。 4 个恢复点:
 </p>
 <ol>
 <li>
@@ -449,19 +629,27 @@
 </p>
 <h2 id="fake-test">fake test: 纯函数覆盖 4 种动作</h2>
 <p>
-  <strong>用途</strong>: recovery 模块的测试<strong>不需要</strong>
-  LLM, 纯函数测试, 输入错误 + state, 期望动作。 这是教学版
-  最大优势 — 业务逻辑和副作用彻底分离, 测业务逻辑零成本。
+  <strong>场景: 写 recovery 测试要多久</strong>
 </p>
 <p>
-  <strong>真实场景</strong>: 用户写测试覆盖 4 种动作的 12 个
-  边界 (4 动作 × 3 状态), 加上 classifyLLMError 的 7 类错误
-  分类测试, 总共 20 个单测覆盖 recovery 模块, 5 分钟跑完。
+  用户想给 recovery 模块加单测, 验证 4 种动作 × 3 状态 = 12
+  边界, 加上 classifyLLMError 7 类错误分类, 总共 20 个 case。
+  朴素想法: "拉一个真 LLM 起来, 调 20 次 chat() 模拟错误?"
+  错。 拉真 LLM 慢 (每次 1-2 秒), 还要构造各种错误响应, 20
+  个测试跑 1 分钟, 写测试的痛苦大于写代码。
 </p>
 <p>
-  <strong>设计思想</strong>: <strong>纯函数 = 单元测试黄金</strong> —
-  decideRecovery / classifyLLMError 都是纯函数, 同样输入永远同样
-  输出, 测试不需要 setup/teardown。 看测试示例:
+  <strong>正解: 不需要 LLM</strong>
+</p>
+<p>
+  decideRecovery / classifyLLMError 都是<strong>纯函数</strong>:
+  同样输入永远同样输出, 不修改 state, 不调外部 API。 测
+  业务逻辑<strong>零成本</strong>, 不需要 setup/teardown, 不需要
+  mock LLM, 不需要等真时间。 这是教学版最大优势 — 业务逻辑
+  和副作用彻底分离, 测业务逻辑 5 分钟跑完 20 个 case。
+</p>
+<p>
+  <strong>实现</strong>: 看测试示例:
 </p>
 <pre><code class="language-typescript">test("network + 0/5 -&gt; backoff", () =&gt; {
   expect(decideRecovery("network", { apiRetryCount: 0, compactRetryCount: 0, continueRetryCount: 0 }))
@@ -509,27 +697,44 @@ test("decideRecovery 是纯函数: 同样输入多次调用结果相同", () =&g
 </p>
 <h2 id="common-confusion">常见误解: 4 种动作 ≠ 重试次数</h2>
 <p>
-  <strong>误解 1: "所有错误都 retry N 次?"</strong> 错。 4 种
-  动作<strong>类型</strong>不同, 不是次数不同。 context_length
-  retry 5 次 = 浪费 5 次 budget 在不可能成功的请求上, 应该
+  这一节列 4 个最容易踩的坑, 每个用一句话说清"错在哪, 对在哪"。
+</p>
+<p>
+  <strong>误解 1 · "所有错误都 retry 5 次?"</strong>
+</p>
+<p>
+  错。 4 种动作是<strong>类型</strong>不同, 不是次数不同。
+  context_length retry 5 次 = 浪费 5 次 budget 在不可能成功的
+  请求上 (同样的请求, 同样的超长 history, 同样会 413)。 应该
   compact 1 次仍 fail 就 fail。
 </p>
 <p>
-  <strong>误解 2: "quota 等一下就好?"</strong> 错。 quota = 余额
-  耗尽, 等 1 小时还是耗尽, 必须 fail 提示用户充值。 rate_limit
-  ≠ quota, 两者都可能是 429, 但 message 含 quota/billing 关键字
-  是 quota, 否则是 rate_limit。
+  <strong>误解 2 · "quota 等一下就好?"</strong>
 </p>
 <p>
-  <strong>误解 3: "decideRecovery 应该自己 +1?"</strong> 错。
-  决策和执行分离 — decide 只算"应该做什么", 调用方负责"做"
-  和 "state++"。 内置 ++ 会让日志和真实次数错位, 测试也难。
+  错。 quota = 余额耗尽, 等 1 小时还是耗尽, 必须 fail 提示
+  用户充值。 rate_limit ≠ quota, 两者都可能是 HTTP 429, 但
+  message 含 <code>quota</code> / <code>insufficient_quota</code> /
+  <code>billing</code> 关键字是 quota, 否则是 rate_limit。
+  关键字是判别依据, 不是看 HTTP 状态码。
 </p>
 <p>
-  <strong>误解 4: "formatFailureMessage 是装饰, 可选?"</strong>
+  <strong>误解 3 · "decideRecovery 应该自己 +1?"</strong>
+</p>
+<p>
+  错。 决策和执行分离 — decide 只算"应该做什么", 调用方负责
+  "做" 和 "state++"。 内置 ++ 会让日志显示的次数和真实次数
+  错位 (第 235 行"decideRecovery 纯函数" 详细讲过), 测试也难
+  (因为函数不纯)。
+</p>
+<p>
+  <strong>误解 4 · "formatFailureMessage 是装饰, 可选?"</strong>
+</p>
+<p>
   错。 用户<strong>看不懂</strong> "Error: 429", 必须有
-  中文 failure message 告诉用户"现在过载, 等下再试" 或
-  "余额不足, 去充值"。 这不是 nice-to-have, 是核心功能。
+  中文 failure message 告诉用户 "现在过载, 等下再试" 或
+  "余额不足, 去充值"。 这不是 nice-to-have, 是核心功能 —
+  没有中文消息, 用户只能猜 "为什么我的 harness 卡死了"。
 </p>
 <h2 id="trap">反例梯度: 4 个常见错误</h2>
 <div class="cards-grid">

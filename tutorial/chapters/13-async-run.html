@@ -44,29 +44,185 @@
   </li>
 </ol>
 <p>
-  朴素想法 1: "直接用 Node child_process.spawn 不 await?"
-  半对。 spawn 返回子进程 PID 不 await, 但 LLM 不知道什么时候
-  跑完, 怎么读输出, 怎么让用户看到结果。 需要一个 Async Run
-  Manager 集中管理。
+  朴素想法 1: "直接用 Node <code>child_process.spawn</code> 不
+  await?" 半对。 spawn 返回子进程 PID 不 await, 但 LLM 不知道
+  什么时候跑完, 怎么读输出, 怎么让用户看到结果。 需要一个
+  Async Run Manager 集中管理这些"后台跑的事", 把"启动 / 等
+  通知 / 读输出" 三个动作串起来。
 </p>
 <p>
-  朴素想法 2: "无限制并发?" 错。 LLM 一次想跑 100 个, 把 API
-  quota 烧光, 用户账号被 ban。 需要<strong>并发限制 3</strong>
-  (经验值), 超过就 reject。
+  朴素想法 2: "无限制并发?" 错。 LLM 一次想跑 100 个 npm test,
+  把 API quota 烧光, 用户账号被 ban; 或者把磁盘 / 内存吃满,
+  harness 自己崩。 需要<strong>并发限制</strong>, 超过就 reject
+  或排队。
 </p>
 <p>
-  正确做法: 加 <code>src/async-runs.ts</code> — <code>createAsyncRunManager</code>
-  工厂, 内部状态 (records + runningCount + finishedRunIds) 全
-  在闭包。 <code>finishRun</code> 是<strong>所有</strong>执行
-  路径 (命令完成 / 超时 / 异常 / shutdown) 汇合的<strong>唯一</strong>
-  入口, 保证幂等。 看
-  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L13"><code>src/async-runs.ts</code> 第 13 行的核心正确性保证注释</a>:
+  正确做法: 加 1 个 <code>src/async-runs.ts</code> 模块, 用
+   <code>createAsyncRunManager</code> 工厂创建管理器。 管理器
+  内部有 3 件事: 维护所有 run 的记录 (records), 维护当前在跑
+  的数量 (runningCount), 维护已经跑完的 id 集合 (finishedRunIds
+  — 防止同一 run 被多次算完成)。 全部状态<strong>藏在闭包里</strong>,
+  外面只通过 manager 暴露的方法 (start / read / drain / list)
+  改, 改不全就会出 bug, 这就是为什么状态要集中。
 </p>
+<p>
+  为什么需要"唯一入口"? 因为后台 run 跑完有<strong>4 条不同
+  的路径</strong>都能让它进入"完成" 状态: (1) 命令正常跑完;
+  (2) 超过 timeoutSeconds; (3) 进程异常崩溃; (4) 整个 harness
+  被 shutdown 关闭。 如果 4 条路径<strong>各自</strong>去改
+  record.status 和 runningCount, 就会出现 race: 比如 timeout
+  触发的同一瞬间命令也跑完了, 两次都把 runningCount 减 1, 实际
+  应该是 0 而不是 -1。 所以 4 条路径必须<strong>汇合到 1 个
+   <code>finishRun</code> 函数</strong>, 内部用一个
+  <code>finishedRunIds: Set</code> 标记"已经处理过的 run",
+  第一个进入的 wins, 后续的 no-op — 这就是<strong>幂等</strong>
+  (多次调用结果跟 1 次一样)。
+</p>
+<h2 id="vocabulary">先梳理语言: 8 个核心概念是什么</h2>
+<p>
+  上面看到痛点和朴素方案, 这一节<strong>先给词表</strong>。
+  Async Run 模块用了 8 个核心概念, 后面 10 个小节会反复出现,
+  名字听起来相似 (Async Run / Async Run Record / Async Run
+  Notification / Run Id / Run Output ...), 第一次看容易混。
+  这一节<strong>先梳理</strong>一遍, 后面读各小节脑子里有锚点。
+</p>
+<p>
+  <strong>8 个概念分 3 组</strong>:
+</p>
+<h3>1. entity (3 个, 持久或临时数据)</h3>
+<ul>
+<li>
+<strong>AsyncRunRecord</strong>: 1 次 Async Run 的<strong>完整记录</strong>,
+  包含 id / executor / title / status / startedAt / finishedAt /
+  durationMs / preview / outputId 等。 1 个 run = 1 个 record,
+  存在 manager 内存的 Map 里, 进程退出即销毁。
+</li>
+<li>
+<strong>AsyncRunNotification</strong>: Async Run <strong>完成/失败/
+  超时</strong>后, 写入通知队列的<strong>简短摘要</strong>, LLM 下一轮
+  drain 看到。 不含完整输出 (完整输出通过 outputId 读)。
+  跟 Record 的区别: Record 是"完整档案", Notification 是"通知消息"。
+</li>
+<li>
+<strong>outputId</strong>: 大输出的<strong>文件引用</strong>, 存在
+  <code>OutputStore</code> (LRU 内存索引 + 文件系统)。 LLM 收到
+  Notification 时只看 preview (前 N 字符), 想看全文就
+  <code>read_output(outputId)</code>。
+</li>
+</ul>
+<h3>2. lifecycle (3 个, 描述 run 的状态转换)</h3>
+<ul>
+<li>
+<strong>running</strong>: Async Run 启动后到完成前 (含 command 在跑 /
+  subagent 跑中), 状态 = <code>running</code>。 占 1 个并发名额。
+</li>
+<li>
+<strong>terminal status</strong> (5 个): <code>completed</code> /
+  <code>failed</code> / <code>timeout</code> / <code>abandoned</code>。
+  进入后<strong>不再</strong>改回 running, 不再占并发名额。
+</li>
+<li>
+<strong>finishRun</strong>: Async Run 走到终态的<strong>唯一入口</strong>,
+  4 个执行路径 (命令完成 / 超时 / 异常 / shutdown) 都汇合到
+  finishRun。 用 <code>finishedRunIds: Set</code> 标记保证幂等 —
+  第一个 wins, 后续 no-op。 真实代码里
+  <a href="https://github.com/pingp76/swoopcode/blob/main/src/async-runs.ts#L13"><code>src/async-runs.ts</code> 第 13 行的核心正确性保证注释</a> 写明 4 条不变量:
+</li>
+</ul>
 <pre><code class="language-typescript">// 核心正确性保证: finishRun() 是所有终态收敛的唯一入口, 确保:
 // 1. 只有 running → 终态的转换有效
 // 2. 第一个进入终态的路径 wins (通过 Set 保证)
 // 3. late result 不能覆盖 timeout
 // 4. 不重复递减 runningCount、不重复推送 notification</code></pre>
+<h3>3. action (2 个, LLM 怎么调)</h3>
+<ul>
+<li>
+<strong>start</strong>: LLM 调 <code>async_run_start(...)</code>, manager
+  启动后台 run, 立即返回 run_id。 LLM 不用 await, 继续干别的。
+</li>
+<li>
+<strong>drain</strong>: LLM 调 <code>async_run_drain()</code>, 拿到所有
+  未读 notification 队列。 下一轮 LLM 调用前必调一次, 让 LLM
+  看到 "刚才那个 run 跑完了"。
+</li>
+</ul>
+<p>
+  <strong>8 个概念的关系</strong>:
+</p>
+<pre class="code-block"><code>  LLM 调 start()
+      │
+      ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  AsyncRunManager (闭包, 内存)                                │
+  │                                                              │
+  │  ┌─────────────────────────┐   ┌────────────────────────┐ │
+  │  │  records: Map&lt;id,        │   │  notification queue:    │ │
+  │  │         AsyncRunRecord&gt; │   │  AsyncRunNotification[] │ │
+  │  │  - run_id → Record      │   │  - 短摘要                │ │
+  │  │  - 含完整数据            │   │  - 排队等 LLM drain     │ │
+  │  └─────────────────────────┘   └────────────────────────┘ │
+  │            │                              │                 │
+  │            │ outputId                    │                 │
+  │            ▼                              │                 │
+  │  ┌─────────────────────────────────────────┐               │
+  │  │  OutputStore (LRU)                       │               │
+  │  │  - 大输出文件 (output.txt)               │               │
+  │  │  - 内存索引 record.outputId → file       │               │
+  │  └─────────────────────────────────────────┘               │
+  └────────────────────────────────────────────────────────────┘
+                  │
+                  │ finishRun (唯一收敛点, 幂等)
+                  ▼
+        ┌────────────────────┐
+        │ 5 个终态之一:        │
+        │ completed/failed/   │
+        │ timeout/abandoned   │
+        │ 释放 1 个并发名额    │
+        └────────────────────┘
+                  │
+                  │ 入队 notification
+                  ▼
+        LLM 下一轮调 drain() 看到摘要
+        想要全文 → read_output(outputId) 读 OutputStore</code></pre>
+<p>
+  <strong>具体例子: "LLM 派 1 个 npm test run" 的完整生命周期</strong>
+</p>
+<ol>
+<li>
+<strong>启动</strong>: LLM 调 <code>async_run_start({executor: "command",
+   command: "npm test", timeoutMs: 300000})</code>, manager 创
+   AsyncRunRecord (status=running, startedAt=now), 启动后台
+   执行, <strong>立即返回</strong> run_id="ar_20260615_153000_a1b2"。
+  LLM 不用等, 继续干别的。
+  </li>
+<li>
+<strong>运行中</strong>: 5 分钟内 manager 内部 <code>runningCount=1</code>,
+   record.status 一直 <code>running</code>。
+  </li>
+<li>
+<strong>完成</strong>: npm test 跑完, 调 <code>finishRun(record,
+   "completed", output)</code>, record.status 变 <code>completed</code>,
+   <code>runningCount=0</code>, 完整输出 (5MB 日志) 写到
+   <code>OutputStore</code> 拿 outputId="out_xyz", 入队一条
+   AsyncRunNotification (含 preview + outputId)。
+  </li>
+<li>
+<strong>LLM drain</strong>: LLM 下一轮调 <code>async_run_drain()</code>,
+   拿到 notification: "ar_20260615_153000_a1b2 completed,
+   5000 chars, outputId=out_xyz"。
+  </li>
+<li>
+<strong>LLM 读全文</strong>: LLM 想看 5MB 日志, 调
+   <code>async_run_output_read({runId: "ar_...", maxBytes: 20000})</code>,
+   manager 查 record.outputId 去 OutputStore 读全文。
+  </li>
+</ol>
+<p>
+  看完这 8 个概念和具体例子, 后面 10 个小节 (executor / 并发
+  限制 / finishRun 幂等 / 输出隔离 / notification 队列 / shutdown /
+  foreground conflict / 主循环集成 / fake test / 反例梯度) 都
+  是在讲这 8 个概念的<strong>细节</strong>。
+</p>
 <h2 id="run-vs-task">Async Run vs Task: 执行层 vs 计划层</h2>
 <p>
   <strong>用途</strong>: Task 是<strong>计划层</strong> (跨会话
